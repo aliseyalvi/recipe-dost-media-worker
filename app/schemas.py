@@ -1,25 +1,39 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ProcessJobRequest(BaseModel):
     media_job_id: UUID
+    force: bool = False
+    force_reset_attempt_budget: bool = False
 
 
 class HealthResponse(BaseModel):
     ok: Literal[True] = True
     service: Literal["recipe-dost-media-worker"] = "recipe-dost-media-worker"
-    mode: Literal["skeleton"] = "skeleton"
+    worker_mode: str
+    gemini_configured: bool
+    gemini_video_model: str
+    gemini_video_fallback_models_count: int
+    gemini_max_calls_per_job: int
+    gemini_daily_dev_call_limit: int
+    enable_gemini_repair_call: bool
+    enable_gemini_fallbacks: bool
+    disabled_models: list[str]
+    daily_model_limits: dict[str, int]
+    budget_reset_at: Optional[str]
 
 
 class MediaJobData(BaseModel):
     media_job_id: UUID
     status: str
     progress: int = Field(ge=0, le=100)
+    error_code: Optional[str] = None
+    accepted: bool = False
 
 
 class ProcessJobResponse(BaseModel):
@@ -39,7 +53,94 @@ class ErrorResponse(BaseModel):
 
 class MediaJobRecord(BaseModel):
     id: UUID
+    user_id: UUID
+    recipe_item_id: Optional[UUID]
+    source_url: str
+    platform: str
     status: str
     progress: int = Field(ge=0, le=100)
+    thumbnail_url: Optional[str] = None
+    result_recipe_card_id: Optional[UUID] = None
+    error_code: Optional[str] = None
+    started_at: Optional[str] = None
 
     model_config = ConfigDict(extra="ignore")
+
+
+class RecipeIngredient(BaseModel):
+    name_en: str
+    name_ur: str
+    quantity: str
+    notes_en: str
+    notes_ur: str
+
+
+class RecipeStep(BaseModel):
+    step_number: int = Field(ge=1)
+    instruction_en: str
+    instruction_ur: str
+    tip_en: str
+    tip_ur: str
+
+
+class GroceryItem(BaseModel):
+    name_en: str
+    name_ur: str
+    quantity: str
+
+
+class GeminiRecipeResult(BaseModel):
+    recipe_title_en: str
+    recipe_title_ur: str
+    short_summary_en: str
+    short_summary_ur: str
+    confidence: str
+    prep_time_minutes: Optional[int]
+    cook_time_minutes: Optional[int]
+    servings: Optional[str]
+    difficulty: str
+    ingredients: list[RecipeIngredient]
+    steps: list[RecipeStep]
+    grocery_list: list[GroceryItem]
+    missing_info_en: list[str]
+    missing_info_ur: list[str]
+    storage_tip_en: str
+    storage_tip_ur: str
+    safety_note_en: str
+    safety_note_ur: str
+    source_assumptions_en: list[str]
+    source_assumptions_ur: list[str]
+
+    model_config = ConfigDict(extra="ignore")
+
+    @field_validator(
+        "ingredients",
+        "steps",
+        "grocery_list",
+        "missing_info_en",
+        "missing_info_ur",
+        "source_assumptions_en",
+        "source_assumptions_ur",
+        mode="before",
+    )
+    @classmethod
+    def require_array(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            raise ValueError("Expected an array.")
+        return value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def clamp_confidence(cls, value: Any) -> str:
+        normalized = str(value).strip().lower()
+        return normalized if normalized in {"low", "medium", "high"} else "low"
+
+    @field_validator("difficulty", mode="before")
+    @classmethod
+    def clamp_difficulty(cls, value: Any) -> str:
+        normalized = str(value).strip().lower()
+        return (
+            normalized
+            if normalized in {"easy", "medium", "hard", "unknown"}
+            else "unknown"
+        )

@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime
 from uuid import UUID
 
 from supabase import Client, create_client
 
 from app.config import Settings
-from app.schemas import MediaJobRecord
+from app.ai.gemini_recipe import PROMPT_VERSION
+from app.schemas import GeminiRecipeResult, MediaJobRecord
 
-
+MEDIA_JOB_SELECT = (
+    "id,user_id,recipe_item_id,source_url,platform,status,progress,"
+    "thumbnail_url,result_recipe_card_id,error_code,started_at"
+)
 class MediaJobRepository:
     def __init__(self, client: Client) -> None:
         self._client = client
@@ -16,7 +21,7 @@ class MediaJobRepository:
     def get_job(self, media_job_id: UUID) -> MediaJobRecord | None:
         response = (
             self._client.table("media_jobs")
-            .select("id,status,progress")
+            .select(MEDIA_JOB_SELECT)
             .eq("id", str(media_job_id))
             .limit(1)
             .execute()
@@ -33,6 +38,12 @@ class MediaJobRepository:
         progress: int | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        thumbnail_url: str | None = None,
+        result_recipe_card_id: UUID | None = None,
+        ai_provider: str | None = None,
+        ai_model: str | None = None,
+        completed_at: str | None = None,
+        started_at: str | None = None,
     ) -> MediaJobRecord:
         values: dict[str, Any] = {
             "status": status,
@@ -41,12 +52,24 @@ class MediaJobRepository:
         }
         if progress is not None:
             values["progress"] = progress
+        if thumbnail_url is not None:
+            values["thumbnail_url"] = thumbnail_url
+        if result_recipe_card_id is not None:
+            values["result_recipe_card_id"] = str(result_recipe_card_id)
+        if ai_provider is not None:
+            values["ai_provider"] = ai_provider
+        if ai_model is not None:
+            values["ai_model"] = ai_model
+        if completed_at is not None:
+            values["completed_at"] = completed_at
+        if started_at is not None:
+            values["started_at"] = started_at
 
         response = (
             self._client.table("media_jobs")
             .update(values)
             .eq("id", str(media_job_id))
-            .select("id,status,progress")
+            .select(MEDIA_JOB_SELECT)
             .execute()
         )
         if not response.data:
@@ -70,6 +93,166 @@ class MediaJobRepository:
             }
         ).execute()
 
+    def count_job_gemini_calls(
+        self,
+        media_job_id: UUID,
+        *,
+        since_latest_worker_start: bool = True,
+    ) -> int:
+        since: str | None = None
+        if since_latest_worker_start:
+            latest = (
+                self._client.table("media_job_events")
+                .select("created_at")
+                .eq("media_job_id", str(media_job_id))
+                .eq("event_type", "worker_started")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if latest.data:
+                since = latest.data[0]["created_at"]
+        return self._count_gemini_events(
+            event_types=("gemini_api_call_started",),
+            media_job_id=media_job_id,
+            since=since,
+        )
+
+    def count_daily_gemini_calls(
+        self,
+        utc_day_start: datetime,
+        *,
+        model: str | None = None,
+    ) -> int:
+        since = utc_day_start.isoformat()
+        query = (
+            self._client.table("media_job_events")
+            .select("id", count="exact", head=True)
+            .eq("event_type", "gemini_api_call_started")
+            .gte("created_at", since)
+        )
+        if model is not None:
+            query = query.contains("metadata", {"model": model})
+        return int(query.execute().count or 0)
+
+    def _count_gemini_events(
+        self,
+        *,
+        event_types: tuple[str, ...],
+        media_job_id: UUID | None = None,
+        since: str | None = None,
+    ) -> int:
+        query = (
+            self._client.table("media_job_events")
+            .select("id", count="exact", head=True)
+            .in_("event_type", list(event_types))
+        )
+        if media_job_id is not None:
+            query = query.eq("media_job_id", str(media_job_id))
+        if since is not None:
+            query = query.gte("created_at", since)
+        return int(query.execute().count or 0)
+
+    def update_recipe_thumbnail(
+        self,
+        *,
+        recipe_item_id: UUID,
+        user_id: UUID,
+        thumbnail_url: str,
+    ) -> None:
+        (
+            self._client.table("recipe_items")
+            .update({"thumbnail_url": thumbnail_url})
+            .eq("id", str(recipe_item_id))
+            .eq("user_id", str(user_id))
+            .execute()
+        )
+
+    def insert_recipe_card(
+        self,
+        *,
+        job: MediaJobRecord,
+        result: GeminiRecipeResult,
+        model: str,
+    ) -> UUID:
+        if job.recipe_item_id is None:
+            raise ValueError("Media job has no recipe item.")
+
+        ingredients = [
+            {
+                **item.model_dump(mode="json"),
+                "name": item.name_en,
+                "notes": item.notes_en,
+            }
+            for item in result.ingredients
+        ]
+        steps = [
+            {
+                **item.model_dump(mode="json"),
+                "instruction": item.instruction_en,
+                "tip": item.tip_en,
+            }
+            for item in result.steps
+        ]
+        grocery_list = [
+            {**item.model_dump(mode="json"), "name": item.name_en}
+            for item in result.grocery_list
+        ]
+
+        response = (
+            self._client.table("recipe_cards")
+            .insert(
+                {
+                    "recipe_id": str(job.recipe_item_id),
+                    "user_id": str(job.user_id),
+                    "recipe_title": result.recipe_title_en,
+                    "short_summary": result.short_summary_en,
+                    "ingredients_json": ingredients,
+                    "steps_json": steps,
+                    "time_json": {
+                        "prep_time_minutes": result.prep_time_minutes,
+                        "cook_time_minutes": result.cook_time_minutes,
+                        "prep_minutes": result.prep_time_minutes,
+                        "cook_minutes": result.cook_time_minutes,
+                        "total_minutes": add_optional_minutes(
+                            result.prep_time_minutes,
+                            result.cook_time_minutes,
+                        ),
+                    },
+                    "servings": result.servings,
+                    "difficulty": result.difficulty,
+                    "grocery_list_json": grocery_list,
+                    "missing_info_json": bilingual_list(
+                        result.missing_info_en,
+                        result.missing_info_ur,
+                    )
+                    + bilingual_list(
+                        result.source_assumptions_en,
+                        result.source_assumptions_ur,
+                        prefix="Assumption: ",
+                    ),
+                    "storage_tip": bilingual_text(
+                        result.storage_tip_en,
+                        result.storage_tip_ur,
+                    ),
+                    "safety_note": bilingual_text(
+                        result.safety_note_en,
+                        result.safety_note_ur,
+                    ),
+                    "confidence": result.confidence,
+                    "source_link": job.source_url,
+                    "model_used": model,
+                    "prompt_version": PROMPT_VERSION,
+                }
+            )
+            .select("id")
+            .execute()
+        )
+        if not response.data:
+            raise RuntimeError("Recipe card insert returned no row.")
+        row = response.data[0] if isinstance(response.data, list) else response.data
+        return UUID(str(row["id"]))
+
 
 def create_repository(settings: Settings) -> MediaJobRepository:
     client = create_client(
@@ -77,3 +260,32 @@ def create_repository(settings: Settings) -> MediaJobRepository:
         settings.supabase_service_role_key.get_secret_value(),
     )
     return MediaJobRepository(client)
+
+
+def bilingual_text(english: str, urdu: str) -> str:
+    if english and urdu:
+        return f"{english}\n\nاردو: {urdu}"
+    return english or urdu
+
+
+def bilingual_list(
+    english_items: list[str],
+    urdu_items: list[str],
+    *,
+    prefix: str = "",
+) -> list[str]:
+    length = max(len(english_items), len(urdu_items))
+    return [
+        prefix
+        + bilingual_text(
+            english_items[index] if index < len(english_items) else "",
+            urdu_items[index] if index < len(urdu_items) else "",
+        )
+        for index in range(length)
+    ]
+
+
+def add_optional_minutes(first: int | None, second: int | None) -> int | None:
+    if first is None and second is None:
+        return None
+    return (first or 0) + (second or 0)

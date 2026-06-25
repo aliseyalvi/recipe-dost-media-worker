@@ -6,10 +6,11 @@ import logging
 from typing import Annotated, Any, Optional, Union
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.ai.gemini_recipe import GeminiRecipeAnalyzer
 from app.config import Settings, get_settings
 from app.job_runner import JobNotFoundError, JobRunner, WorkerProcessingError
 from app.schemas import (
@@ -104,8 +105,22 @@ def handle_request_validation(
 
 
 @app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    return HealthResponse()
+def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
+    return HealthResponse(
+        worker_mode=settings.worker_mode,
+        gemini_configured=settings.gemini_configured,
+        gemini_video_model=settings.effective_gemini_video_model,
+        gemini_video_fallback_models_count=len(
+            settings.gemini_video_fallback_models
+        ),
+        gemini_max_calls_per_job=settings.gemini_max_calls_per_job,
+        gemini_daily_dev_call_limit=settings.gemini_daily_dev_call_limit,
+        enable_gemini_repair_call=settings.enable_gemini_repair_call,
+        enable_gemini_fallbacks=settings.enable_gemini_fallbacks,
+        disabled_models=settings.gemini_disabled_models,
+        daily_model_limits=settings.gemini_daily_dev_model_limits,
+        budget_reset_at=settings.gemini_dev_budget_reset_at,
+    )
 
 
 @app.post(
@@ -120,12 +135,43 @@ def health() -> HealthResponse:
 )
 def process_job(
     request: ProcessJobRequest,
+    background_tasks: BackgroundTasks,
     _authorized: None = Depends(require_worker_secret),
     settings: Settings = Depends(get_settings),
 ) -> Union[ProcessJobResponse, JSONResponse]:
     try:
-        runner = JobRunner(create_repository(settings))
-        data = runner.run(request.media_job_id)
+        analyzer = None
+        if settings.gemini_api_key is not None:
+            analyzer = GeminiRecipeAnalyzer(
+                api_key=settings.gemini_api_key.get_secret_value(),
+                model=settings.effective_gemini_video_model,
+                text_model=settings.effective_gemini_text_model,
+                fallback_models=(
+                    settings.gemini_video_fallback_models
+                    if settings.enable_gemini_fallbacks
+                    else []
+                ),
+                max_retries=settings.gemini_max_retries,
+                retry_base_seconds=settings.gemini_retry_base_seconds,
+            )
+        runner = JobRunner(
+            create_repository(settings),
+            analyzer,
+            worker_mode=settings.worker_mode,
+            app_env=settings.app_env,
+            gemini_max_calls_per_job=settings.gemini_max_calls_per_job,
+            gemini_daily_dev_call_limit=settings.gemini_daily_dev_call_limit,
+            gemini_disabled_models=settings.gemini_disabled_models,
+            gemini_daily_dev_model_limits=settings.gemini_daily_dev_model_limits,
+            gemini_dev_budget_reset_at=settings.gemini_dev_budget_reset_at,
+        )
+        data, should_process = runner.accept(
+            request.media_job_id,
+            force=request.force,
+            force_reset_attempt_budget=request.force_reset_attempt_budget,
+        )
+        if should_process:
+            background_tasks.add_task(runner.run, request.media_job_id, True)
         return ProcessJobResponse(data=data)
     except JobNotFoundError:
         return error_response("job_not_found", "Media job not found.", 404)
