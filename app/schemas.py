@@ -54,8 +54,12 @@ class HealthResponse(BaseModel):
     yt_dlp_version: str
     enable_tikwm_resolver: bool
     tikwm_configured: bool
+    tikwm_enabled_platforms: list[str]
     tikwm_hd: bool
     tikwm_probe_bytes: int
+    enable_cobalt_resolver: bool
+    cobalt_configured: bool
+    cobalt_enabled_platforms: list[str]
 
 
 class MediaJobData(BaseModel):

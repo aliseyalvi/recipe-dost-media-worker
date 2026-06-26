@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
 import requests
 
 from app.config import Settings
+from app.social.models import SocialResolverError, SocialVideoInfo
 
 TIKTOK_HOSTS = {
     "tiktok.com",
@@ -18,37 +18,32 @@ TIKTOK_HOSTS = {
 }
 
 
-class TikWMResolverError(Exception):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(code)
-        self.code = code
-        self.message = message
+def resolve_tikwm_metadata(source_url: str, settings: Settings) -> SocialVideoInfo:
+    return resolve_with_tikwm(source_url, "tiktok", settings)
 
 
-@dataclass(frozen=True)
-class TikWMInfo:
-    platform: str
-    resolver: str
-    video_id: str | None
-    title: str | None
-    thumbnail_url: str | None
-    duration_seconds: float | None
-    stream_url: str
-    stream_headers: dict[str, str]
-    ext: str
-    mime_type: str
-
-
-def resolve_tikwm_metadata(source_url: str, settings: Settings) -> TikWMInfo:
+def resolve_with_tikwm(
+    source_url: str,
+    platform: str,
+    settings: Settings,
+) -> SocialVideoInfo:
     if not settings.enable_tikwm_resolver:
-        raise TikWMResolverError(
+        raise SocialResolverError(
             "tikwm_disabled",
             "TikWM resolver is disabled.",
+            {"platform": platform, "resolver": "tikwm"},
+        )
+    if platform != "tiktok" or platform not in settings.tikwm_enabled_platforms:
+        raise SocialResolverError(
+            "unsupported_social_platform",
+            "TikWM is only enabled for TikTok.",
+            {"platform": platform, "resolver": "tikwm"},
         )
     if not is_tiktok_url(source_url):
-        raise TikWMResolverError(
+        raise SocialResolverError(
             "invalid_tiktok_url",
             "Only public or authorized TikTok URLs are supported.",
+            {"platform": platform, "resolver": "tikwm"},
         )
 
     try:
@@ -62,52 +57,76 @@ def resolve_tikwm_metadata(source_url: str, settings: Settings) -> TikWMInfo:
             timeout=settings.tikwm_timeout_seconds,
         )
     except requests.RequestException as exc:
-        raise TikWMResolverError(
+        raise SocialResolverError(
             "tikwm_api_failed",
             sanitize_message(str(exc)) or "TikWM metadata request failed.",
+            {"platform": platform, "resolver": "tikwm"},
         ) from exc
 
     if response.status_code != 200:
-        raise TikWMResolverError(
+        raise SocialResolverError(
             "tikwm_api_http_error",
             f"TikWM metadata request returned HTTP {response.status_code}.",
+            {
+                "platform": platform,
+                "resolver": "tikwm",
+                "status_code": response.status_code,
+            },
         )
 
     try:
         payload = response.json()
     except ValueError as exc:
-        raise TikWMResolverError(
+        raise SocialResolverError(
             "tikwm_invalid_response",
             "TikWM returned invalid JSON.",
+            {"platform": platform, "resolver": "tikwm"},
         ) from exc
 
     if not isinstance(payload, dict) or payload.get("code") != 0:
-        raise TikWMResolverError(
+        raise SocialResolverError(
             "tikwm_api_failed",
             "TikWM did not return a successful metadata response.",
+            {"platform": platform, "resolver": "tikwm"},
         )
 
     data = payload.get("data")
     if not isinstance(data, dict):
-        raise TikWMResolverError(
+        raise SocialResolverError(
             "tikwm_invalid_response",
             "TikWM response did not include video metadata.",
+            {"platform": platform, "resolver": "tikwm"},
         )
 
     stream_url = safe_http_url(data.get("hdplay")) or safe_http_url(data.get("play"))
     if not stream_url:
-        raise TikWMResolverError(
+        raise SocialResolverError(
             "tikwm_stream_url_missing",
             "TikWM response did not include a playable video stream.",
+            {"platform": platform, "resolver": "tikwm"},
+        )
+    filesize = safe_int(data.get("size") or data.get("hd_size"))
+    max_bytes = settings.tikwm_max_video_size_mb * 1024 * 1024
+    if filesize is not None and filesize > max_bytes:
+        raise SocialResolverError(
+            "media_memory_limit_exceeded",
+            "This video is too large for automatic recipe analysis.",
+            {
+                "platform": platform,
+                "resolver": "tikwm",
+                "filesize_approx": filesize,
+                "max_size_mb": settings.tikwm_max_video_size_mb,
+            },
         )
 
-    return TikWMInfo(
+    return SocialVideoInfo(
         platform="tiktok",
         resolver="tikwm",
-        video_id=safe_str(data.get("id")),
         title=safe_str(data.get("title")),
-        thumbnail_url=safe_http_url(data.get("cover")),
+        video_id=safe_str(data.get("id")),
         duration_seconds=safe_float(data.get("duration")),
+        thumbnail_url=safe_http_url(data.get("cover")),
+        webpage_url=source_url,
         stream_url=stream_url,
         stream_headers={
             "User-Agent": settings.tikwm_user_agent,
@@ -115,6 +134,12 @@ def resolve_tikwm_metadata(source_url: str, settings: Settings) -> TikWMInfo:
         },
         ext="mp4",
         mime_type="video/mp4",
+        extractor="tikwm",
+        filename=None,
+        uploader=safe_str(data.get("author", {}).get("unique_id"))
+        if isinstance(data.get("author"), dict)
+        else None,
+        filesize_approx=filesize,
     )
 
 
@@ -132,14 +157,16 @@ def probe_tikwm_stream(
             timeout=(10, 30),
         ) as response:
             if response.status_code in {401, 403}:
-                raise TikWMResolverError(
+                raise SocialResolverError(
                     "tikwm_stream_forbidden",
                     "TikWM stream could not be accessed.",
+                    {"resolver": "tikwm", "status_code": response.status_code},
                 )
             if response.status_code == 404:
-                raise TikWMResolverError(
+                raise SocialResolverError(
                     "tikwm_stream_expired",
                     "TikWM stream expired before probing.",
+                    {"resolver": "tikwm", "status_code": response.status_code},
                 )
             response.raise_for_status()
             total = 0
@@ -161,12 +188,13 @@ def probe_tikwm_stream(
                 "bytes_read": total,
                 "accepted": total > 0 and response.status_code == 200,
             }
-    except TikWMResolverError:
+    except SocialResolverError:
         raise
     except requests.RequestException as exc:
-        raise TikWMResolverError(
+        raise SocialResolverError(
             "tikwm_stream_probe_failed",
             sanitize_message(str(exc)) or "TikWM stream probe failed.",
+            {"resolver": "tikwm"},
         ) from exc
 
 
@@ -196,7 +224,7 @@ def debug_tikwm(
                 settings,
             )
         return response
-    except TikWMResolverError as exc:
+    except SocialResolverError as exc:
         return {
             "ok": False,
             "platform": "tiktok",
@@ -233,6 +261,13 @@ def safe_str(value: Any) -> str | None:
 def safe_float(value: Any) -> float | None:
     try:
         return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def safe_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
     except (TypeError, ValueError):
         return None
 

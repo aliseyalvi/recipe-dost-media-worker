@@ -46,7 +46,16 @@ ENABLE_TIKWM_RESOLVER=true
 TIKWM_API_URL=https://www.tikwm.com/api/
 TIKWM_TIMEOUT_SECONDS=15
 TIKWM_HD=true
+TIKWM_ENABLED_PLATFORMS=tiktok
+TIKWM_MAX_VIDEO_SIZE_MB=30
 TIKWM_PROBE_BYTES=262144
+
+ENABLE_COBALT_RESOLVER=false
+COBALT_API_URL=
+COBALT_TIMEOUT_SECONDS=45
+COBALT_ALWAYS_PROXY=true
+COBALT_VIDEO_QUALITY=720
+COBALT_ENABLED_PLATFORMS=instagram,facebook
 ```
 
 Use `WORKER_MODE=youtube_direct` for the stable YouTube pipeline.
@@ -57,7 +66,9 @@ Use this for social testing:
 WORKER_MODE=social_video
 MEDIA_PIPELINE_MODE=social_stream
 ENABLE_SOCIAL_VIDEO=true
-ENABLE_YT_DLP=true
+ENABLE_TIKWM_RESOLVER=true
+ENABLE_COBALT_RESOLVER=true
+COBALT_API_URL=https://your-cobalt-service.example/
 ```
 
 Optional platform cookies:
@@ -90,7 +101,7 @@ Debug social resolver without exposing URLs/cookies/stream URLs:
 curl -X POST http://localhost:8080/debug/social-resolve \
   -H "Content-Type: application/json" \
   -H "X-Worker-Secret: replace-with-your-worker-secret" \
-  -d '{"url":"https://www.tiktok.com/@example/video/0000000000000000000","test_stream":true}'
+  -d '{"url":"https://www.tiktok.com/@example/video/0000000000000000000","resolver":"auto","test_stream":true}'
 ```
 
 Debug TikWM from Cloud Run/local without calling Gemini, processing jobs, storing video, or returning the TikWM raw video URL:
@@ -104,11 +115,14 @@ curl -X POST http://localhost:8080/debug/tikwm \
 
 ## Current Next Work
 
-M14G-4TWM1: prove the protected debug-only TikWM endpoint from Cloud Run.
+M14G-4R2: run full social end-to-end tests.
 
 - TikWM is third-party, not an official TikTok API.
-- Endpoint does not call Gemini, process jobs, save recipe cards, store video, or return the TikWM raw video URL.
-- Full TikWM job integration comes only after Cloud Run debug succeeds.
+- YouTube uses the existing native path.
+- TikTok uses TikWM.
+- Instagram and Facebook use Cobalt.
+- Cobalt is not used for TikTok or YouTube.
+- TikWM/Cobalt temporary stream URLs are never stored or returned.
 
 See [docs/worker-context.md](docs/worker-context.md) for the compact current context.
 

@@ -24,8 +24,10 @@ from app.schemas import (
 )
 from app.supabase_client import create_repository
 from app.social.platforms import detect_social_platform
+from app.social.models import SocialResolverError
+from app.social.resolver_orchestrator import resolve_social_video
+from app.social.stream_download import probe_video_stream
 from app.social.yt_dlp_resolver import (
-    debug_social_resolve,
     get_yt_dlp_version,
 )
 from app.social.tikwm_resolver import debug_tikwm
@@ -156,13 +158,18 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         yt_dlp_version=get_yt_dlp_version(),
         enable_tikwm_resolver=settings.enable_tikwm_resolver,
         tikwm_configured=settings.tikwm_configured,
+        tikwm_enabled_platforms=settings.tikwm_enabled_platforms,
         tikwm_hd=settings.tikwm_hd,
         tikwm_probe_bytes=settings.tikwm_probe_bytes,
+        enable_cobalt_resolver=settings.enable_cobalt_resolver,
+        cobalt_configured=settings.cobalt_configured,
+        cobalt_enabled_platforms=settings.cobalt_enabled_platforms,
     )
 
 
 class DebugSocialResolveRequest(BaseModel):
     url: str
+    resolver: str = "auto"
     test_stream: bool = False
 
 
@@ -178,12 +185,38 @@ def debug_social_resolve_endpoint(
     settings: Settings = Depends(get_settings),
 ) -> dict[str, object]:
     platform = detect_social_platform(request.url)
-    return debug_social_resolve(
-        request.url,
-        platform,
-        settings,
-        test_stream=request.test_stream,
-    )
+    try:
+        info = resolve_social_video(
+            request.url,
+            platform,
+            settings,
+            resolver=request.resolver,
+        )
+        response: dict[str, object] = {
+            "ok": True,
+            "platform": info.platform,
+            "resolver": info.resolver,
+            "has_stream_url": True,
+            "has_stream_headers": bool(info.stream_headers),
+            "has_thumbnail": bool(info.thumbnail_url),
+            "title_present": bool(info.title),
+            "video_id_present": bool(info.video_id),
+            "duration_seconds": info.duration_seconds,
+            "extractor": info.extractor,
+            "selected_ext": info.ext,
+            "mime_type": info.mime_type,
+        }
+        if request.test_stream:
+            response["stream_probe"] = probe_video_stream(info)
+        return response
+    except SocialResolverError as exc:
+        return {
+            "ok": False,
+            "platform": platform,
+            "resolver": request.resolver,
+            "error_code": exc.code,
+            "message": exc.message,
+        }
 
 
 @app.post("/debug/tikwm")

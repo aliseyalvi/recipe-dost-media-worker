@@ -43,6 +43,9 @@ python -m compileall app
 
 python3 -m compileall app
 # passed
+
+env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python -m compileall app
+# passed
 ```
 
 ## M14G-4TWM0 Validation
@@ -55,5 +58,15 @@ python3 -m compileall app
 # passed
 
 env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python -m compileall app
+# passed
+```
+
+## M14G-4SOC1 Validation
+
+```bash
+python -m compileall app
+# local zsh: python may be missing
+
+python3 -m compileall app
 # passed
 ```

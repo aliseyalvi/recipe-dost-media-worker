@@ -10,7 +10,8 @@ Keep this file terse: only durable architecture decisions, not full task history
 - yt-dlp is still retained for social metadata/direct stream discovery. Use platform-specific cookies only; Facebook cookies must not be used for TikTok.
 - M14G-4R1 TikTok parser: select direct non-HLS MP4 from `formats[]`, preserve selected `http_headers`, and stream with those headers.
 - M14G-4TWM0 adds TikWM as a protected debug-only probe path. It does not call Gemini, process jobs, save recipe cards, store video, or expose TikWM video URLs.
+- M14G-4SOC1 routes social jobs through one internal `SocialVideoInfo`: YouTube stays native, TikTok uses TikWM, Instagram/Facebook use Cobalt. Cobalt is disabled for TikTok and not used for YouTube.
 
 ## Next Decision To Prove
 
-M14G-4TWM1 must prove TikWM from Cloud Run. TikWM is a third-party service, not an official TikTok API. If Cloud Run can resolve and probe TikWM streams without exposing URLs or storing video, full job integration can be considered later.
+M14G-4R2 must prove full TikTok, Instagram, and Facebook jobs end to end under quota guards. TikWM and Cobalt stream URLs are temporary internal values and must never be stored or returned.

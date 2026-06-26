@@ -73,11 +73,24 @@ class Settings(BaseSettings):
     tikwm_api_url: str = "https://www.tikwm.com/api/"
     tikwm_timeout_seconds: int = 15
     tikwm_hd: bool = True
+    tikwm_enabled_platforms: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["tiktok"]
+    )
+    tikwm_max_video_size_mb: int = 30
     tikwm_user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     )
     tikwm_probe_bytes: int = 262144
+    enable_cobalt_resolver: bool = False
+    cobalt_api_url: Optional[str] = None
+    cobalt_timeout_seconds: int = 45
+    cobalt_always_proxy: bool = True
+    cobalt_video_quality: str = "720"
+    cobalt_enabled_platforms: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["instagram", "facebook"]
+    )
+    cobalt_api_key: Optional[SecretStr] = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -102,11 +115,26 @@ class Settings(BaseSettings):
     def tikwm_configured(self) -> bool:
         return self.enable_tikwm_resolver and bool(self.tikwm_api_url.strip())
 
+    @property
+    def cobalt_configured(self) -> bool:
+        return self.enable_cobalt_resolver and bool((self.cobalt_api_url or "").strip())
+
     @field_validator("gemini_video_fallback_models", mode="before")
     @classmethod
     def parse_fallback_models(cls, value: object) -> object:
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("tikwm_enabled_platforms", "cobalt_enabled_platforms", mode="before")
+    @classmethod
+    def parse_platform_list(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [
+                item.strip().lower()
+                for item in value.split(",")
+                if item.strip()
+            ]
         return value
 
     @field_validator("gemini_disabled_models", mode="before")

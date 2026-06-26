@@ -10,16 +10,17 @@
 | 6 | M14G-4R0 Repo Context Setup | Done | Codex context docs |
 | 7 | M14G-4R1 TikTok yt-dlp Parser | Done | Parse formats, preserve headers, stream bounded bytes |
 | 8 | M14G-4TWM0 TikWM Cloud Run Debug | Done | Protected debug-only TikWM metadata/probe endpoint |
-| 9 | M14G-4TWM1 TikWM Cloud Run Probe | Next | Deploy and verify `/debug/tikwm` from Cloud Run |
-| 10 | M14G-4R2 Social End-to-End Test | Later | Full TikTok/Instagram/Facebook job tests |
-| 11 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 12 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 9 | M14G-4TWM1 TikWM Cloud Run Probe | Done | `/debug/tikwm` verified from Cloud Run |
+| 10 | M14G-4SOC1 Unified Social Resolver | Done | TikTok->TikWM, Instagram/Facebook->Cobalt |
+| 11 | M14G-4R2 Social End-to-End Test | Next | Full TikTok/Instagram/Facebook job tests |
+| 12 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 13 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Run M14G-4TWM1:
+Run M14G-4R2:
 
-- Deploy with TikWM config defaults or env overrides.
-- Call protected `POST /debug/tikwm` with `test_stream=false`, then `true`.
-- Confirm metadata/probe works from Cloud Run.
-- Do not integrate TikWM into media jobs until debug passes.
+- TikTok media job should complete through `tikwm_resolver_completed`, `social_stream_completed`, Gemini observation/normalization, `recipe_card_saved`, and `completed`.
+- Instagram media job should complete through `cobalt_resolver_completed`, `social_stream_completed`, Gemini observation/normalization, `recipe_card_saved`, and `completed`.
+- Facebook should complete if Cobalt supports the URL or fail with a Cobalt-specific controlled error.
+- YouTube must continue using the unchanged native path.

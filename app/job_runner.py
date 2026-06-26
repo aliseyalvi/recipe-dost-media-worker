@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone
+from time import perf_counter
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
@@ -17,12 +18,8 @@ from app.schemas import MediaJobData, MediaJobRecord
 from app.social.platforms import detect_social_platform
 from app.social.stream_download import VideoBuffer, stream_video_to_memory
 from app.social.thumbnail_upload import upload_source_thumbnail
-from app.social.yt_dlp_resolver import (
-    SocialPipelineError,
-    SocialVideoInfo,
-    cookie_event_for_platform,
-    resolve_social_video,
-)
+from app.social.models import SocialResolverError, SocialVideoInfo
+from app.social.resolver_orchestrator import resolve_social_video
 from app.supabase_client import MediaJobRepository
 
 logger = logging.getLogger("recipe_dost.worker")
@@ -198,7 +195,7 @@ class JobRunner:
 
     def _run_social_video(self, job: MediaJobRecord, platform: str) -> MediaJobRecord:
         settings = self._settings
-        if settings is None or not (settings.enable_social_video and settings.enable_yt_dlp):
+        if settings is None or not settings.enable_social_video:
             raise PipelineFailure(
                 "social_video_not_enabled",
                 "Social video analysis is not enabled yet.",
@@ -207,79 +204,90 @@ class JobRunner:
         if self._analyzer is None:
             raise PipelineFailure("gemini_not_configured", "Gemini video analysis is not configured yet.")
 
-        cookie_event_type, cookie_metadata = cookie_event_for_platform(platform, settings)
+        resolver_name = expected_resolver_for_platform(platform)
         self._repository.insert_event(
             job.id,
-            event_type="social_resolver_started",
-            message="Social video resolver started.",
+            event_type=f"{resolver_name}_resolver_started",
+            message=f"{resolver_name} resolver started.",
             metadata={
                 "platform": platform,
-                "resolver": "yt-dlp",
-                "timeout_seconds": settings.ytdlp_extract_timeout_seconds,
-                "cookie_file_present": bool(
-                    cookie_metadata.get("cookie_file_present", False)
-                ),
+                "resolver": resolver_name,
             },
         )
-        self._repository.insert_event(
-            job.id,
-            event_type=cookie_event_type,
-            message="Social cookie file status checked.",
-            metadata=cookie_metadata,
-        )
         job = self._repository.update_job(job.id, status="resolving", progress=20, error_code=None, error_message=None)
+        resolver_started_at = perf_counter()
         try:
             info = resolve_social_video(
                 job.source_url,
+                platform,
                 settings,
-                on_strategy_failed=lambda metadata: self._repository.insert_event(
-                    job.id,
-                    event_type="social_resolver_strategy_failed",
-                    message="Social resolver strategy failed.",
-                    metadata=metadata,
-                ),
             )
-        except SocialPipelineError as exc:
+        except SocialResolverError as exc:
+            failed_resolver = str(exc.metadata.get("resolver") or resolver_name)
             self._repository.insert_event(
                 job.id,
-                event_type="social_resolver_failed",
-                message="Social video resolver failed.",
+                event_type=f"{failed_resolver}_resolver_failed",
+                message=f"{failed_resolver} resolver failed.",
                 metadata={
                     "platform": platform,
-                    "resolver": "yt-dlp",
+                    "resolver": failed_resolver,
                     "error_code": exc.code,
                     "exception_type": type(exc).__name__,
-                    "sanitized_message": str(
-                        exc.metadata.get("sanitized_message", "")
-                    )[:300],
+                    "elapsed_ms": int((perf_counter() - resolver_started_at) * 1000),
+                    **safe_event_metadata(exc.metadata),
                 },
             )
             raise PipelineFailure(exc.code, exc.message, {"platform": platform, **exc.metadata}) from exc
-        self._repository.insert_event(job.id, event_type="social_resolver_completed", message="Social video resolver completed.", metadata=_social_metadata(info))
+        self._repository.insert_event(
+            job.id,
+            event_type=f"{info.resolver}_resolver_completed",
+            message=f"{info.resolver} resolver completed.",
+            metadata={
+                **_social_metadata(info),
+                "elapsed_ms": int((perf_counter() - resolver_started_at) * 1000),
+            },
+        )
+        if (
+            info.duration_seconds is not None
+            and info.duration_seconds > settings.max_video_duration_seconds
+        ):
+            raise PipelineFailure(
+                "media_duration_too_long",
+                "This video is too long for automatic recipe analysis.",
+                {
+                    "platform": platform,
+                    "resolver": info.resolver,
+                    "duration_seconds": info.duration_seconds,
+                    "max_video_duration_seconds": settings.max_video_duration_seconds,
+                },
+            )
         self._update_social_metadata_best_effort(job, info)
 
         job = self._repository.update_job(job.id, status="downloading", progress=35, error_code=None, error_message=None)
-        self._repository.insert_event(job.id, event_type="social_stream_started", message="Social video stream started.", metadata={"platform": platform, "selected_ext": info.ext, "selected_height": info.height})
+        self._repository.insert_event(job.id, event_type="social_stream_started", message="Social video stream started.", metadata={"platform": platform, "resolver": info.resolver, "ext": info.ext})
         video: VideoBuffer | None = None
         try:
             try:
                 video = stream_video_to_memory(
-                    info.stream_url,
-                    info.stream_headers,
+                    info,
                     settings,
-                    ext=info.ext,
+                    max_size_mb=(
+                        settings.tikwm_max_video_size_mb
+                        if info.resolver == "tikwm"
+                        else None
+                    ),
                 )
-            except SocialPipelineError as exc:
+            except SocialResolverError as exc:
                 self._repository.insert_event(
                     job.id,
                     event_type="social_stream_failed",
                     message="Social video stream failed.",
                     metadata={
                         "platform": platform,
+                        "resolver": info.resolver,
                         "error_code": exc.code,
-                        "selected_ext": info.ext,
-                        "selected_height": info.height,
-                        **exc.metadata,
+                        "ext": info.ext,
+                        **safe_event_metadata(exc.metadata),
                     },
                 )
                 raise PipelineFailure(
@@ -287,7 +295,7 @@ class JobRunner:
                     exc.message,
                     {"platform": platform, **exc.metadata},
                 ) from exc
-            self._repository.insert_event(job.id, event_type="social_stream_completed", message="Social video stream completed.", metadata={"platform": platform, "size_bytes": video.size_bytes, "mime_type": video.mime_type, "selected_ext": info.ext, "selected_height": info.height})
+            self._repository.insert_event(job.id, event_type="social_stream_completed", message="Social video stream completed.", metadata={"platform": platform, "resolver": info.resolver, "size_bytes": video.size_bytes, "mime_type": video.mime_type, "ext": info.ext})
 
             job = self._repository.update_job(job.id, status="thumbnailing", progress=45, error_code=None, error_message=None)
             thumbnail_url = self._upload_social_thumbnail_best_effort(job, info.thumbnail_url, settings)
@@ -295,6 +303,7 @@ class JobRunner:
             self._filter_model_candidates(job.id)
             job = self._repository.update_job(job.id, status="analyzing", progress=60, thumbnail_url=thumbnail_url, error_code=None, error_message=None, ai_provider="gemini", ai_model=self._analyzer.model)
             self._repository.insert_event(job.id, event_type="gemini_inline_video_started", message="Gemini inline video analysis started.", metadata={"model": self._analyzer.model, "stage": "video_observation", "mime_type": video.mime_type, "size_bytes": video.size_bytes})
+            self._repository.insert_event(job.id, event_type="video_observation_started", message="Gemini video observation started.", metadata={"model": self._analyzer.model, "mime_type": video.mime_type, "size_bytes": video.size_bytes})
             try:
                 outcome = self._analyzer.analyze_video_bytes(
                     video.buffer.getvalue(),
@@ -333,10 +342,21 @@ class JobRunner:
             return None
 
     def _update_social_metadata_best_effort(self, job: MediaJobRecord, info: SocialVideoInfo) -> None:
-        try:
-            self._repository.update_job_metadata_best_effort(job.id, {"media_duration_seconds": int(info.duration_seconds) if info.duration_seconds is not None else None, "media_size_bytes": info.filesize_approx, "source_title": info.title, "source_thumbnail_url": info.thumbnail_url})
-        except Exception as exc:
-            logger.warning("social_metadata_update_failed", extra={"media_job_id": str(job.id), "exception_type": type(exc).__name__})
+        values = {
+            "media_duration_seconds": int(info.duration_seconds) if info.duration_seconds is not None else None,
+            "media_size_bytes": info.filesize_approx,
+            "source_title": info.title,
+            "source_thumbnail_url": info.thumbnail_url,
+            "thumbnail_url": info.thumbnail_url,
+            "resolver": info.resolver,
+        }
+        for key, value in values.items():
+            if value is None:
+                continue
+            try:
+                self._repository.update_job_metadata_best_effort(job.id, {key: value})
+            except Exception as exc:
+                logger.warning("social_metadata_update_failed", extra={"media_job_id": str(job.id), "exception_type": type(exc).__name__})
 
     def _run_youtube(self, job: MediaJobRecord) -> MediaJobRecord:
         media_job_id = job.id
@@ -813,12 +833,29 @@ def gemini_user_message(error_code: str) -> str:
 def _social_metadata(info: SocialVideoInfo) -> dict[str, object]:
     return {
         "platform": info.platform,
-        "resolver": "yt-dlp",
+        "resolver": info.resolver,
+        "video_id_present": bool(info.video_id),
+        "title_present": bool(info.title),
         "duration_seconds": info.duration_seconds,
         "has_thumbnail": bool(info.thumbnail_url),
-        "selected_ext": info.ext,
-        "selected_height": info.height,
-        "selected_protocol": info.selected_protocol,
-        "format_count": info.format_count,
+        "ext": info.ext,
+        "mime_type": info.mime_type,
         "has_stream_headers": bool(info.stream_headers),
+    }
+
+
+def expected_resolver_for_platform(platform: str) -> str:
+    if platform == "tiktok":
+        return "tikwm"
+    if platform in {"instagram", "facebook"}:
+        return "cobalt"
+    return "social"
+
+
+def safe_event_metadata(metadata: dict[str, object]) -> dict[str, object]:
+    forbidden = {"stream_url", "source_url", "url", "cookies", "cookie", "authorization"}
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key.lower() not in forbidden
     }

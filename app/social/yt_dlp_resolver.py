@@ -5,13 +5,13 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import requests
 
 from app.config import Settings
+from app.social.models import SocialVideoInfo
 from app.social.platforms import detect_social_platform
 
 USER_AGENT = (
@@ -31,27 +31,6 @@ class SocialPipelineError(Exception):
         self.code = code
         self.message = message
         self.metadata = metadata or {}
-
-
-@dataclass(frozen=True)
-class SocialVideoInfo:
-    platform: str
-    title: str | None
-    duration_seconds: float | None
-    thumbnail_url: str | None
-    webpage_url: str | None
-    stream_url: str
-    stream_headers: dict[str, str]
-    ext: str | None
-    width: int | None
-    height: int | None
-    filesize_approx: int | None
-    extractor: str | None
-    uploader: str | None
-    mime_type: str | None
-    selected_protocol: str | None
-    format_count: int | None
-    cookie_file_present: bool
 
 
 def resolve_social_video(
@@ -266,25 +245,22 @@ def build_social_video_info(
         or info.get("filesize")
         or info.get("filesize_approx")
     )
-    formats = info.get("formats")
     return SocialVideoInfo(
         platform=detect_social_platform(str(info.get("webpage_url") or url)),
+        resolver="yt-dlp",
         title=safe_str(info.get("title")),
+        video_id=safe_str(info.get("id")),
         duration_seconds=duration,
         thumbnail_url=safe_http_url(info.get("thumbnail")),
         webpage_url=safe_http_url(info.get("webpage_url")),
         stream_url=stream_url,
         stream_headers=stream_headers,
         ext=safe_str(selected_format.get("ext") or info.get("ext")),
-        width=safe_int(selected_format.get("width") or info.get("width")),
-        height=safe_int(selected_format.get("height") or info.get("height")),
-        filesize_approx=filesize,
-        extractor=safe_str(info.get("extractor")),
-        uploader=safe_str(info.get("uploader")),
         mime_type=safe_str(selected_format.get("mime_type")),
-        selected_protocol=safe_str(selected_format.get("protocol")),
-        format_count=len(formats) if isinstance(formats, list) else None,
-        cookie_file_present=cookie_file_present,
+        extractor=safe_str(info.get("extractor")),
+        filename=safe_str(selected_format.get("filename") or info.get("filename")),
+        uploader=safe_str(info.get("uploader")),
+        filesize_approx=filesize,
     )
 
 
@@ -553,9 +529,9 @@ def debug_social_resolve(
             "duration_seconds": info.duration_seconds,
             "extractor": info.extractor,
             "selected_ext": info.ext,
-            "selected_height": info.height,
-            "format_count": info.format_count,
-            "selected_protocol": info.selected_protocol,
+            "selected_height": None,
+            "format_count": None,
+            "selected_protocol": None,
             "header_keys": safe_header_keys(info.stream_headers),
             "sanitized_error": "",
         }
