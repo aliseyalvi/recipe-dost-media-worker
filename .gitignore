@@ -3,3 +3,14 @@
 __pycache__/
 *.py[cod]
 cloudrun.env.yaml
+.env
+cloudrun.env.yaml
+cookies.txt
+
+# Local secrets / deployment config
+.env
+.env.*
+cloudrun.env.yaml
+cookies.txt
+*-cookies.txt
+app/cookies/*.txt
