@@ -3,6 +3,8 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+from pydantic import BaseModel
+from pathlib import Path
 from typing import Annotated, Any, Optional, Union
 from uuid import UUID
 
@@ -21,6 +23,12 @@ from app.schemas import (
     ProcessJobResponse,
 )
 from app.supabase_client import create_repository
+from app.social.platforms import detect_social_platform
+from app.social.yt_dlp_resolver import (
+    debug_social_resolve,
+    get_yt_dlp_version,
+)
+from app.social.tikwm_resolver import debug_tikwm
 
 logger = logging.getLogger("recipe_dost.worker")
 
@@ -120,6 +128,74 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         disabled_models=settings.gemini_disabled_models,
         daily_model_limits=settings.gemini_daily_dev_model_limits,
         budget_reset_at=settings.gemini_dev_budget_reset_at,
+        media_pipeline_mode=settings.media_pipeline_mode,
+        enable_social_video=settings.enable_social_video,
+        enable_yt_dlp=settings.enable_yt_dlp,
+        enable_cookie_file=settings.enable_cookie_file,
+        max_video_duration_seconds=settings.max_video_duration_seconds,
+        max_video_size_mb=settings.max_video_size_mb,
+        max_memory_buffer_mb=settings.max_memory_buffer_mb,
+        max_video_height=settings.max_video_height,
+        thumbnail_bucket=settings.thumbnail_bucket,
+        use_source_thumbnail_first=settings.use_source_thumbnail_first,
+        store_raw_media=settings.store_raw_media,
+        delete_raw_media_after_processing=settings.delete_raw_media_after_processing,
+        cookie_dir=settings.cookie_dir,
+        enable_generic_cookie_fallback=settings.enable_generic_cookie_fallback,
+        tiktok_cookie_file_present=Path(settings.tiktok_cookie_file).exists(),
+        instagram_cookie_file_present=Path(settings.instagram_cookie_file).exists(),
+        facebook_cookie_file_present=Path(settings.facebook_cookie_file).exists(),
+        generic_cookie_file_present=Path(settings.cookie_file_path).exists(),
+        ytdlp_extract_timeout_seconds=settings.ytdlp_extract_timeout_seconds,
+        ytdlp_socket_timeout_seconds=settings.ytdlp_socket_timeout_seconds,
+        ytdlp_retries=settings.ytdlp_retries,
+        ytdlp_use_subprocess=settings.ytdlp_use_subprocess,
+        ytdlp_force_generic=settings.ytdlp_force_generic,
+        ytdlp_enable_impersonation=settings.ytdlp_enable_impersonation,
+        enable_ytdlp_stdout_fallback=settings.enable_ytdlp_stdout_fallback,
+        yt_dlp_version=get_yt_dlp_version(),
+        enable_tikwm_resolver=settings.enable_tikwm_resolver,
+        tikwm_configured=settings.tikwm_configured,
+        tikwm_hd=settings.tikwm_hd,
+        tikwm_probe_bytes=settings.tikwm_probe_bytes,
+    )
+
+
+class DebugSocialResolveRequest(BaseModel):
+    url: str
+    test_stream: bool = False
+
+
+class DebugTikWMRequest(BaseModel):
+    url: str
+    test_stream: bool = False
+
+
+@app.post("/debug/social-resolve")
+def debug_social_resolve_endpoint(
+    request: DebugSocialResolveRequest,
+    _authorized: None = Depends(require_worker_secret),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    platform = detect_social_platform(request.url)
+    return debug_social_resolve(
+        request.url,
+        platform,
+        settings,
+        test_stream=request.test_stream,
+    )
+
+
+@app.post("/debug/tikwm")
+def debug_tikwm_endpoint(
+    request: DebugTikWMRequest,
+    _authorized: None = Depends(require_worker_secret),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, object]:
+    return debug_tikwm(
+        request.url,
+        settings,
+        test_stream=request.test_stream,
     )
 
 
@@ -164,6 +240,7 @@ def process_job(
             gemini_disabled_models=settings.gemini_disabled_models,
             gemini_daily_dev_model_limits=settings.gemini_daily_dev_model_limits,
             gemini_dev_budget_reset_at=settings.gemini_dev_budget_reset_at,
+            settings=settings,
         )
         data, should_process = runner.accept(
             request.media_job_id,

@@ -26,6 +26,36 @@ class HealthResponse(BaseModel):
     disabled_models: list[str]
     daily_model_limits: dict[str, int]
     budget_reset_at: Optional[str]
+    media_pipeline_mode: str
+    enable_social_video: bool
+    enable_yt_dlp: bool
+    enable_cookie_file: bool
+    max_video_duration_seconds: int
+    max_video_size_mb: int
+    max_memory_buffer_mb: int
+    max_video_height: int
+    thumbnail_bucket: str
+    use_source_thumbnail_first: bool
+    store_raw_media: bool
+    delete_raw_media_after_processing: bool
+    cookie_dir: str
+    enable_generic_cookie_fallback: bool
+    tiktok_cookie_file_present: bool
+    instagram_cookie_file_present: bool
+    facebook_cookie_file_present: bool
+    generic_cookie_file_present: bool
+    ytdlp_extract_timeout_seconds: int
+    ytdlp_socket_timeout_seconds: int
+    ytdlp_retries: int
+    ytdlp_use_subprocess: bool
+    ytdlp_force_generic: bool
+    ytdlp_enable_impersonation: bool
+    enable_ytdlp_stdout_fallback: bool
+    yt_dlp_version: str
+    enable_tikwm_resolver: bool
+    tikwm_configured: bool
+    tikwm_hd: bool
+    tikwm_probe_bytes: int
 
 
 class MediaJobData(BaseModel):
@@ -63,6 +93,10 @@ class MediaJobRecord(BaseModel):
     result_recipe_card_id: Optional[UUID] = None
     error_code: Optional[str] = None
     started_at: Optional[str] = None
+    media_duration_seconds: Optional[int] = None
+    media_size_bytes: Optional[int] = None
+    source_title: Optional[str] = None
+    source_thumbnail_url: Optional[str] = None
 
     model_config = ConfigDict(extra="ignore")
 

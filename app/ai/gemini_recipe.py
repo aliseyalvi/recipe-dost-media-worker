@@ -325,6 +325,70 @@ class GeminiRecipeAnalyzer:
             attempts_count,
         ) from last_error
 
+    def analyze_video_bytes(
+        self,
+        video_bytes: bytes,
+        mime_type: str,
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        before_call: Callable[[str, str], dict[str, Any]] | None = None,
+    ) -> GeminiAnalysisOutcome:
+        try:
+            from google import genai
+        except ImportError as exc:
+            raise RuntimeError("Google Gen AI SDK is not installed.") from exc
+
+        attempts_count = 0
+        attempted_models: list[str] = []
+        last_error: Exception | None = None
+        last_code = "gemini_video_bytes_failed"
+
+        with genai.Client(api_key=self._api_key) as client:
+            for model in self.models:
+                attempted_models.append(model)
+                for attempt in range(1, self.max_retries + 1):
+                    call_metadata = before_call(model, "video_observation") if before_call else {}
+                    attempts_count += 1
+                    try:
+                        started_at = perf_counter()
+                        interaction = client.interactions.create(
+                            model=model,
+                            input=[
+                                {"type": "video", "data": video_bytes, "mime_type": mime_type},
+                                {"type": "text", "text": OBSERVATION_PROMPT},
+                            ],
+                        )
+                        observations = extract_gemini_text(interaction)
+                        emit(on_event, "gemini_api_call_completed", {**call_metadata, "model": model, "stage": "video_observation", "duration_ms": int((perf_counter() - started_at) * 1000)})
+                        emit(on_event, "video_observation_completed", {"model": model, "observation_char_count": len(observations)})
+
+                        emit(on_event, "recipe_normalization_started", {"model": self.text_model})
+                        normalization_metadata = before_call(self.text_model, "recipe_normalization") if before_call else {}
+                        started_at = perf_counter()
+                        normalized = client.interactions.create(
+                            model=self.text_model,
+                            input=[{"type": "text", "text": f"{RECIPE_PROMPT}\n\nOBSERVATIONS:\n{observations}"}],
+                        )
+                        normalized_text = extract_gemini_text(normalized)
+                        result = parse_recipe_response(normalized_text)
+                        emit(on_event, "gemini_api_call_completed", {**normalization_metadata, "model": self.text_model, "stage": "recipe_normalization", "duration_ms": int((perf_counter() - started_at) * 1000)})
+                        emit(on_event, "recipe_normalization_completed", {"model": self.text_model, "response_char_count": len(normalized_text)})
+                        return GeminiAnalysisOutcome(result, self.text_model, attempts_count + 1)
+                    except GeminiCallGuardError:
+                        raise
+                    except Exception as exc:
+                        last_error = exc
+                        last_code = classify_gemini_error(exc)
+                        if last_code == "gemini_invalid_request" and "data" in sanitize_error_message(exc).lower():
+                            last_code = "gemini_inline_video_not_supported"
+                        emit(on_event, "gemini_api_call_failed", {"model": model, "stage": "video_observation", "error_code": last_code, "provider_error_message": sanitize_error_message(exc)})
+                        if last_code not in TEMPORARY_GEMINI_ERRORS:
+                            raise build_analysis_error(exc, last_code, attempted_models, model, attempts_count) from exc
+                        if attempt < self.max_retries:
+                            time.sleep(self.retry_base_seconds * (2 ** (attempt - 1)))
+
+        assert last_error is not None
+        raise build_analysis_error(last_error, last_code, attempted_models, attempted_models[-1], attempts_count) from last_error
+
 
 def parse_recipe_response(response_text: Any) -> GeminiRecipeResult:
     if not isinstance(response_text, str) or not response_text.strip():

@@ -84,3 +84,4 @@ For social resolver work, inspect only:
 Run before finishing:
 ```bash
 python -m compileall app
+```

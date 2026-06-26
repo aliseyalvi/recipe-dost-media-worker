@@ -1,48 +1,16 @@
 # Decision Log
 
-## M14G-3 — YouTube Gemini pipeline completed
+Keep this file terse: only durable architecture decisions, not full task history.
 
-Decision:
-- Keep YouTube direct Gemini path.
-- Use two-stage Gemini:
-  1. video observation
-  2. recipe normalization
-- Store recipe card in Supabase.
-- Store thumbnail URL when available.
+## Completed Decisions
 
-Reason:
-- This path has been verified end-to-end.
+- YouTube remains the stable direct Gemini path: public URL -> video observation -> recipe normalization -> `recipe_cards`.
+- Gemini free-tier guardrails stay enabled for development: max 2 calls/job, low retry count, repair/fallback chains disabled unless explicitly enabled.
+- Social video uses resolver metadata plus bounded in-memory bytes. Raw video is never written to disk, uploaded to Supabase/Drive, or exposed as a download.
+- yt-dlp is still retained for social metadata/direct stream discovery. Use platform-specific cookies only; Facebook cookies must not be used for TikTok.
+- M14G-4R1 TikTok parser: select direct non-HLS MP4 from `formats[]`, preserve selected `http_headers`, and stream with those headers.
+- M14G-4TWM0 adds TikWM as a protected debug-only probe path. It does not call Gemini, process jobs, save recipe cards, store video, or expose TikWM video URLs.
 
-## M14G-3B — Quota guard
+## Next Decision To Prove
 
-Decision:
-- Add Gemini per-job and daily dev limits.
-- Use Gemini 2.5 Flash for development.
-- Disable repair calls and fallback chains by default.
-
-Reason:
-- Free-tier Gemini quota was exhausted quickly by retries/fallbacks.
-
-## M14G-4 — Social video resolver
-
-Decision:
-- Use yt-dlp first because it is free.
-- Use platform-specific cookies.
-- Facebook cookies must not be used for TikTok.
-- TikTok requires TikTok cookies if anonymous extraction fails.
-- Add debug endpoint before full app processing.
-
-Reason:
-- Public browser access does not guarantee Cloud Run + yt-dlp access.
-
-## M14G-4 streaming strategy
-
-Decision:
-- Do not store raw videos.
-- Do not upload raw videos to Supabase.
-- Do not use Google Drive.
-- Use bounded memory buffer for short videos.
-- Use source/yt-dlp thumbnail and upload only thumbnail to Supabase.
-
-Reason:
-- Free-tier friendly and avoids turning app into a video downloader.
+M14G-4TWM1 must prove TikWM from Cloud Run. TikWM is a third-party service, not an official TikTok API. If Cloud Run can resolve and probe TikWM streams without exposing URLs or storing video, full job integration can be considered later.

@@ -44,6 +44,10 @@ class MediaJobRepository:
         ai_model: str | None = None,
         completed_at: str | None = None,
         started_at: str | None = None,
+        media_duration_seconds: int | None = None,
+        media_size_bytes: int | None = None,
+        source_title: str | None = None,
+        source_thumbnail_url: str | None = None,
     ) -> MediaJobRecord:
         values: dict[str, Any] = {
             "status": status,
@@ -64,6 +68,14 @@ class MediaJobRepository:
             values["completed_at"] = completed_at
         if started_at is not None:
             values["started_at"] = started_at
+        if media_duration_seconds is not None:
+            values["media_duration_seconds"] = media_duration_seconds
+        if media_size_bytes is not None:
+            values["media_size_bytes"] = media_size_bytes
+        if source_title is not None:
+            values["source_title"] = source_title
+        if source_thumbnail_url is not None:
+            values["source_thumbnail_url"] = source_thumbnail_url
 
         response = (
             self._client.table("media_jobs")
@@ -75,6 +87,15 @@ class MediaJobRepository:
         if not response.data:
             raise RuntimeError("Media job update returned no row.")
         return MediaJobRecord.model_validate(response.data[0])
+
+    def update_job_metadata_best_effort(
+        self,
+        media_job_id: UUID,
+        values: dict[str, Any],
+    ) -> None:
+        if not values:
+            return
+        self._client.table("media_jobs").update(values).eq("id", str(media_job_id)).execute()
 
     def insert_event(
         self,
@@ -167,6 +188,20 @@ class MediaJobRepository:
             .eq("user_id", str(user_id))
             .execute()
         )
+
+    def upload_public_object(
+        self,
+        bucket: str,
+        path: str,
+        data: bytes,
+        content_type: str,
+    ) -> str:
+        self._client.storage.from_(bucket).upload(
+            path,
+            data,
+            {"content-type": content_type, "upsert": "true"},
+        )
+        return self._client.storage.from_(bucket).get_public_url(path)
 
     def insert_recipe_card(
         self,

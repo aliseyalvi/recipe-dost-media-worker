@@ -12,8 +12,17 @@ from app.ai.gemini_recipe import (
     GeminiCallGuardError,
     GeminiRecipeAnalyzer,
 )
-from app.config import WorkerMode
+from app.config import Settings, WorkerMode
 from app.schemas import MediaJobData, MediaJobRecord
+from app.social.platforms import detect_social_platform
+from app.social.stream_download import VideoBuffer, stream_video_to_memory
+from app.social.thumbnail_upload import upload_source_thumbnail
+from app.social.yt_dlp_resolver import (
+    SocialPipelineError,
+    SocialVideoInfo,
+    cookie_event_for_platform,
+    resolve_social_video,
+)
 from app.supabase_client import MediaJobRepository
 
 logger = logging.getLogger("recipe_dost.worker")
@@ -76,6 +85,7 @@ class JobRunner:
         gemini_disabled_models: list[str] | None = None,
         gemini_daily_dev_model_limits: dict[str, int] | None = None,
         gemini_dev_budget_reset_at: str | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self._repository = repository
         self._analyzer = analyzer
@@ -86,6 +96,7 @@ class JobRunner:
         self._gemini_disabled_models = set(gemini_disabled_models or [])
         self._gemini_daily_dev_model_limits = gemini_daily_dev_model_limits or {}
         self._gemini_dev_budget_reset_at = gemini_dev_budget_reset_at
+        self._settings = settings
 
     def accept(
         self,
@@ -151,11 +162,11 @@ class JobRunner:
             if not background_resume and job.status == "failed":
                 return self._to_response(job)
 
-            if (
-                self._worker_mode == "youtube_direct"
-                and job.platform.strip().lower() == "youtube"
-            ):
+            platform = detect_social_platform(job.source_url)
+            if self._worker_mode == "youtube_direct" and platform == "youtube":
                 job = self._run_youtube(job)
+            elif self._worker_mode == "social_video" and platform in {"instagram", "tiktok", "facebook"}:
+                job = self._run_social_video(job, platform)
             else:
                 job = self._run_skeleton(job)
 
@@ -171,15 +182,9 @@ class JobRunner:
                 exception_type=type(exc).__name__,
                 metadata=exc.metadata,
             )
-            if exc.code in {
-                "gemini_daily_dev_limit_reached",
-                "gemini_job_call_limit_reached",
-                "gemini_no_model_budget_available",
-                "model_daily_dev_limit_reached",
-            }:
-                failed_job = self._repository.get_job(media_job_id)
-                if failed_job is not None:
-                    return self._to_response(failed_job)
+            failed_job = self._repository.get_job(media_job_id)
+            if failed_job is not None:
+                return self._to_response(failed_job)
             raise WorkerProcessingError from exc
         except Exception as exc:
             self._log_job_failure(media_job_id, type(exc).__name__)
@@ -190,6 +195,148 @@ class JobRunner:
                 exception_type=type(exc).__name__,
             )
             raise WorkerProcessingError from exc
+
+    def _run_social_video(self, job: MediaJobRecord, platform: str) -> MediaJobRecord:
+        settings = self._settings
+        if settings is None or not (settings.enable_social_video and settings.enable_yt_dlp):
+            raise PipelineFailure(
+                "social_video_not_enabled",
+                "Social video analysis is not enabled yet.",
+                {"platform": platform},
+            )
+        if self._analyzer is None:
+            raise PipelineFailure("gemini_not_configured", "Gemini video analysis is not configured yet.")
+
+        cookie_event_type, cookie_metadata = cookie_event_for_platform(platform, settings)
+        self._repository.insert_event(
+            job.id,
+            event_type="social_resolver_started",
+            message="Social video resolver started.",
+            metadata={
+                "platform": platform,
+                "resolver": "yt-dlp",
+                "timeout_seconds": settings.ytdlp_extract_timeout_seconds,
+                "cookie_file_present": bool(
+                    cookie_metadata.get("cookie_file_present", False)
+                ),
+            },
+        )
+        self._repository.insert_event(
+            job.id,
+            event_type=cookie_event_type,
+            message="Social cookie file status checked.",
+            metadata=cookie_metadata,
+        )
+        job = self._repository.update_job(job.id, status="resolving", progress=20, error_code=None, error_message=None)
+        try:
+            info = resolve_social_video(
+                job.source_url,
+                settings,
+                on_strategy_failed=lambda metadata: self._repository.insert_event(
+                    job.id,
+                    event_type="social_resolver_strategy_failed",
+                    message="Social resolver strategy failed.",
+                    metadata=metadata,
+                ),
+            )
+        except SocialPipelineError as exc:
+            self._repository.insert_event(
+                job.id,
+                event_type="social_resolver_failed",
+                message="Social video resolver failed.",
+                metadata={
+                    "platform": platform,
+                    "resolver": "yt-dlp",
+                    "error_code": exc.code,
+                    "exception_type": type(exc).__name__,
+                    "sanitized_message": str(
+                        exc.metadata.get("sanitized_message", "")
+                    )[:300],
+                },
+            )
+            raise PipelineFailure(exc.code, exc.message, {"platform": platform, **exc.metadata}) from exc
+        self._repository.insert_event(job.id, event_type="social_resolver_completed", message="Social video resolver completed.", metadata=_social_metadata(info))
+        self._update_social_metadata_best_effort(job, info)
+
+        job = self._repository.update_job(job.id, status="downloading", progress=35, error_code=None, error_message=None)
+        self._repository.insert_event(job.id, event_type="social_stream_started", message="Social video stream started.", metadata={"platform": platform, "selected_ext": info.ext, "selected_height": info.height})
+        video: VideoBuffer | None = None
+        try:
+            try:
+                video = stream_video_to_memory(
+                    info.stream_url,
+                    info.stream_headers,
+                    settings,
+                    ext=info.ext,
+                )
+            except SocialPipelineError as exc:
+                self._repository.insert_event(
+                    job.id,
+                    event_type="social_stream_failed",
+                    message="Social video stream failed.",
+                    metadata={
+                        "platform": platform,
+                        "error_code": exc.code,
+                        "selected_ext": info.ext,
+                        "selected_height": info.height,
+                        **exc.metadata,
+                    },
+                )
+                raise PipelineFailure(
+                    exc.code,
+                    exc.message,
+                    {"platform": platform, **exc.metadata},
+                ) from exc
+            self._repository.insert_event(job.id, event_type="social_stream_completed", message="Social video stream completed.", metadata={"platform": platform, "size_bytes": video.size_bytes, "mime_type": video.mime_type, "selected_ext": info.ext, "selected_height": info.height})
+
+            job = self._repository.update_job(job.id, status="thumbnailing", progress=45, error_code=None, error_message=None)
+            thumbnail_url = self._upload_social_thumbnail_best_effort(job, info.thumbnail_url, settings)
+
+            self._filter_model_candidates(job.id)
+            job = self._repository.update_job(job.id, status="analyzing", progress=60, thumbnail_url=thumbnail_url, error_code=None, error_message=None, ai_provider="gemini", ai_model=self._analyzer.model)
+            self._repository.insert_event(job.id, event_type="gemini_inline_video_started", message="Gemini inline video analysis started.", metadata={"model": self._analyzer.model, "stage": "video_observation", "mime_type": video.mime_type, "size_bytes": video.size_bytes})
+            try:
+                outcome = self._analyzer.analyze_video_bytes(
+                    video.buffer.getvalue(),
+                    video.mime_type,
+                    on_event=lambda event_type, metadata: self._repository.insert_event(job.id, event_type=event_type, message=event_type.replace("_", " ").capitalize() + ".", metadata=metadata),
+                    before_call=lambda model, stage: self._start_gemini_api_call(job.id, model=model, stage=stage),
+                )
+            except GeminiCallGuardError as exc:
+                raise PipelineFailure(exc.code, exc.message, exc.metadata) from exc
+            except GeminiAnalysisError as exc:
+                raise PipelineFailure(exc.code, gemini_user_message(exc.code), {"stage": "gemini_inline_video", "attempted_models": exc.attempted_models, "final_model": exc.final_model, "attempts_count": exc.attempts_count, "provider_error_type": exc.provider_error_type, "provider_error_message": exc.provider_error_message}) from exc
+            self._repository.insert_event(job.id, event_type="gemini_inline_video_completed", message="Gemini inline video analysis completed.", metadata={"model": outcome.model, "stage": "recipe_normalization"})
+
+            job = self._repository.update_job(job.id, status="saving_result", progress=85, error_code=None, error_message=None)
+            if job.recipe_item_id is None:
+                raise PipelineFailure("recipe_item_required", "A saved recipe is required before analysis can be completed.")
+            recipe_card_id = self._repository.insert_recipe_card(job=job, result=outcome.result, model=outcome.model)
+            self._repository.insert_event(job.id, event_type="recipe_card_saved", message="Recipe card saved.", metadata={"ingredients_count": len(outcome.result.ingredients), "steps_count": len(outcome.result.steps)})
+            job = self._repository.update_job(job.id, status="completed", progress=100, result_recipe_card_id=recipe_card_id, ai_provider="gemini", ai_model=outcome.model, thumbnail_url=thumbnail_url, completed_at=datetime.now(timezone.utc).isoformat(), error_code=None, error_message=None)
+            self._repository.insert_event(job.id, event_type="completed", message="Social video recipe analysis completed.", metadata={"platform": platform, "model": outcome.model, "status": "completed"})
+            return job
+        finally:
+            if video is not None:
+                video.buffer.close()
+
+    def _upload_social_thumbnail_best_effort(self, job: MediaJobRecord, thumbnail_url: str | None, settings: Settings) -> str | None:
+        self._repository.insert_event(job.id, event_type="thumbnail_upload_started", message="Thumbnail upload started.", metadata={"thumbnail_uploaded": False})
+        try:
+            public_url = upload_source_thumbnail(thumbnail_url, user_id=job.user_id, media_job_id=job.id, repository=self._repository, settings=settings)
+            if public_url:
+                self._repository.insert_event(job.id, event_type="thumbnail_uploaded", message="Thumbnail uploaded.", metadata={"thumbnail_uploaded": True})
+                self._update_recipe_thumbnail_best_effort(job, public_url)
+            return public_url
+        except Exception as exc:
+            self._repository.insert_event(job.id, event_type="thumbnail_upload_failed", message="Thumbnail upload failed.", metadata={"thumbnail_uploaded": False, "error_code": "thumbnail_upload_failed", "exception_type": type(exc).__name__})
+            return None
+
+    def _update_social_metadata_best_effort(self, job: MediaJobRecord, info: SocialVideoInfo) -> None:
+        try:
+            self._repository.update_job_metadata_best_effort(job.id, {"media_duration_seconds": int(info.duration_seconds) if info.duration_seconds is not None else None, "media_size_bytes": info.filesize_approx, "source_title": info.title, "source_thumbnail_url": info.thumbnail_url})
+        except Exception as exc:
+            logger.warning("social_metadata_update_failed", extra={"media_job_id": str(job.id), "exception_type": type(exc).__name__})
 
     def _run_youtube(self, job: MediaJobRecord) -> MediaJobRecord:
         media_job_id = job.id
@@ -656,4 +803,22 @@ def gemini_user_message(error_code: str) -> str:
         return GEMINI_INVALID_JSON_MESSAGE
     if error_code == "gemini_empty_observation":
         return "Gemini could not extract useful recipe details from this video."
-    return "YouTube recipe analysis failed. Please try again."
+    if error_code == "gemini_inline_video_not_supported":
+        return "Inline video analysis is not supported by the current worker configuration."
+    if error_code == "gemini_video_bytes_failed":
+        return "Social video analysis failed. Please try again."
+    return "Video recipe analysis failed. Please try again."
+
+
+def _social_metadata(info: SocialVideoInfo) -> dict[str, object]:
+    return {
+        "platform": info.platform,
+        "resolver": "yt-dlp",
+        "duration_seconds": info.duration_seconds,
+        "has_thumbnail": bool(info.thumbnail_url),
+        "selected_ext": info.ext,
+        "selected_height": info.height,
+        "selected_protocol": info.selected_protocol,
+        "format_count": info.format_count,
+        "has_stream_headers": bool(info.stream_headers),
+    }

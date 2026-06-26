@@ -9,15 +9,18 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 WorkerMode = Literal[
     "skeleton",
     "youtube_direct",
+    "social_video",
     "apify_instagram",
     "rapidapi_social",
     "ytdlp_dev",
 ]
+MediaPipelineMode = Literal["youtube_direct", "social_stream"]
 
 
 class Settings(BaseSettings):
     app_env: str = "development"
     worker_mode: WorkerMode = "skeleton"
+    media_pipeline_mode: MediaPipelineMode = "youtube_direct"
     worker_api_secret: SecretStr
     supabase_url: str
     supabase_service_role_key: SecretStr
@@ -43,7 +46,38 @@ class Settings(BaseSettings):
     )
     gemini_dev_budget_reset_at: Optional[str] = None
     max_video_duration_seconds: int = 90
-    max_video_size_mb: int = 60
+    max_video_size_mb: int = 30
+    enable_social_video: bool = False
+    enable_yt_dlp: bool = False
+    cookie_dir: str = "/app/cookies"
+    cookie_file_path: str = "/app/cookies.txt"
+    enable_cookie_file: bool = True
+    enable_generic_cookie_fallback: bool = False
+    tiktok_cookie_file: str = "/app/cookies/tiktok.txt"
+    instagram_cookie_file: str = "/app/cookies/instagram.txt"
+    facebook_cookie_file: str = "/app/cookies/facebook.txt"
+    ytdlp_extract_timeout_seconds: int = 45
+    ytdlp_socket_timeout_seconds: int = 15
+    ytdlp_retries: int = 1
+    ytdlp_use_subprocess: bool = True
+    ytdlp_force_generic: bool = False
+    ytdlp_enable_impersonation: bool = False
+    enable_ytdlp_stdout_fallback: bool = False
+    max_memory_buffer_mb: int = 35
+    max_video_height: int = 720
+    thumbnail_bucket: str = "recipe-thumbnails"
+    use_source_thumbnail_first: bool = True
+    store_raw_media: bool = False
+    delete_raw_media_after_processing: bool = True
+    enable_tikwm_resolver: bool = True
+    tikwm_api_url: str = "https://www.tikwm.com/api/"
+    tikwm_timeout_seconds: int = 15
+    tikwm_hd: bool = True
+    tikwm_user_agent: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+    )
+    tikwm_probe_bytes: int = 262144
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -63,6 +97,10 @@ class Settings(BaseSettings):
     @property
     def gemini_configured(self) -> bool:
         return self.gemini_api_key is not None
+
+    @property
+    def tikwm_configured(self) -> bool:
+        return self.enable_tikwm_resolver and bool(self.tikwm_api_url.strip())
 
     @field_validator("gemini_video_fallback_models", mode="before")
     @classmethod
@@ -96,12 +134,19 @@ class Settings(BaseSettings):
         known_modes = {
             "skeleton",
             "youtube_direct",
+            "social_video",
             "apify_instagram",
             "rapidapi_social",
             "ytdlp_dev",
         }
         normalized = str(value).strip().lower()
         return normalized if normalized in known_modes else "skeleton"
+
+    @field_validator("media_pipeline_mode", mode="before")
+    @classmethod
+    def fallback_unknown_media_pipeline_mode(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return normalized if normalized in {"youtube_direct", "social_stream"} else "youtube_direct"
 
 
 @lru_cache
