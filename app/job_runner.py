@@ -567,6 +567,7 @@ class JobRunner:
         self._gemini_daily_dev_model_limits = gemini_daily_dev_model_limits or {}
         self._gemini_dev_budget_reset_at = gemini_dev_budget_reset_at
         self._settings = settings
+        self._private_metadata_saved_job_ids: set[UUID] = set()
 
     def accept(
         self,
@@ -1033,7 +1034,12 @@ class JobRunner:
 
             self._check_job_runtime(job.id, job_started_at)
             job = self._repository.update_job(job.id, status=JOB_STATUS_DOWNLOADING, progress=45, error_code=None, error_message=None)
-            thumbnail_url = self._upload_social_thumbnail_best_effort(job, info.thumbnail_url, settings)
+            thumbnail_url = self._upload_social_thumbnail_best_effort(
+                job,
+                info.thumbnail_url,
+                settings,
+                info=info,
+            )
 
             self._filter_model_candidates(job.id)
             self._check_job_runtime(job.id, job_started_at)
@@ -1276,6 +1282,7 @@ class JobRunner:
             job,
             info.thumbnail_url,
             settings,
+            info=info,
         )
         if settings.ai_analysis_mode == "mock_fixture":
             return self._run_mock_fixture_analysis(
@@ -2067,19 +2074,41 @@ class JobRunner:
                 except Exception:
                     pass
 
-    def _upload_social_thumbnail_best_effort(self, job: MediaJobRecord, thumbnail_url: str | None, settings: Settings) -> str | None:
+    def _upload_social_thumbnail_best_effort(
+        self,
+        job: MediaJobRecord,
+        thumbnail_url: str | None,
+        settings: Settings,
+        *,
+        info: SocialVideoInfo | None = None,
+    ) -> str | None:
         self._repository.insert_event(job.id, event_type="thumbnail_upload_started", message="Thumbnail upload started.", metadata={"thumbnail_uploaded": False})
         try:
             public_url = upload_source_thumbnail(thumbnail_url, user_id=job.user_id, media_job_id=job.id, repository=self._repository, settings=settings)
             if public_url:
                 self._repository.insert_event(job.id, event_type="thumbnail_uploaded", message="Thumbnail uploaded.", metadata={"thumbnail_uploaded": True})
                 self._update_recipe_thumbnail_best_effort(job, public_url)
+                if info is not None:
+                    self._save_source_metadata_best_effort(
+                        job,
+                        info,
+                        uploaded_thumbnail_url=public_url,
+                        private_metadata_saved=(
+                            job.id in self._private_metadata_saved_job_ids
+                        ),
+                    )
             return public_url
         except Exception as exc:
             self._repository.insert_event(job.id, event_type="thumbnail_upload_failed", message="Thumbnail upload failed.", metadata={"thumbnail_uploaded": False, "error_code": "thumbnail_upload_failed", "exception_type": type(exc).__name__})
             return None
 
     def _update_social_metadata_best_effort(self, job: MediaJobRecord, info: SocialVideoInfo) -> None:
+        private_metadata_saved = self._save_private_metadata_best_effort(job, info)
+        self._save_source_metadata_best_effort(
+            job,
+            info,
+            private_metadata_saved=private_metadata_saved,
+        )
         values = {
             "media_duration_seconds": int(info.duration_seconds) if info.duration_seconds is not None else None,
             "media_size_bytes": info.filesize_approx,
@@ -2107,6 +2136,81 @@ class JobRunner:
                     )
                 except Exception:
                     pass
+
+    def _save_source_metadata_best_effort(
+        self,
+        job: MediaJobRecord,
+        info: SocialVideoInfo,
+        *,
+        uploaded_thumbnail_url: str | None = None,
+        private_metadata_saved: bool | None = None,
+    ) -> None:
+        metadata = social_metadata_event_metadata(info)
+        try:
+            self._repository.insert_event(
+                job.id,
+                event_type="source_metadata_update_started",
+                message="Source metadata update started.",
+                metadata=metadata,
+            )
+            self._repository.update_source_metadata(
+                job.id,
+                build_public_source_metadata(
+                    info,
+                    uploaded_thumbnail_url=uploaded_thumbnail_url,
+                    private_metadata_saved=private_metadata_saved,
+                ),
+            )
+            self._repository.insert_event(
+                job.id,
+                event_type="source_metadata_updated",
+                message="Source metadata updated.",
+                metadata=metadata,
+            )
+        except Exception:
+            try:
+                self._repository.insert_event(
+                    job.id,
+                    event_type="source_metadata_update_failed",
+                    message="Source metadata update failed.",
+                    metadata=metadata,
+                )
+            except Exception:
+                pass
+
+    def _save_private_metadata_best_effort(
+        self,
+        job: MediaJobRecord,
+        info: SocialVideoInfo,
+    ) -> bool:
+        metadata = social_metadata_event_metadata(info)
+        try:
+            self._repository.upsert_private_metadata(
+                job.id,
+                platform=info.platform,
+                resolver=info.resolver,
+                cdn_url=info.stream_url,
+                raw_metadata=info.raw_metadata,
+            )
+            self._repository.insert_event(
+                job.id,
+                event_type="private_metadata_saved",
+                message="Private source metadata saved.",
+                metadata=metadata,
+            )
+            self._private_metadata_saved_job_ids.add(job.id)
+            return True
+        except Exception:
+            try:
+                self._repository.insert_event(
+                    job.id,
+                    event_type="private_metadata_save_failed",
+                    message="Private source metadata save failed.",
+                    metadata=metadata,
+                )
+            except Exception:
+                pass
+            return False
 
     def _run_youtube(self, job: MediaJobRecord, job_started_at: float) -> MediaJobRecord:
         media_job_id = job.id
@@ -2677,6 +2781,54 @@ def _social_metadata(info: SocialVideoInfo) -> dict[str, object]:
         "ext": info.ext,
         "mime_type": info.mime_type,
         "has_stream_headers": bool(info.stream_headers),
+    }
+
+
+def build_public_source_metadata(
+    info: SocialVideoInfo,
+    *,
+    uploaded_thumbnail_url: str | None = None,
+    private_metadata_saved: bool | None = None,
+) -> dict[str, object]:
+    title = info.title or ""
+    has_stream = bool(info.stream_url)
+    return {
+        "platform": info.platform,
+        "resolver": info.resolver,
+        "title": title,
+        "description": title,
+        "author_username": info.uploader or "",
+        "duration_seconds": info.duration_seconds,
+        "thumbnail_source_present": bool(info.thumbnail_url),
+        "uploaded_thumbnail_url": uploaded_thumbnail_url,
+        "media": {
+            "has_cdn_url": has_stream,
+            "cdn_url_stored_private": (
+                has_stream
+                if private_metadata_saved is None
+                else has_stream and private_metadata_saved
+            ),
+            "mime_type": info.mime_type,
+            "size_bytes": info.filesize_approx,
+            "width": None,
+            "height": None,
+        },
+        "resolved_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def social_metadata_event_metadata(info: SocialVideoInfo) -> dict[str, object]:
+    title = info.title or ""
+    return {
+        "platform": info.platform,
+        "resolver": info.resolver,
+        "title_present": bool(title),
+        "description_present": bool(title),
+        "duration_seconds": info.duration_seconds,
+        "has_thumbnail": bool(info.thumbnail_url),
+        "has_cdn_url": bool(info.stream_url),
+        "mime_type": info.mime_type,
+        "size_bytes": info.filesize_approx,
     }
 
 

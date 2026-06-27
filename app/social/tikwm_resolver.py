@@ -140,6 +140,7 @@ def resolve_with_tikwm(
         if isinstance(data.get("author"), dict)
         else None,
         filesize_approx=filesize,
+        raw_metadata=data,
     )
 
 

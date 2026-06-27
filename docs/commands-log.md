@@ -200,3 +200,13 @@ grep -R "temporary_download_url" -n app docs || true
 grep -R "cdn_download_url.*insert\|cdn_download_url.*update" -n app docs || true
 # matched only historical commands-log entries
 ```
+
+## W-M15D1 Validation
+
+```bash
+python3 -m compileall app
+# passed
+
+grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url" -n app docs || true
+# matched only historical commands-log entries
+```

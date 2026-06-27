@@ -97,6 +97,38 @@ class MediaJobRepository:
             return
         self._client.table("media_jobs").update(values).eq("id", str(media_job_id)).execute()
 
+    def update_source_metadata(
+        self,
+        media_job_id: UUID,
+        source_metadata: dict[str, Any],
+    ) -> None:
+        self._client.table("media_jobs").update(
+            {"source_metadata": source_metadata}
+        ).eq("id", str(media_job_id)).execute()
+
+    def upsert_private_metadata(
+        self,
+        media_job_id: UUID,
+        *,
+        platform: str,
+        resolver: str,
+        cdn_url: str | None,
+        raw_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        values = {
+            "media_job_id": str(media_job_id),
+            "platform": platform,
+            "resolver": resolver,
+            "cdn_url": cdn_url,
+            "cdn_url_expires_at": None,
+            "raw_metadata": raw_metadata,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }
+        self._client.table("media_job_private_metadata").upsert(
+            values,
+            on_conflict="media_job_id",
+        ).execute()
+
     def insert_event(
         self,
         media_job_id: UUID,

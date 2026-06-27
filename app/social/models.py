@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 class SocialResolverError(Exception):
@@ -33,3 +34,4 @@ class SocialVideoInfo:
     filename: str | None
     uploader: str | None
     filesize_approx: int | None
+    raw_metadata: dict[str, Any] | None = None
