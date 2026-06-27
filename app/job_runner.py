@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -9,6 +10,8 @@ from time import perf_counter
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
+import requests
+
 from app.ai.gemini_recipe import (
     TEMPORARY_GEMINI_ERRORS,
     GeminiAnalysisError,
@@ -16,7 +19,14 @@ from app.ai.gemini_recipe import (
     GeminiRecipeAnalyzer,
 )
 from app.config import Settings, WorkerMode
-from app.schemas import MediaJobData, MediaJobRecord
+from app.schemas import (
+    GeminiRecipeResult,
+    GroceryItem,
+    MediaJobData,
+    MediaJobRecord,
+    RecipeIngredient,
+    RecipeStep,
+)
 from app.social.platforms import detect_social_platform
 from app.social.stream_download import VideoBuffer, stream_video_to_memory
 from app.social.thumbnail_upload import upload_source_thumbnail
@@ -81,6 +91,192 @@ class PipelineFailure(Exception):
         self.code = code
         self.user_message = user_message
         self.metadata = metadata or {}
+
+
+CAPTION_RECIPE_PROMPT = """\
+You are Recipe Dost, an AI recipe assistant.
+Extract a recipe from the social media caption/title below.
+Strict JSON only. No markdown fences. No commentary.
+
+Do not invent ingredients, quantities, or steps that are not present.
+If the text is not a recipe or is too thin, return is_recipe=false.
+
+Return exactly this JSON shape:
+{
+  "is_recipe": true,
+  "confidence": "high",
+  "title": "string",
+  "summary": "string",
+  "ingredients": ["string"],
+  "steps": ["string"],
+  "servings": null,
+  "time_minutes": null,
+  "tags": ["string"]
+}"""
+
+
+def _extract_json_object(text: str) -> dict:
+    try:
+        value = json.loads(text)
+        if isinstance(value, dict):
+            return value
+    except json.JSONDecodeError:
+        pass
+    start = text.find("{")
+    if start < 0:
+        raise ValueError("No JSON object found in response.")
+    depth = 0
+    for index in range(start, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start : index + 1]
+                try:
+                    value = json.loads(candidate)
+                    if isinstance(value, dict):
+                        return value
+                except json.JSONDecodeError:
+                    pass
+                break
+    raise ValueError("No JSON object found in response.")
+
+
+def _build_caption_recipe_prompt(
+    caption: str,
+    platform: str,
+    duration_seconds: float | None,
+) -> str:
+    duration = "unknown" if duration_seconds is None else str(duration_seconds)
+    return (
+        f"{CAPTION_RECIPE_PROMPT}\n\n"
+        f"Platform: {platform}\n"
+        f"Duration seconds: {duration}\n\n"
+        f"Caption/title:\n{caption.strip()}"
+    )
+
+
+def _gemini_caption_to_recipe_sync(
+    *,
+    api_key: str,
+    model: str,
+    caption: str,
+    platform: str,
+    duration_seconds: float | None,
+    timeout_seconds: int = 45,
+) -> dict:
+    if not api_key:
+        raise RuntimeError("gemini_api_key_missing")
+
+    prompt = _build_caption_recipe_prompt(caption, platform, duration_seconds)
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent"
+    )
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key,
+    }
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=timeout_seconds)
+    if response.status_code == 429:
+        raise RuntimeError("gemini_rate_limited")
+    if response.status_code >= 400:
+        raise RuntimeError(f"gemini_api_error_{response.status_code}")
+
+    body = response.json()
+    try:
+        text = body["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("gemini_api_error_missing_text") from exc
+
+    return _extract_json_object(text)
+
+
+def _caption_result_to_recipe_result(parsed: dict) -> GeminiRecipeResult:
+    title = parsed.get("title", "Recipe")
+    summary = parsed.get("summary", "")
+    ingredients_raw = parsed.get("ingredients") or []
+    steps_raw = parsed.get("steps") or []
+    servings = parsed.get("servings")
+    time_minutes = parsed.get("time_minutes")
+    confidence = str(parsed.get("confidence", "medium")).strip().lower()
+    tags = parsed.get("tags") or []
+
+    recipe_ingredients = [
+        RecipeIngredient(
+            name_en=str(i).strip(),
+            name_ur="",
+            quantity="",
+            notes_en="",
+            notes_ur="",
+        )
+        for i in ingredients_raw
+    ]
+
+    recipe_steps = [
+        RecipeStep(
+            step_number=idx + 1,
+            instruction_en=str(s).strip(),
+            instruction_ur="",
+            tip_en="",
+            tip_ur="",
+        )
+        for idx, s in enumerate(steps_raw)
+    ]
+
+    grocery_items = [
+        GroceryItem(name_en=str(i).strip(), name_ur="", quantity="")
+        for i in ingredients_raw
+    ]
+
+    prep_time = None
+    cook_time = None
+    if isinstance(time_minutes, (int, float)) and time_minutes > 0:
+        prep_time = int(time_minutes)
+
+    difficulty = (
+        confidence
+        if confidence in {"easy", "medium", "hard"}
+        else "unknown"
+    )
+
+    return GeminiRecipeResult(
+        recipe_title_en=title,
+        recipe_title_ur="",
+        short_summary_en=summary,
+        short_summary_ur="",
+        confidence=confidence,
+        prep_time_minutes=prep_time,
+        cook_time_minutes=cook_time,
+        servings=str(servings) if servings else None,
+        difficulty=difficulty,
+        ingredients=recipe_ingredients,
+        steps=recipe_steps,
+        grocery_list=grocery_items,
+        missing_info_en=tags,
+        missing_info_ur=[],
+        storage_tip_en="",
+        storage_tip_ur="",
+        safety_note_en="",
+        safety_note_ur="",
+        source_assumptions_en=[],
+        source_assumptions_ur=[],
+    )
 
 
 class JobRunner:
@@ -787,7 +983,7 @@ class JobRunner:
         settings: Settings,
         job_started_at: float,
     ) -> MediaJobRecord:
-        if self._analyzer is None:
+        if settings.gemini_api_key is None:
             raise PipelineFailure(
                 "gemini_not_configured",
                 "Gemini video analysis is not configured yet.",
@@ -803,6 +999,7 @@ class JobRunner:
             info.thumbnail_url,
             settings,
         )
+        model = settings.effective_gemini_text_model
         job = self._repository.update_job(
             job.id,
             status=JOB_STATUS_ANALYZING,
@@ -811,7 +1008,7 @@ class JobRunner:
             error_code=None,
             error_message=None,
             ai_provider="gemini",
-            ai_model=self._analyzer.text_model,
+            ai_model=model,
         )
         self._repository.insert_event(
             job.id,
@@ -825,65 +1022,141 @@ class JobRunner:
                 "video_duration_exceeded": video_duration_exceeded,
             },
         )
+
+        api_key = settings.gemini_api_key.get_secret_value()
         try:
-            outcome = self._analyzer.analyze_social_text(
-                caption_text=(info.title or "").strip(),
-                platform=info.platform,
-                duration_seconds=info.duration_seconds,
-                on_event=lambda event_type, metadata: self._handle_gemini_event(
-                    job.id,
-                    event_type,
-                    metadata,
-                    thumbnail_url,
-                ),
-                before_call=lambda model, stage: self._start_gemini_api_call(
-                    job.id,
-                    model=model,
-                    stage=stage,
-                ),
+            self._start_gemini_api_call(
+                job.id,
+                model=model,
+                stage="social_text_analysis",
             )
         except GeminiCallGuardError as exc:
             raise PipelineFailure(exc.code, exc.message, exc.metadata) from exc
-        except GeminiAnalysisError as exc:
-            if exc.code == "insufficient_recipe_details":
-                raise PipelineFailure(
-                    "insufficient_recipe_details",
-                    (
-                        "The caption does not include enough recipe details. "
-                        "Please paste the recipe caption or try another video."
-                    ),
-                    {
-                        "platform": info.platform,
-                        "resolver": info.resolver,
-                        "stage": "social_text_analysis",
-                        "final_model": exc.final_model,
-                    },
-                ) from exc
-            if exc.code == "gemini_text_timeout":
-                raise PipelineFailure(
-                    "gemini_text_timeout",
-                    (
-                        "Recipe analysis took too long. Please try again or "
-                        "paste the caption manually."
-                    ),
-                    {
-                        "platform": info.platform,
-                        "resolver": info.resolver,
-                        "stage": "social_text_analysis",
-                        "final_model": exc.final_model,
-                    },
-                ) from exc
-            raise PipelineFailure(
-                exc.code,
-                gemini_user_message(exc.code),
-                {
-                    "platform": info.platform,
-                    "resolver": info.resolver,
+
+        call_started_at = perf_counter()
+        try:
+            parsed = _gemini_caption_to_recipe_sync(
+                api_key=api_key,
+                model=model,
+                caption=(info.title or "").strip(),
+                platform=info.platform,
+                duration_seconds=info.duration_seconds,
+                timeout_seconds=settings.social_text_gemini_timeout_seconds,
+            )
+        except requests.Timeout:
+            elapsed_ms = int((perf_counter() - call_started_at) * 1000)
+            self._repository.insert_event(
+                job.id,
+                event_type="gemini_api_call_failed",
+                message="Gemini API call failed.",
+                metadata={
+                    "model": model,
                     "stage": "social_text_analysis",
-                    "final_model": exc.final_model,
-                    "provider_error_type": exc.provider_error_type,
+                    "elapsed_ms": elapsed_ms,
+                    "error_code": "gemini_text_timeout",
+                    "exception_type": "Timeout",
                 },
-            ) from exc
+            )
+            raise PipelineFailure(
+                "gemini_text_timeout",
+                "Recipe analysis took too long. Please try again or paste the caption manually.",
+                {"platform": info.platform, "stage": "social_text_analysis", "model": model},
+            )
+        except RuntimeError as exc:
+            error_msg = str(exc)
+            elapsed_ms = int((perf_counter() - call_started_at) * 1000)
+            if error_msg == "gemini_rate_limited":
+                error_code = "gemini_rate_limited"
+                user_message = "Recipe analysis is temporarily rate-limited. Please try again."
+            elif error_msg.startswith("gemini_api_error_"):
+                error_code = "gemini_api_error"
+                user_message = "Recipe analysis is temporarily unavailable. Please try again."
+            elif error_msg == "gemini_api_key_missing":
+                error_code = "gemini_api_key_missing"
+                user_message = "Recipe analysis is not configured."
+            else:
+                error_code = "gemini_api_error"
+                user_message = "Recipe analysis is temporarily unavailable. Please try again."
+            self._repository.insert_event(
+                job.id,
+                event_type="gemini_api_call_failed",
+                message="Gemini API call failed.",
+                metadata={
+                    "model": model,
+                    "stage": "social_text_analysis",
+                    "elapsed_ms": elapsed_ms,
+                    "error_code": error_code,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            raise PipelineFailure(
+                error_code,
+                user_message,
+                {"platform": info.platform, "stage": "social_text_analysis", "model": model},
+            )
+        except ValueError:
+            elapsed_ms = int((perf_counter() - call_started_at) * 1000)
+            self._repository.insert_event(
+                job.id,
+                event_type="gemini_api_call_failed",
+                message="Gemini API call failed.",
+                metadata={
+                    "model": model,
+                    "stage": "social_text_analysis",
+                    "elapsed_ms": elapsed_ms,
+                    "error_code": "gemini_api_error",
+                    "exception_type": "ValueError",
+                },
+            )
+            raise PipelineFailure(
+                "gemini_api_error",
+                "Recipe analysis is temporarily unavailable. Please try again.",
+                {"platform": info.platform, "stage": "social_text_analysis", "model": model},
+            )
+
+        self._repository.insert_event(
+            job.id,
+            event_type="gemini_api_call_completed",
+            message="Gemini API call completed.",
+            metadata={
+                "model": model,
+                "stage": "social_text_analysis",
+                "elapsed_ms": int((perf_counter() - call_started_at) * 1000),
+            },
+        )
+
+        is_recipe = parsed.get("is_recipe")
+        if is_recipe is not True:
+            raise PipelineFailure(
+                "insufficient_recipe_details",
+                "The caption does not include enough recipe details. Please paste the recipe caption or try another video.",
+                {"platform": info.platform, "stage": "social_text_analysis", "model": model},
+            )
+
+        confidence = str(parsed.get("confidence", "medium")).strip().lower()
+        if confidence == "low":
+            raise PipelineFailure(
+                "insufficient_recipe_details",
+                "The caption does not include enough recipe details. Please paste the recipe caption or try another video.",
+                {"platform": info.platform, "stage": "social_text_analysis", "model": model},
+            )
+
+        ingredients = parsed.get("ingredients") or []
+        steps = parsed.get("steps") or []
+        if not isinstance(ingredients, list) or len(ingredients) == 0:
+            raise PipelineFailure(
+                "insufficient_recipe_details",
+                "The caption does not include enough recipe details. Please paste the recipe caption or try another video.",
+                {"platform": info.platform, "stage": "social_text_analysis", "model": model},
+            )
+        if not isinstance(steps, list) or len(steps) == 0:
+            raise PipelineFailure(
+                "insufficient_recipe_details",
+                "The caption does not include enough recipe details. Please paste the recipe caption or try another video.",
+                {"platform": info.platform, "stage": "social_text_analysis", "model": model},
+            )
+
+        result = _caption_result_to_recipe_result(parsed)
 
         self._check_job_runtime(job.id, job_started_at)
         job = self._repository.update_job(
@@ -907,8 +1180,8 @@ class JobRunner:
             )
         recipe_card_id = self._repository.insert_recipe_card(
             job=job,
-            result=outcome.result,
-            model=outcome.model,
+            result=result,
+            model=model,
         )
         self._repository.insert_event(
             job.id,
@@ -922,7 +1195,7 @@ class JobRunner:
             progress=100,
             result_recipe_card_id=recipe_card_id,
             ai_provider="gemini",
-            ai_model=outcome.model,
+            ai_model=model,
             thumbnail_url=thumbnail_url,
             completed_at=datetime.now(timezone.utc).isoformat(),
             error_code=None,
@@ -935,7 +1208,7 @@ class JobRunner:
             metadata={
                 "platform": info.platform,
                 "resolver": info.resolver,
-                "model": outcome.model,
+                "model": model,
                 "status": JOB_STATUS_COMPLETED,
                 "analysis_mode": "text_first",
             },

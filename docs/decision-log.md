@@ -20,6 +20,7 @@ Keep this file terse: only durable architecture decisions, not full task history
 - Instagram and Facebook are disabled for the Render POC by default through `ENABLE_RENDER_INSTAGRAM_RESOLVER=false` and `ENABLE_RENDER_FACEBOOK_RESOLVER=false`; they fail with controlled DB statuses until separately validated.
 - W-M14R1A aligns the worker with the app database: `create-media-job` manual mode creates `queued` jobs, `/process-job` accepts `queued`, and the worker acquires them by updating to `resolving`. The status path is `queued -> resolving -> analyzing/downloading -> completed/failed`.
 - W-M14R1B routes jobs by `media_jobs.platform` before URL host fallback. TikTok always enters the TikWM text-first branch before the legacy YouTube-only unsupported fallback, with no raw video storage and no TikWM CDN URL storage.
+- W-M14R1C replaces the failing Gemini SDK `analyze_social_text` helper with a direct synchronous REST call to `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` using `requests.post(timeout=45)`. The TikTok text-first path now uses `_gemini_caption_to_recipe_sync` which manages its own prompt, error handling, and JSON extraction. No video streaming. No raw video storage. No CDN URL storage. Quota guards (`_start_gemini_api_call`) are preserved.
 
 ## Next Decision To Prove
 

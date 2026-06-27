@@ -15,6 +15,7 @@
 - W-M14R1A accepts `queued` jobs from `create-media-job` manual mode and acquires them as `resolving`.
 - W-M14R1B routes TikTok jobs by `media_jobs.platform` into TikWM text-first before the old YouTube-only unsupported branch.
 - W-M14R1 keeps TikTok strictly text-first for the Render POC: TikWM metadata, duration guard, thumbnail upload, one Gemini text call, recipe card save. TikTok video bytes are not streamed in this milestone.
+- W-M14R1C replaces the failing Gemini SDK helper with a direct synchronous REST call (`requests.post`) to `generateContent`. The call uses `timeout=45`, JSON generation config (`temperature=0.2`, `responseMimeType=application/json`), and explicit error handling for timeouts, rate limits (429), API key missing, and JSON parse failures. The caption prompt is a module-level constant `CAPTION_RECIPE_PROMPT` separate from the SDK's `SOCIAL_TEXT_PROMPT`. TikTok text-first now emits `gemini_api_call_started` and `gemini_api_call_completed` (or `gemini_api_call_failed`) events.
 
 ## TikTok / TikWM Finding
 

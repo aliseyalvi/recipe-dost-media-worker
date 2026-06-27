@@ -164,3 +164,13 @@ env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python -m com
 # requested YouTube-only fallback grep over app
 # matched the intended fallback in app/job_runner.py; exact grep also reported stale pycache
 ```
+
+## W-M14R1C Validation
+
+```bash
+python3 -m compileall app
+# passed
+
+grep -R "temporary_download_url" -n app docs || true
+# no matches
+```

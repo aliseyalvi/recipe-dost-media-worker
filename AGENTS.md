@@ -93,7 +93,7 @@ On this Mac, `python3 -m compileall app` has passed.
 |---|---|---|
 | W-M14R1A Accept queued jobs | Done | Render async worker accepts `queued` jobs from create-media-job manual mode |
 | W-M14R1B TikTok routing to TikWM | Done | Queued TikTok jobs route to TikWM text-first before unsupported fallback |
-| W-M14R1C Replace Gemini text helper with sync REST call | Current | Replace failing TikTok text-first Gemini helper with direct synchronous REST call to Gemini generateContent |
+| W-M14R1C Replace Gemini text helper with sync REST call | Done | Replace failing TikTok text-first Gemini helper with direct synchronous REST call to Gemini generateContent |
 | W-M14R2 Deploy worker to Render | Next | Deploy and retest full end-to-end on Render Free |
 
 ## After Every Task
