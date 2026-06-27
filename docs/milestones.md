@@ -22,9 +22,10 @@
 | 18 | W-M15A TikTok video-to-Gemini fallback | Done | After text-first insufficient, fall back to video Gemini behind ENABLE_SOCIAL_VIDEO_GEMINI flag |
 | 19 | W-M15D0 Mock Fixture AI Mode | Done | Development mode skips Gemini calls and saves a fixed fixture recipe through the real worker pipeline |
 | 20 | W-M15D1 Public/private resolver metadata persistence | Done | Save app-visible resolver metadata separately from private CDN/raw metadata |
-| 21 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 22 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 23 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 21 | W-M15D2 Resolver adapter matrix without Cobalt | Done | Mock mode supports TikTok, YouTube, Instagram, and Facebook resolver adapters without Gemini quota |
+| 22 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 23 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 24 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
@@ -41,3 +42,4 @@ Deploy and rerun M14G-4R2 after W-M14R1:
 - Known videos longer than `MAX_VIDEO_DURATION_SECONDS` should fail with `video_duration_exceeded` before stream or Gemini events.
 - For quota-free app/backend testing, set `AI_ANALYSIS_MODE=mock_fixture`; TikTok still resolves through TikWM and uploads the real thumbnail, then emits `mock_ai_analysis_started`/`mock_ai_analysis_completed` and saves `app/fixtures/mock_recipe_card.json` without Gemini quota usage.
 - Resolver metadata is now split: `media_jobs.source_metadata` gets public app-visible fields and media flags, while CDN/raw resolver data is saved only in `media_job_private_metadata`.
+- Mock mode resolver matrix: TikTok uses TikWM, YouTube uses yt-dlp metadata, Instagram uses SnapInsta behind `ENABLE_RENDER_INSTAGRAM_RESOLVER`, and Facebook uses SnapSave behind `ENABLE_RENDER_FACEBOOK_RESOLVER`.

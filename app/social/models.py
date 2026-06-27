@@ -35,3 +35,6 @@ class SocialVideoInfo:
     uploader: str | None
     filesize_approx: int | None
     raw_metadata: dict[str, Any] | None = None
+    description: str | None = None
+    width: int | None = None
+    height: int | None = None

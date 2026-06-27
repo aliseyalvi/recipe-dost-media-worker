@@ -210,3 +210,13 @@ python3 -m compileall app
 grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url" -n app docs || true
 # matched only historical commands-log entries
 ```
+
+## W-M15D2 Validation
+
+```bash
+python3 -m compileall app
+# passed
+
+grep -R "cdn_url.*source_metadata|source_metadata.*cdn_url|temporary_download_url" -n app docs || true
+# matched only this historical commands-log entry
+```

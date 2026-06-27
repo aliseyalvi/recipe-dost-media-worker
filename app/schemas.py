@@ -23,6 +23,10 @@ class HealthResponse(BaseModel):
     gemini_text_model: str
     gemini_video_fallback_models_count: int
     ai_analysis_mode: str
+    supported_platforms: list[str]
+    youtube_resolver: str
+    instagram_resolver: str
+    facebook_resolver: str
     mock_video_processing_mode: str
     mock_recipe_fixture_configured: bool
     gemini_max_calls_per_job: int
@@ -34,6 +38,7 @@ class HealthResponse(BaseModel):
     social_analysis_mode: str
     enable_tiktok_text_fallback: bool
     enable_social_video_gemini: bool
+    enable_render_youtube_resolver: bool
     enable_render_instagram_resolver: bool
     enable_render_facebook_resolver: bool
     social_video_gemini_timeout_seconds: int

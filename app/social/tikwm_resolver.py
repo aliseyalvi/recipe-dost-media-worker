@@ -141,6 +141,7 @@ def resolve_with_tikwm(
         else None,
         filesize_approx=filesize,
         raw_metadata=data,
+        description=safe_str(data.get("title")),
     )
 
 

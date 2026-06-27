@@ -11,7 +11,7 @@ from typing import Any
 import requests
 
 from app.config import Settings
-from app.social.models import SocialVideoInfo
+from app.social.models import SocialResolverError, SocialVideoInfo
 from app.social.platforms import detect_social_platform
 
 USER_AGENT = (
@@ -41,6 +41,82 @@ def resolve_social_video(
     if settings.ytdlp_use_subprocess:
         return resolve_social_video_with_subprocess(url, settings, on_strategy_failed)
     return resolve_social_video_with_python_api(url, settings)
+
+
+def resolve_youtube_metadata(
+    url: str,
+    settings: Settings,
+) -> SocialVideoInfo:
+    if not settings.enable_render_youtube_resolver:
+        raise SocialResolverError(
+            "youtube_resolver_disabled",
+            "YouTube processing is not enabled yet.",
+            {"platform": "youtube", "resolver": settings.youtube_resolver},
+        )
+    try:
+        from yt_dlp import YoutubeDL
+    except ImportError as exc:
+        raise SocialResolverError(
+            "youtube_resolver_failed",
+            "YouTube metadata could not be resolved.",
+            {"platform": "youtube", "resolver": "ytdlp"},
+        ) from exc
+
+    opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+        "socket_timeout": settings.ytdlp_socket_timeout_seconds,
+        "retries": settings.ytdlp_retries,
+        "fragment_retries": settings.ytdlp_retries,
+        "format": format_selector(settings),
+    }
+    try:
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as exc:
+        raise SocialResolverError(
+            "youtube_resolver_failed",
+            "YouTube metadata could not be resolved.",
+            {"platform": "youtube", "resolver": "ytdlp"},
+        ) from exc
+    if not isinstance(info, dict):
+        raise SocialResolverError(
+            "youtube_resolver_failed",
+            "YouTube metadata could not be resolved.",
+            {"platform": "youtube", "resolver": "ytdlp"},
+        )
+
+    selected_format = select_optional_direct_video_format(info, settings)
+    stream_url = safe_http_url(selected_format.get("url")) if selected_format else ""
+    filesize = safe_int(
+        (selected_format or {}).get("filesize")
+        or (selected_format or {}).get("filesize_approx")
+        or info.get("filesize")
+        or info.get("filesize_approx")
+    )
+    return SocialVideoInfo(
+        platform="youtube",
+        resolver="ytdlp",
+        title=safe_str(info.get("title")),
+        video_id=safe_str(info.get("id")),
+        duration_seconds=safe_float(info.get("duration")),
+        thumbnail_url=safe_http_url(info.get("thumbnail")),
+        webpage_url=safe_http_url(info.get("webpage_url")),
+        stream_url=stream_url or "",
+        stream_headers=platform_headers("youtube"),
+        ext=safe_str((selected_format or {}).get("ext") or info.get("ext")),
+        mime_type=safe_str((selected_format or {}).get("mime_type")),
+        extractor=safe_str(info.get("extractor")),
+        filename=safe_str((selected_format or {}).get("filename") or info.get("filename")),
+        uploader=safe_str(info.get("uploader") or info.get("channel")),
+        filesize_approx=filesize,
+        raw_metadata=sanitized_ytdlp_metadata(info, selected_format),
+        description=safe_str(info.get("description")),
+        width=safe_int((selected_format or {}).get("width") or info.get("width")),
+        height=safe_int((selected_format or {}).get("height") or info.get("height")),
+    )
 
 
 def resolve_social_video_with_subprocess(
@@ -381,6 +457,16 @@ def select_best_direct_video_format(
     )
 
 
+def select_optional_direct_video_format(
+    info_dict: dict[str, Any],
+    settings: Settings,
+) -> dict[str, Any] | None:
+    try:
+        return select_best_direct_video_format(info_dict, settings)
+    except SocialPipelineError:
+        return None
+
+
 def collect_candidate_formats(info_dict: dict[str, Any]) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     formats = info_dict.get("formats")
@@ -447,6 +533,34 @@ def safe_http_url(value: Any) -> str | None:
     if isinstance(value, str) and value.startswith(("http://", "https://")):
         return value
     return None
+
+
+def sanitized_ytdlp_metadata(
+    info: dict[str, Any],
+    selected_format: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "id": safe_str(info.get("id")),
+        "title": safe_str(info.get("title")),
+        "description_present": bool(safe_str(info.get("description"))),
+        "duration": safe_float(info.get("duration")),
+        "thumbnail_present": bool(safe_http_url(info.get("thumbnail"))),
+        "uploader": safe_str(info.get("uploader") or info.get("channel")),
+        "extractor": safe_str(info.get("extractor")),
+        "ext": safe_str((selected_format or {}).get("ext") or info.get("ext")),
+        "mime_type": safe_str((selected_format or {}).get("mime_type")),
+        "width": safe_int((selected_format or {}).get("width") or info.get("width")),
+        "height": safe_int((selected_format or {}).get("height") or info.get("height")),
+        "filesize_approx": safe_int(
+            (selected_format or {}).get("filesize")
+            or (selected_format or {}).get("filesize_approx")
+            or info.get("filesize")
+            or info.get("filesize_approx")
+        ),
+        "direct_media_present": bool(
+            safe_http_url((selected_format or {}).get("url"))
+        ),
+    }
 
 
 def sanitize_message(message: str | None) -> str:

@@ -130,6 +130,10 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
             settings.gemini_video_fallback_models
         ),
         ai_analysis_mode=settings.ai_analysis_mode,
+        supported_platforms=["tiktok", "youtube", "instagram", "facebook"],
+        youtube_resolver=settings.youtube_resolver,
+        instagram_resolver=settings.instagram_resolver,
+        facebook_resolver=settings.facebook_resolver,
         mock_video_processing_mode=settings.mock_video_processing_mode,
         mock_recipe_fixture_configured=bool(settings.mock_recipe_fixture_path.strip()),
         gemini_max_calls_per_job=settings.gemini_max_calls_per_job,
@@ -145,6 +149,7 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         social_analysis_mode=settings.social_analysis_mode,
         enable_tiktok_text_fallback=settings.enable_tiktok_text_fallback,
         enable_social_video_gemini=settings.enable_social_video_gemini,
+        enable_render_youtube_resolver=settings.enable_render_youtube_resolver,
         enable_render_instagram_resolver=settings.enable_render_instagram_resolver,
         enable_render_facebook_resolver=settings.enable_render_facebook_resolver,
         social_video_gemini_timeout_seconds=settings.social_video_gemini_timeout_seconds,

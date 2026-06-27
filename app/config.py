@@ -19,6 +19,9 @@ GeminiSocialUploadMode = Literal["files_api", "inline"]
 SocialAnalysisMode = Literal["text_first", "video_first", "video_only"]
 AIAnalysisMode = Literal["gemini", "mock_fixture"]
 MockVideoProcessingMode = Literal["skip_video_download", "download_then_mock"]
+YouTubeResolver = Literal["ytdlp"]
+InstagramResolver = Literal["snapinsta"]
+FacebookResolver = Literal["snapsave"]
 
 
 class Settings(BaseSettings):
@@ -90,6 +93,12 @@ class Settings(BaseSettings):
     store_raw_media: bool = False
     delete_raw_media_after_processing: bool = True
     enable_tikwm_resolver: bool = True
+    enable_render_youtube_resolver: bool = True
+    youtube_resolver: YouTubeResolver = "ytdlp"
+    instagram_resolver: InstagramResolver = "snapinsta"
+    facebook_resolver: FacebookResolver = "snapsave"
+    snapinsta_api_url: str = "https://snapinsta.app"
+    snapsave_api_url: str = "https://snapsave.app"
     tikwm_api_url: str = "https://www.tikwm.com/api/"
     tikwm_timeout_seconds: int = 15
     tikwm_hd: bool = True
@@ -230,6 +239,24 @@ class Settings(BaseSettings):
             if normalized in {"skip_video_download", "download_then_mock"}
             else "skip_video_download"
         )
+
+    @field_validator("youtube_resolver", mode="before")
+    @classmethod
+    def fallback_unknown_youtube_resolver(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return normalized if normalized == "ytdlp" else "ytdlp"
+
+    @field_validator("instagram_resolver", mode="before")
+    @classmethod
+    def fallback_unknown_instagram_resolver(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return normalized if normalized == "snapinsta" else "snapinsta"
+
+    @field_validator("facebook_resolver", mode="before")
+    @classmethod
+    def fallback_unknown_facebook_resolver(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return normalized if normalized == "snapsave" else "snapsave"
 
 
 @lru_cache

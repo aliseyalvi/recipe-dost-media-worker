@@ -686,9 +686,15 @@ class JobRunner:
             if platform == "tiktok":
                 job = self._run_tiktok_text_first(job, job_started_at)
             elif platform == "youtube":
-                job = self._run_youtube(job, job_started_at)
+                if self._settings and self._settings.ai_analysis_mode == "mock_fixture":
+                    job = self._run_mock_resolver_job(job, platform, job_started_at)
+                else:
+                    job = self._run_youtube(job, job_started_at)
             elif platform in {"instagram", "facebook"}:
-                job = self._run_social_video(job, platform, job_started_at)
+                if self._settings and self._settings.ai_analysis_mode == "mock_fixture":
+                    job = self._run_mock_resolver_job(job, platform, job_started_at)
+                else:
+                    job = self._run_social_video(job, platform, job_started_at)
             else:
                 job = self._run_skeleton(job)
 
@@ -750,7 +756,6 @@ class JobRunner:
             message="TikWM resolver started.",
             metadata={"platform": "tiktok", "resolver": "tikwm"},
         )
-        resolver_started_at = perf_counter()
         try:
             info = resolve_social_video(
                 job.source_url,
@@ -822,6 +827,14 @@ class JobRunner:
                 },
             )
 
+        if settings.ai_analysis_mode == "mock_fixture":
+            return self._run_social_text_analysis(
+                job,
+                info,
+                settings,
+                job_started_at,
+            )
+
         if self._should_use_tiktok_text_first(info, settings):
             try:
                 return self._run_social_text_analysis(
@@ -861,6 +874,107 @@ class JobRunner:
                 "resolver": "tikwm",
                 "title_present": bool(info.title),
             },
+        )
+
+    def _run_mock_resolver_job(
+        self,
+        job: MediaJobRecord,
+        platform: str,
+        job_started_at: float,
+    ) -> MediaJobRecord:
+        settings = self._settings
+        if settings is None:
+            raise PipelineFailure(
+                "social_video_not_enabled",
+                "Social video analysis is not enabled yet.",
+                {"platform": platform},
+            )
+        resolver_name = configured_resolver_for_platform(platform, settings)
+        self._check_job_runtime(job.id, job_started_at)
+        job = self._repository.update_job(
+            job.id,
+            status=JOB_STATUS_RESOLVING,
+            progress=20,
+            error_code=None,
+            error_message=None,
+        )
+        self._repository.insert_event(
+            job.id,
+            event_type="platform_resolver_started",
+            message="Platform resolver started.",
+            metadata={"platform": platform, "resolver": resolver_name},
+        )
+        try:
+            info = resolve_social_video(
+                job.source_url,
+                platform,
+                settings,
+                resolver=resolver_name,
+            )
+        except SocialResolverError as exc:
+            failed_resolver = str(exc.metadata.get("resolver") or resolver_name)
+            self._repository.insert_event(
+                job.id,
+                event_type="platform_resolver_failed",
+                message="Platform resolver failed.",
+                metadata={
+                    "platform": platform,
+                    "resolver": failed_resolver,
+                },
+            )
+            raise PipelineFailure(
+                exc.code,
+                exc.message,
+                {"platform": platform, **safe_event_metadata(exc.metadata)},
+            ) from exc
+
+        self._repository.insert_event(
+            job.id,
+            event_type="platform_resolver_completed",
+            message="Platform resolver completed.",
+            metadata=social_metadata_event_metadata(info),
+        )
+        self._update_social_metadata_best_effort(job, info)
+        if (
+            info.duration_seconds is not None
+            and info.duration_seconds > settings.max_video_duration_seconds
+        ):
+            self._repository.insert_event(
+                job.id,
+                event_type="video_too_long",
+                message="Video duration exceeded the configured limit.",
+                metadata={
+                    "platform": platform,
+                    "resolver": info.resolver,
+                    "duration_seconds": info.duration_seconds,
+                    "max_video_duration_seconds": settings.max_video_duration_seconds,
+                },
+            )
+            raise PipelineFailure(
+                "video_duration_exceeded",
+                (
+                    "This video is longer than the current 90 second limit. "
+                    "Please try a shorter recipe video."
+                ),
+                {
+                    "platform": platform,
+                    "resolver": info.resolver,
+                    "duration_seconds": info.duration_seconds,
+                    "max_video_duration_seconds": settings.max_video_duration_seconds,
+                },
+            )
+        thumbnail_url = self._upload_social_thumbnail_best_effort(
+            job,
+            info.thumbnail_url,
+            settings,
+            info=info,
+        )
+        return self._run_mock_fixture_analysis(
+            job,
+            info,
+            settings,
+            job_started_at,
+            thumbnail_url,
         )
 
     def _run_social_video(
@@ -1539,7 +1653,7 @@ class JobRunner:
             self._repository.insert_event(
                 job.id,
                 event_type="social_video_download_started",
-                message="TikTok video download started.",
+                message="Social video download started.",
                 metadata={
                     "platform": info.platform,
                     "resolver": info.resolver,
@@ -1558,7 +1672,7 @@ class JobRunner:
                 self._repository.insert_event(
                     job.id,
                     event_type="social_video_download_failed",
-                    message="TikTok video download failed.",
+                    message="Social video download failed.",
                     metadata={
                         "platform": info.platform,
                         "resolver": info.resolver,
@@ -1588,7 +1702,7 @@ class JobRunner:
             self._repository.insert_event(
                 job.id,
                 event_type="social_video_download_completed",
-                message="TikTok video download completed.",
+                message="Social video download completed.",
                 metadata={
                     "platform": info.platform,
                     "resolver": info.resolver,
@@ -1614,9 +1728,8 @@ class JobRunner:
             event_type="mock_ai_analysis_started",
             message="Mock fixture AI analysis started.",
             metadata={
-                "ai_analysis_mode": "mock_fixture",
-                "fixture_path": fixture_path,
                 "platform": info.platform,
+                "resolver": info.resolver,
             },
         )
         if settings.mock_analysis_delay_ms > 0:
@@ -1647,10 +1760,9 @@ class JobRunner:
             event_type="mock_ai_analysis_completed",
             message="Mock fixture AI analysis completed.",
             metadata={
-                "ai_analysis_mode": "mock_fixture",
-                "fixture_path": fixture_path,
                 "platform": info.platform,
-                "title": str(parsed.get("title") or ""),
+                "resolver": info.resolver,
+                "title_present": bool(parsed.get("title")),
             },
         )
         result = _caption_result_to_recipe_result(parsed)
@@ -2189,7 +2301,7 @@ class JobRunner:
                 job.id,
                 platform=info.platform,
                 resolver=info.resolver,
-                cdn_url=info.stream_url,
+                cdn_url=info.stream_url or None,
                 raw_metadata=info.raw_metadata,
             )
             self._repository.insert_event(
@@ -2791,12 +2903,13 @@ def build_public_source_metadata(
     private_metadata_saved: bool | None = None,
 ) -> dict[str, object]:
     title = info.title or ""
+    description = info.description or title
     has_stream = bool(info.stream_url)
     return {
         "platform": info.platform,
         "resolver": info.resolver,
         "title": title,
-        "description": title,
+        "description": description,
         "author_username": info.uploader or "",
         "duration_seconds": info.duration_seconds,
         "thumbnail_source_present": bool(info.thumbnail_url),
@@ -2810,8 +2923,8 @@ def build_public_source_metadata(
             ),
             "mime_type": info.mime_type,
             "size_bytes": info.filesize_approx,
-            "width": None,
-            "height": None,
+            "width": info.width,
+            "height": info.height,
         },
         "resolved_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -2819,11 +2932,12 @@ def build_public_source_metadata(
 
 def social_metadata_event_metadata(info: SocialVideoInfo) -> dict[str, object]:
     title = info.title or ""
+    description = info.description or title
     return {
         "platform": info.platform,
         "resolver": info.resolver,
         "title_present": bool(title),
-        "description_present": bool(title),
+        "description_present": bool(description),
         "duration_seconds": info.duration_seconds,
         "has_thumbnail": bool(info.thumbnail_url),
         "has_cdn_url": bool(info.stream_url),
@@ -2835,8 +2949,24 @@ def social_metadata_event_metadata(info: SocialVideoInfo) -> dict[str, object]:
 def expected_resolver_for_platform(platform: str) -> str:
     if platform == "tiktok":
         return "tikwm"
-    if platform in {"instagram", "facebook"}:
-        return "cobalt"
+    if platform == "youtube":
+        return "ytdlp"
+    if platform == "instagram":
+        return "snapinsta"
+    if platform == "facebook":
+        return "snapsave"
+    return "social"
+
+
+def configured_resolver_for_platform(platform: str, settings: Settings) -> str:
+    if platform == "tiktok":
+        return "tikwm"
+    if platform == "youtube":
+        return settings.youtube_resolver
+    if platform == "instagram":
+        return settings.instagram_resolver
+    if platform == "facebook":
+        return settings.facebook_resolver
     return "social"
 
 
