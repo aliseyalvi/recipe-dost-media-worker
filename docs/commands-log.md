@@ -174,3 +174,16 @@ python3 -m compileall app
 grep -R "temporary_download_url" -n app docs || true
 # no matches
 ```
+
+## W-M15A Validation
+
+```bash
+python3 -m compileall app
+# passed
+
+grep -R "temporary_download_url" -n app docs || true
+# no matches (only the command itself in commands-log)
+
+grep -Rn "cdn_download_url.*insert\|cdn_download_url.*update" app docs || true
+# no matches
+```

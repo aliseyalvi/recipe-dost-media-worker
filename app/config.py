@@ -107,6 +107,7 @@ class Settings(BaseSettings):
         default_factory=lambda: ["instagram", "facebook"]
     )
     cobalt_api_key: Optional[SecretStr] = None
+    temp_media_dir: str = "/tmp/recipe-dost-media"
 
     model_config = SettingsConfigDict(
         env_file=".env",

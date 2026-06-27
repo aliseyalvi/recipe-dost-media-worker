@@ -19,7 +19,8 @@
 | 15 | W-M14R1A Queued Initial Status | Done | Render async worker accepts `queued` jobs from create-media-job manual mode |
 | 16 | W-M14R1B TikTok Routing Fix | Done | Queued TikTok jobs route to TikWM text-first before unsupported fallback |
 | 17 | W-M14R1C Replace Gemini text helper with sync REST call | Done | TikTok text-first uses direct sync REST call to Gemini generateContent instead of failing SDK helper |
-| 18 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 18 | W-M15A TikTok video-to-Gemini fallback | Done | After text-first insufficient, fall back to video Gemini behind ENABLE_SOCIAL_VIDEO_GEMINI flag |
+| 19 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
 | 18 | M15 Auth + Account Linking | Later | Email/Google auth |
 | 19 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 

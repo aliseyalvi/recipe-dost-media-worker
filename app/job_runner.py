@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
@@ -28,7 +29,7 @@ from app.schemas import (
     RecipeStep,
 )
 from app.social.platforms import detect_social_platform
-from app.social.stream_download import VideoBuffer, stream_video_to_memory
+from app.social.stream_download import VideoBuffer, safe_int, stream_video_to_memory
 from app.social.thumbnail_upload import upload_source_thumbnail
 from app.social.models import SocialResolverError, SocialVideoInfo
 from app.social.resolver_orchestrator import resolve_social_video
@@ -277,6 +278,222 @@ def _caption_result_to_recipe_result(parsed: dict) -> GeminiRecipeResult:
         source_assumptions_en=[],
         source_assumptions_ur=[],
     )
+
+
+VIDEO_RECIPE_PROMPT = """\
+You are Recipe Dost, an AI recipe assistant.
+Analyze this recipe video carefully.
+Extract a recipe only if enough details are visible or spoken/on-screen.
+Do not invent ingredients, quantities, or steps that are not present.
+If the video does not contain enough recipe detail, return is_recipe=false.
+
+Return exactly this JSON shape:
+{
+  "is_recipe": true,
+  "confidence": "high",
+  "title": "string",
+  "summary": "string",
+  "ingredients": ["string"],
+  "steps": ["string"],
+  "servings": null,
+  "time_minutes": null,
+  "tags": ["string"]
+}"""
+
+
+def _download_tiktok_to_temp(
+    info: SocialVideoInfo,
+    job_id: str,
+    settings: Settings,
+) -> tuple[str, str, int]:
+    os.makedirs(settings.temp_media_dir, exist_ok=True)
+    ext = (info.ext or "mp4").lstrip(".")
+    file_path = os.path.join(settings.temp_media_dir, f"{job_id}.{ext}")
+    max_size_bytes = settings.tikwm_max_video_size_mb * 1024 * 1024
+
+    request_headers = dict(info.stream_headers)
+    total = 0
+    try:
+        with requests.get(
+            info.stream_url,
+            stream=True,
+            timeout=(10, 120),
+            headers=request_headers,
+            allow_redirects=True,
+        ) as response:
+            if response.status_code in {401, 403}:
+                raise SocialResolverError(
+                    "social_stream_forbidden",
+                    "This social video stream could not be accessed.",
+                    {"platform": info.platform, "resolver": info.resolver},
+                )
+            if response.status_code == 404:
+                raise SocialResolverError(
+                    "social_stream_expired",
+                    "This social video stream expired before processing.",
+                    {"platform": info.platform, "resolver": info.resolver},
+                )
+            response.raise_for_status()
+            content_length = safe_int(response.headers.get("content-length"))
+            if content_length is not None and content_length > max_size_bytes:
+                raise SocialResolverError(
+                    "media_size_exceeded",
+                    "This video is too large for automatic recipe analysis.",
+                    {"platform": info.platform, "resolver": info.resolver, "size_bytes": content_length},
+                )
+            mime_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+            with open(file_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_size_bytes:
+                        response.close()
+                        raise SocialResolverError(
+                            "media_size_exceeded",
+                            "This video is too large for automatic recipe analysis.",
+                            {"platform": info.platform, "resolver": info.resolver, "size_bytes": total},
+                        )
+                    f.write(chunk)
+            if total == 0:
+                raise SocialResolverError(
+                    "media_download_failed",
+                    "This social video could not be downloaded for analysis.",
+                    {"platform": info.platform, "resolver": info.resolver},
+                )
+    except SocialResolverError:
+        _safe_unlink(file_path)
+        raise
+    except Exception:
+        _safe_unlink(file_path)
+        raise
+    return file_path, mime_type or info.mime_type or "video/mp4", total
+
+
+def _gemini_upload_video_rest(
+    *,
+    api_key: str,
+    file_path: str,
+    mime_type: str,
+    timeout_seconds: int = 90,
+) -> tuple[str, str]:
+    file_size = os.path.getsize(file_path)
+    with open(file_path, "rb") as f:
+        file_data = f.read()
+
+    metadata = {
+        "file": {
+            "display_name": os.path.basename(file_path),
+            "mime_type": mime_type,
+        }
+    }
+
+    boundary = "recipe_dost_upload_boundary"
+    body = (
+        f"--{boundary}\r\n"
+        f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+        f"{json.dumps(metadata)}\r\n"
+        f"--{boundary}\r\n"
+        f"Content-Type: {mime_type}\r\n\r\n"
+    ).encode("utf-8") + file_data + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+    upload_url = (
+        "https://generativelanguage.googleapis.com/upload/v1beta/files"
+        "?uploadType=multipart"
+    )
+    response = requests.post(
+        upload_url,
+        headers={
+            "X-Goog-Api-Key": api_key,
+            "Content-Type": f"multipart/related; boundary={boundary}",
+        },
+        data=body,
+        timeout=timeout_seconds,
+    )
+    if response.status_code == 429:
+        raise RuntimeError("gemini_rate_limited")
+    if response.status_code >= 400:
+        raise RuntimeError(f"gemini_api_error_{response.status_code}")
+    body_json = response.json()
+    file_entry = body_json.get("file", {})
+    file_uri = file_entry.get("uri", "")
+    file_name = file_entry.get("name", "")
+    if not file_uri:
+        raise RuntimeError("gemini_api_error_upload_no_uri")
+    return file_uri, file_name
+
+
+def _gemini_video_to_recipe_rest(
+    *,
+    api_key: str,
+    model: str,
+    file_uri: str,
+    mime_type: str,
+    prompt: str,
+    timeout_seconds: int = 120,
+) -> dict:
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{model}:generateContent"
+    )
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": api_key,
+    }
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "fileData": {
+                            "fileUri": file_uri,
+                            "mimeType": mime_type,
+                        }
+                    },
+                ],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=timeout_seconds)
+    if response.status_code == 429:
+        raise RuntimeError("gemini_rate_limited")
+    if response.status_code >= 400:
+        raise RuntimeError(f"gemini_api_error_{response.status_code}")
+
+    body = response.json()
+    try:
+        text = body["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("gemini_api_error_missing_text") from exc
+
+    return _extract_json_object(text)
+
+
+def _safe_unlink(file_path: str) -> None:
+    try:
+        os.unlink(file_path)
+    except OSError:
+        pass
+
+
+def _gemini_delete_file_rest(*, api_key: str, file_name: str, timeout_seconds: int = 15) -> None:
+    if not file_name:
+        return
+    try:
+        requests.delete(
+            f"https://generativelanguage.googleapis.com/v1beta/{file_name}",
+            headers={"X-Goog-Api-Key": api_key},
+            timeout=timeout_seconds,
+        )
+    except Exception:
+        pass
 
 
 class JobRunner:
@@ -558,12 +775,32 @@ class JobRunner:
             )
 
         if self._should_use_tiktok_text_first(info, settings):
-            return self._run_social_text_analysis(
-                job,
-                info,
-                settings,
-                job_started_at,
-            )
+            try:
+                return self._run_social_text_analysis(
+                    job,
+                    info,
+                    settings,
+                    job_started_at,
+                )
+            except PipelineFailure as exc:
+                if exc.code == "insufficient_recipe_details" and settings.enable_social_video_gemini:
+                    self._repository.insert_event(
+                        job.id,
+                        event_type="social_text_insufficient_video_fallback_started",
+                        message="Text analysis insufficient. Falling back to video Gemini.",
+                        metadata={
+                            "platform": "tiktok",
+                            "resolver": info.resolver,
+                            "stage": "video_fallback",
+                        },
+                    )
+                    return self._run_tiktok_video_fallback(
+                        job,
+                        info,
+                        settings,
+                        job_started_at,
+                    )
+                raise
 
         raise PipelineFailure(
             "social_caption_missing",
@@ -1214,6 +1451,369 @@ class JobRunner:
             },
         )
         return job
+
+    def _run_tiktok_video_fallback(
+        self,
+        job: MediaJobRecord,
+        info: SocialVideoInfo,
+        settings: Settings,
+        job_started_at: float,
+    ) -> MediaJobRecord:
+        api_key = settings.gemini_api_key.get_secret_value()
+        video_model = settings.effective_gemini_video_model
+        file_path: str | None = None
+        file_name: str | None = None
+
+        try:
+            try:
+                self._start_gemini_api_call(
+                    job.id,
+                    model=video_model,
+                    stage="video_observation",
+                )
+            except GeminiCallGuardError as exc:
+                raise PipelineFailure(exc.code, exc.message, exc.metadata) from exc
+
+            self._check_job_runtime(job.id, job_started_at)
+            job = self._repository.update_job(
+                job.id,
+                status=JOB_STATUS_DOWNLOADING,
+                progress=35,
+                error_code=None,
+                error_message=None,
+            )
+            self._repository.insert_event(
+                job.id,
+                event_type="social_video_download_started",
+                message="TikTok video download started.",
+                metadata={
+                    "platform": "tiktok",
+                    "resolver": info.resolver,
+                    "stage": "video_download",
+                },
+            )
+            download_started_at = perf_counter()
+            try:
+                file_path, mime_type, size_bytes = _download_tiktok_to_temp(
+                    info,
+                    str(job.id),
+                    settings,
+                )
+            except SocialResolverError as exc:
+                self._repository.insert_event(
+                    job.id,
+                    event_type="social_video_download_failed",
+                    message="TikTok video download failed.",
+                    metadata={
+                        "platform": "tiktok",
+                        "resolver": info.resolver,
+                        "error_code": exc.code,
+                        "exception_type": type(exc).__name__,
+                        "stage": "video_download",
+                        **safe_event_metadata(exc.metadata),
+                    },
+                )
+                raise PipelineFailure(
+                    exc.code,
+                    exc.message,
+                    {"platform": "tiktok", **exc.metadata},
+                ) from exc
+            self._repository.insert_event(
+                job.id,
+                event_type="social_video_download_completed",
+                message="TikTok video download completed.",
+                metadata={
+                    "platform": "tiktok",
+                    "resolver": info.resolver,
+                    "size_bytes": size_bytes,
+                    "stage": "video_download",
+                    "elapsed_ms": int((perf_counter() - download_started_at) * 1000),
+                },
+            )
+
+            self._check_job_runtime(job.id, job_started_at)
+            job = self._repository.update_job(
+                job.id,
+                status=JOB_STATUS_ANALYZING,
+                progress=50,
+                error_code=None,
+                error_message=None,
+                ai_provider="gemini",
+                ai_model=video_model,
+            )
+            self._repository.insert_event(
+                job.id,
+                event_type="gemini_video_upload_started",
+                message="Gemini video upload started.",
+                metadata={
+                    "model": video_model,
+                    "stage": "video_upload",
+                    "size_bytes": size_bytes,
+                },
+            )
+            upload_started_at = perf_counter()
+            try:
+                file_uri, file_name = _gemini_upload_video_rest(
+                    api_key=api_key,
+                    file_path=file_path,
+                    mime_type=mime_type,
+                    timeout_seconds=settings.gemini_files_upload_timeout_seconds,
+                )
+            except (requests.Timeout, RuntimeError) as exc:
+                error_msg = str(exc)
+                error_code = "gemini_api_error"
+                if isinstance(exc, requests.Timeout):
+                    error_code = "gemini_video_timeout"
+                elif error_msg == "gemini_rate_limited":
+                    error_code = "gemini_rate_limited"
+                self._repository.insert_event(
+                    job.id,
+                    event_type="gemini_video_upload_failed",
+                    message="Gemini video upload failed.",
+                    metadata={
+                        "model": video_model,
+                        "stage": "video_upload",
+                        "error_code": error_code,
+                        "exception_type": type(exc).__name__,
+                    },
+                )
+                raise PipelineFailure(
+                    error_code,
+                    "Video analysis is temporarily unavailable. Please try again.",
+                    {"platform": "tiktok", "stage": "video_upload", "model": video_model},
+                ) from exc
+            self._repository.insert_event(
+                job.id,
+                event_type="gemini_video_upload_completed",
+                message="Gemini video upload completed.",
+                metadata={
+                    "model": video_model,
+                    "stage": "video_upload",
+                    "elapsed_ms": int((perf_counter() - upload_started_at) * 1000),
+                },
+            )
+            self._repository.insert_event(
+                job.id,
+                event_type="gemini_video_file_active",
+                message="Gemini video file is active.",
+                metadata={
+                    "model": video_model,
+                    "stage": "video_upload",
+                },
+            )
+
+            self._check_job_runtime(job.id, job_started_at)
+            self._repository.insert_event(
+                job.id,
+                event_type="gemini_video_analysis_started",
+                message="Gemini video analysis started.",
+                metadata={
+                    "model": video_model,
+                    "stage": "video_observation",
+                },
+            )
+            analysis_started_at = perf_counter()
+            try:
+                parsed = _gemini_video_to_recipe_rest(
+                    api_key=api_key,
+                    model=video_model,
+                    file_uri=file_uri,
+                    mime_type=mime_type,
+                    prompt=VIDEO_RECIPE_PROMPT,
+                    timeout_seconds=settings.social_video_gemini_timeout_seconds,
+                )
+            except requests.Timeout:
+                elapsed_ms = int((perf_counter() - analysis_started_at) * 1000)
+                self._repository.insert_event(
+                    job.id,
+                    event_type="gemini_video_analysis_failed",
+                    message="Gemini video analysis failed.",
+                    metadata={
+                        "model": video_model,
+                        "stage": "video_observation",
+                        "elapsed_ms": elapsed_ms,
+                        "error_code": "gemini_video_timeout",
+                        "exception_type": "Timeout",
+                    },
+                )
+                raise PipelineFailure(
+                    "gemini_video_timeout",
+                    "Video analysis took too long. Please try a shorter video or paste the caption.",
+                    {"platform": "tiktok", "stage": "video_observation", "model": video_model},
+                )
+            except RuntimeError as exc:
+                error_msg = str(exc)
+                elapsed_ms = int((perf_counter() - analysis_started_at) * 1000)
+                if error_msg == "gemini_rate_limited":
+                    error_code = "gemini_rate_limited"
+                    user_message = "Recipe analysis is temporarily rate-limited. Please try again."
+                elif error_msg.startswith("gemini_api_error_"):
+                    error_code = "gemini_api_error"
+                    user_message = "Recipe analysis is temporarily unavailable. Please try again."
+                else:
+                    error_code = "gemini_api_error"
+                    user_message = "Recipe analysis is temporarily unavailable. Please try again."
+                self._repository.insert_event(
+                    job.id,
+                    event_type="gemini_video_analysis_failed",
+                    message="Gemini video analysis failed.",
+                    metadata={
+                        "model": video_model,
+                        "stage": "video_observation",
+                        "elapsed_ms": elapsed_ms,
+                        "error_code": error_code,
+                        "exception_type": type(exc).__name__,
+                    },
+                )
+                raise PipelineFailure(
+                    error_code,
+                    user_message,
+                    {"platform": "tiktok", "stage": "video_observation", "model": video_model},
+                )
+            except ValueError:
+                elapsed_ms = int((perf_counter() - analysis_started_at) * 1000)
+                self._repository.insert_event(
+                    job.id,
+                    event_type="gemini_video_analysis_failed",
+                    message="Gemini video analysis failed.",
+                    metadata={
+                        "model": video_model,
+                        "stage": "video_observation",
+                        "elapsed_ms": elapsed_ms,
+                        "error_code": "gemini_api_error",
+                        "exception_type": "ValueError",
+                    },
+                )
+                raise PipelineFailure(
+                    "gemini_api_error",
+                    "Recipe analysis is temporarily unavailable. Please try again.",
+                    {"platform": "tiktok", "stage": "video_observation", "model": video_model},
+                )
+            self._repository.insert_event(
+                job.id,
+                event_type="gemini_video_analysis_completed",
+                message="Gemini video analysis completed.",
+                metadata={
+                    "model": video_model,
+                    "stage": "video_observation",
+                    "elapsed_ms": int((perf_counter() - analysis_started_at) * 1000),
+                },
+            )
+
+            is_recipe = parsed.get("is_recipe")
+            if is_recipe is not True:
+                raise PipelineFailure(
+                    "insufficient_recipe_details",
+                    "The video does not contain enough recipe details. Please paste the recipe caption or try another video.",
+                    {"platform": "tiktok", "stage": "video_observation", "model": video_model},
+                )
+
+            confidence = str(parsed.get("confidence", "medium")).strip().lower()
+            if confidence == "low":
+                raise PipelineFailure(
+                    "insufficient_recipe_details",
+                    "The video does not contain enough recipe details. Please paste the recipe caption or try another video.",
+                    {"platform": "tiktok", "stage": "video_observation", "model": video_model},
+                )
+
+            ingredients = parsed.get("ingredients") or []
+            steps = parsed.get("steps") or []
+            if not isinstance(ingredients, list) or len(ingredients) == 0:
+                raise PipelineFailure(
+                    "insufficient_recipe_details",
+                    "The video does not contain enough recipe details. Please paste the recipe caption or try another video.",
+                    {"platform": "tiktok", "stage": "video_observation", "model": video_model},
+                )
+            if not isinstance(steps, list) or len(steps) == 0:
+                raise PipelineFailure(
+                    "insufficient_recipe_details",
+                    "The video does not contain enough recipe details. Please paste the recipe caption or try another video.",
+                    {"platform": "tiktok", "stage": "video_observation", "model": video_model},
+                )
+
+            result = _caption_result_to_recipe_result(parsed)
+
+            self._check_job_runtime(job.id, job_started_at)
+            job = self._repository.update_job(
+                job.id,
+                status=JOB_STATUS_ANALYZING,
+                progress=85,
+                error_code=None,
+                error_message=None,
+            )
+            self._repository.insert_event(
+                job.id,
+                event_type="recipe_card_saving_started",
+                message="Recipe card save started.",
+                metadata={"stage": "recipe_card_saving", "progress": 85},
+            )
+            if job.recipe_item_id is None:
+                raise PipelineFailure(
+                    "recipe_item_required",
+                    "A saved recipe is required before analysis can be completed.",
+                )
+            recipe_card_id = self._repository.insert_recipe_card(
+                job=job,
+                result=result,
+                model=video_model,
+            )
+            self._repository.insert_event(
+                job.id,
+                event_type="recipe_card_saved",
+                message="Recipe card saved.",
+                metadata={"stage": "recipe_card_saving"},
+            )
+            job = self._repository.update_job(
+                job.id,
+                status=JOB_STATUS_COMPLETED,
+                progress=100,
+                result_recipe_card_id=recipe_card_id,
+                ai_provider="gemini",
+                ai_model=video_model,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                error_code=None,
+                error_message=None,
+            )
+            self._repository.insert_event(
+                job.id,
+                event_type="completed",
+                message="TikTok video recipe analysis completed.",
+                metadata={
+                    "platform": "tiktok",
+                    "resolver": info.resolver,
+                    "model": video_model,
+                    "status": JOB_STATUS_COMPLETED,
+                    "analysis_mode": "video_fallback",
+                },
+            )
+            return job
+        finally:
+            if file_name:
+                _gemini_delete_file_rest(
+                    api_key=api_key,
+                    file_name=file_name,
+                    timeout_seconds=settings.gemini_files_upload_timeout_seconds,
+                )
+                try:
+                    self._repository.insert_event(
+                        job.id,
+                        event_type="gemini_video_file_deleted",
+                        message="Gemini video file deleted.",
+                        metadata={"stage": "video_upload"},
+                    )
+                except Exception:
+                    pass
+            if file_path:
+                _safe_unlink(file_path)
+                try:
+                    self._repository.insert_event(
+                        job.id,
+                        event_type="temp_video_deleted",
+                        message="Temporary video file deleted.",
+                        metadata={"stage": "video_download"},
+                    )
+                except Exception:
+                    pass
 
     def _upload_social_thumbnail_best_effort(self, job: MediaJobRecord, thumbnail_url: str | None, settings: Settings) -> str | None:
         self._repository.insert_event(job.id, event_type="thumbnail_upload_started", message="Thumbnail upload started.", metadata={"thumbnail_uploaded": False})
