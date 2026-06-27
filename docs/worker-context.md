@@ -25,20 +25,28 @@ The worker may extract metadata and temporary in-memory media bytes, call Gemini
 
 ## Current Blocker / Next Work
 
-TikTok yt-dlp and Cobalt failed in Cloud Run. TikWM debug succeeded from Cloud Run:
+TikWM Cloud Run debug works for TikTok, and Cobalt Cloud Run debug works for Instagram. Full TikTok app jobs reached resolver, stream, thumbnail upload, and Gemini video observation start, then hit DB-safe status and Gemini hang issues. W-M14G-4SOC2A adds Gemini timeouts and `files_api` social upload mode; W-M14G-4SOC2B keeps `media_jobs.status` DB-safe and adds duration/cost guards before streaming or Gemini; W-M14G-4SOC2C adds text-first TikTok analysis and makes social video Gemini opt-in with a whole-call watchdog.
+
+Earlier TikWM validation:
 
 - `POST https://www.tikwm.com/api/`
 - form data: `url=<tiktok_url>`, `hd=1`
 - successful response has `code=0`, `data.title`, `data.cover`, `data.hdplay` or `data.play`
 - streaming the returned video URL with `requests.get(..., stream=True)` into `BytesIO` worked in Colab
 
-Next step is M14G-4R2 full social end-to-end testing for TikTok, Instagram, and Facebook. Keep YouTube unchanged.
+Next step is deploy and retest M14G-4R2 full social end-to-end for TikTok, Instagram, and Facebook. TikTok should complete through text-first caption/title analysis or fail with `insufficient_recipe_details`. Instagram/Facebook video Gemini should only run when enabled and should complete or fail with `gemini_video_timeout`. Keep YouTube unchanged.
 
 ## Development Guardrails
 
 - Keep controlled failures as DB status/events or safe debug errors.
 - Preserve Gemini quota guards before every Gemini call.
 - Free-tier defaults: max 2 Gemini calls/job, no repair call, no fallback chains, Cloud Run concurrency 1, no raw video storage.
+- Social video uses `GEMINI_SOCIAL_UPLOAD_MODE=files_api` by default; `inline` is still available for debug, with the same timeout controls.
+- Jobs must never remain stuck at `analyzing` progress `60`; Gemini hangs should become failed jobs with timeout-specific error codes.
+- Worker code only writes DB-safe `media_jobs.status` values: `pending`, `resolving`, `downloading`, `analyzing`, `completed`, `failed`.
+- Known over-limit social durations are rejected before stream download, Gemini upload, or Gemini calls. Unknown duration continues under size/memory guards.
+- Development social analysis defaults: `SOCIAL_ANALYSIS_MODE=text_first`, `ENABLE_TIKTOK_TEXT_FALLBACK=true`, `ENABLE_SOCIAL_VIDEO_GEMINI=false`.
+- Jobs must never remain stuck at `analyzing` progress `50`; social video Gemini timeout should become `gemini_video_timeout`.
 - For social work inspect only `app/config.py`, `app/main.py`, `app/social/*`, `requirements.txt`, `README.md`, and `docs/*.md` unless blocked.
 
 ## Validation

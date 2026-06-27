@@ -21,6 +21,15 @@ class HealthResponse(BaseModel):
     gemini_video_fallback_models_count: int
     gemini_max_calls_per_job: int
     gemini_daily_dev_call_limit: int
+    gemini_social_upload_mode: str
+    gemini_video_observation_timeout_seconds: int
+    gemini_text_normalization_timeout_seconds: int
+    max_job_runtime_seconds: int
+    social_analysis_mode: str
+    enable_tiktok_text_fallback: bool
+    enable_social_video_gemini: bool
+    social_video_gemini_timeout_seconds: int
+    social_text_gemini_timeout_seconds: int
     enable_gemini_repair_call: bool
     enable_gemini_fallbacks: bool
     disabled_models: list[str]

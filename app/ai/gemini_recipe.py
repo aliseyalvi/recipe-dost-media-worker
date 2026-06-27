@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
+import queue
+import threading
 import time
 from dataclasses import dataclass
 from time import perf_counter
@@ -76,6 +79,19 @@ cooking actions and order, timing and serving clues, language clues,
 uncertainty or missing details, and whether this is actually a recipe video.
 """.strip()
 
+SOCIAL_TEXT_PROMPT = """
+Convert the supplied social caption/title into one valid Recipe Dost JSON object
+using the same schema as the app recipe card.
+
+Only extract a recipe if the text includes enough recipe detail to identify a
+food item plus at least one concrete ingredient or cooking/preparation action.
+Do not invent ingredients, quantities, timing, or steps that are not present.
+If the text is not a recipe or is too thin, return exactly:
+{"error_code":"insufficient_recipe_details"}
+
+Return JSON only, without markdown fences, commentary, or citations.
+""".strip()
+
 
 class GeminiInvalidJsonError(Exception):
     pass
@@ -85,6 +101,8 @@ TEMPORARY_GEMINI_ERRORS = {
     "gemini_model_overloaded",
     "gemini_rate_limited",
     "gemini_timeout",
+    "gemini_video_observation_timeout",
+    "gemini_text_normalization_timeout",
     "gemini_unknown_error",
 }
 
@@ -133,6 +151,12 @@ class GeminiEmptyResponseError(Exception):
     pass
 
 
+class GeminiTimeoutError(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class GeminiRecipeAnalyzer:
     def __init__(
         self,
@@ -142,6 +166,11 @@ class GeminiRecipeAnalyzer:
         fallback_models: list[str] | None = None,
         max_retries: int = 3,
         retry_base_seconds: float = 2.0,
+        video_observation_timeout_seconds: int = 120,
+        text_normalization_timeout_seconds: int = 60,
+        files_upload_timeout_seconds: int = 90,
+        files_processing_timeout_seconds: int = 120,
+        social_text_timeout_seconds: int = 45,
     ) -> None:
         self._api_key = api_key
         self.model = model
@@ -149,6 +178,11 @@ class GeminiRecipeAnalyzer:
         self.models = unique_models([model, *(fallback_models or [])])
         self.max_retries = max(1, max_retries)
         self.retry_base_seconds = max(0.0, retry_base_seconds)
+        self.video_observation_timeout_seconds = max(1, video_observation_timeout_seconds)
+        self.text_normalization_timeout_seconds = max(1, text_normalization_timeout_seconds)
+        self.files_upload_timeout_seconds = max(1, files_upload_timeout_seconds)
+        self.files_processing_timeout_seconds = max(1, files_processing_timeout_seconds)
+        self.social_text_timeout_seconds = max(1, social_text_timeout_seconds)
 
     def analyze(
         self,
@@ -178,6 +212,7 @@ class GeminiRecipeAnalyzer:
                         if before_call is not None
                         else {}
                     )
+                    current_stage = "video_observation"
                     attempts_count += 1
                     emit(
                         on_event,
@@ -190,12 +225,16 @@ class GeminiRecipeAnalyzer:
                     )
                     try:
                         started_at = perf_counter()
-                        interaction = client.interactions.create(
-                            model=model,
-                            input=[
-                                {"type": "video", "uri": youtube_url},
-                                {"type": "text", "text": OBSERVATION_PROMPT},
-                            ],
+                        interaction = call_with_timeout(
+                            lambda: client.interactions.create(
+                                model=model,
+                                input=[
+                                    {"type": "video", "uri": youtube_url},
+                                    {"type": "text", "text": OBSERVATION_PROMPT},
+                                ],
+                            ),
+                            timeout_seconds=self.video_observation_timeout_seconds,
+                            timeout_code="gemini_video_observation_timeout",
                         )
                         observations = extract_gemini_text(interaction)
                         emit(
@@ -205,7 +244,7 @@ class GeminiRecipeAnalyzer:
                                 **call_metadata,
                                 "model": model,
                                 "stage": "video_observation",
-                                "duration_ms": int(
+                                "elapsed_ms": int(
                                     (perf_counter() - started_at) * 1000
                                 ),
                             },
@@ -232,14 +271,18 @@ class GeminiRecipeAnalyzer:
                         model = self.text_model
                         current_stage = "recipe_normalization"
                         started_at = perf_counter()
-                        normalized = client.interactions.create(
-                            model=self.text_model,
-                            input=[
-                                {
-                                    "type": "text",
-                                    "text": f"{RECIPE_PROMPT}\n\nOBSERVATIONS:\n{observations}",
-                                }
-                            ],
+                        normalized = call_with_timeout(
+                            lambda: client.interactions.create(
+                                model=self.text_model,
+                                input=[
+                                    {
+                                        "type": "text",
+                                        "text": f"{RECIPE_PROMPT}\n\nOBSERVATIONS:\n{observations}",
+                                    }
+                                ],
+                            ),
+                            timeout_seconds=self.text_normalization_timeout_seconds,
+                            timeout_code="gemini_text_normalization_timeout",
                         )
                         normalized_text = extract_gemini_text(normalized)
                         result = parse_recipe_response(normalized_text)
@@ -250,7 +293,7 @@ class GeminiRecipeAnalyzer:
                                 **normalization_metadata,
                                 "model": self.text_model,
                                 "stage": "recipe_normalization",
-                                "duration_ms": int(
+                                "elapsed_ms": int(
                                     (perf_counter() - started_at) * 1000
                                 ),
                             },
@@ -273,6 +316,29 @@ class GeminiRecipeAnalyzer:
                     except Exception as exc:
                         last_error = exc
                         last_code = classify_gemini_error(exc)
+                        if last_code in {
+                            "gemini_video_observation_timeout",
+                            "gemini_text_normalization_timeout",
+                        }:
+                            emit(
+                                on_event,
+                                last_code,
+                                {
+                                    **locals().get("call_metadata", {}),
+                                    "model": model,
+                                    "stage": locals().get(
+                                        "current_stage",
+                                        "video_observation",
+                                    ),
+                                    "error_code": last_code,
+                                    "exception_type": type(exc).__name__,
+                                    "elapsed_ms": int(
+                                        (perf_counter() - started_at) * 1000
+                                    )
+                                    if "started_at" in locals()
+                                    else 0,
+                                },
+                            )
                         emit(
                             on_event,
                             "gemini_api_call_failed",
@@ -284,8 +350,8 @@ class GeminiRecipeAnalyzer:
                                     "video_observation",
                                 ),
                                 "error_code": last_code,
-                                "provider_error_message": sanitize_error_message(exc),
-                                "duration_ms": int(
+                                "exception_type": type(exc).__name__,
+                                "elapsed_ms": int(
                                     (perf_counter() - started_at) * 1000
                                 )
                                 if "started_at" in locals()
@@ -300,7 +366,7 @@ class GeminiRecipeAnalyzer:
                                 "attempt": attempt,
                                 "max_retries": self.max_retries,
                                 "error_code": last_code,
-                                "provider_error_message": sanitize_error_message(exc),
+                                "exception_type": type(exc).__name__,
                             },
                         )
                         if last_code not in TEMPORARY_GEMINI_ERRORS:
@@ -347,30 +413,45 @@ class GeminiRecipeAnalyzer:
                 attempted_models.append(model)
                 for attempt in range(1, self.max_retries + 1):
                     call_metadata = before_call(model, "video_observation") if before_call else {}
+                    current_stage = "video_observation"
                     attempts_count += 1
                     try:
                         started_at = perf_counter()
-                        interaction = client.interactions.create(
-                            model=model,
-                            input=[
-                                {"type": "video", "data": video_bytes, "mime_type": mime_type},
-                                {"type": "text", "text": OBSERVATION_PROMPT},
-                            ],
+                        interaction = call_with_timeout(
+                            lambda: client.interactions.create(
+                                model=model,
+                                input=[
+                                    {
+                                        "type": "video",
+                                        "data": video_bytes,
+                                        "mime_type": mime_type,
+                                    },
+                                    {"type": "text", "text": OBSERVATION_PROMPT},
+                                ],
+                            ),
+                            timeout_seconds=self.video_observation_timeout_seconds,
+                            timeout_code="gemini_video_observation_timeout",
                         )
                         observations = extract_gemini_text(interaction)
-                        emit(on_event, "gemini_api_call_completed", {**call_metadata, "model": model, "stage": "video_observation", "duration_ms": int((perf_counter() - started_at) * 1000)})
+                        emit(on_event, "gemini_api_call_completed", {**call_metadata, "model": model, "stage": "video_observation", "elapsed_ms": int((perf_counter() - started_at) * 1000)})
                         emit(on_event, "video_observation_completed", {"model": model, "observation_char_count": len(observations)})
 
                         emit(on_event, "recipe_normalization_started", {"model": self.text_model})
                         normalization_metadata = before_call(self.text_model, "recipe_normalization") if before_call else {}
+                        call_metadata = normalization_metadata
+                        current_stage = "recipe_normalization"
                         started_at = perf_counter()
-                        normalized = client.interactions.create(
-                            model=self.text_model,
-                            input=[{"type": "text", "text": f"{RECIPE_PROMPT}\n\nOBSERVATIONS:\n{observations}"}],
+                        normalized = call_with_timeout(
+                            lambda: client.interactions.create(
+                                model=self.text_model,
+                                input=[{"type": "text", "text": f"{RECIPE_PROMPT}\n\nOBSERVATIONS:\n{observations}"}],
+                            ),
+                            timeout_seconds=self.text_normalization_timeout_seconds,
+                            timeout_code="gemini_text_normalization_timeout",
                         )
                         normalized_text = extract_gemini_text(normalized)
                         result = parse_recipe_response(normalized_text)
-                        emit(on_event, "gemini_api_call_completed", {**normalization_metadata, "model": self.text_model, "stage": "recipe_normalization", "duration_ms": int((perf_counter() - started_at) * 1000)})
+                        emit(on_event, "gemini_api_call_completed", {**normalization_metadata, "model": self.text_model, "stage": "recipe_normalization", "elapsed_ms": int((perf_counter() - started_at) * 1000)})
                         emit(on_event, "recipe_normalization_completed", {"model": self.text_model, "response_char_count": len(normalized_text)})
                         return GeminiAnalysisOutcome(result, self.text_model, attempts_count + 1)
                     except GeminiCallGuardError:
@@ -380,7 +461,22 @@ class GeminiRecipeAnalyzer:
                         last_code = classify_gemini_error(exc)
                         if last_code == "gemini_invalid_request" and "data" in sanitize_error_message(exc).lower():
                             last_code = "gemini_inline_video_not_supported"
-                        emit(on_event, "gemini_api_call_failed", {"model": model, "stage": "video_observation", "error_code": last_code, "provider_error_message": sanitize_error_message(exc)})
+                        failure_metadata = {
+                            **call_metadata,
+                            "model": model,
+                            "stage": current_stage,
+                            "error_code": last_code,
+                            "exception_type": type(exc).__name__,
+                            "elapsed_ms": int((perf_counter() - started_at) * 1000)
+                            if "started_at" in locals()
+                            else 0,
+                        }
+                        if last_code in {
+                            "gemini_video_observation_timeout",
+                            "gemini_text_normalization_timeout",
+                        }:
+                            emit(on_event, last_code, failure_metadata)
+                        emit(on_event, "gemini_api_call_failed", failure_metadata)
                         if last_code not in TEMPORARY_GEMINI_ERRORS:
                             raise build_analysis_error(exc, last_code, attempted_models, model, attempts_count) from exc
                         if attempt < self.max_retries:
@@ -388,6 +484,254 @@ class GeminiRecipeAnalyzer:
 
         assert last_error is not None
         raise build_analysis_error(last_error, last_code, attempted_models, attempted_models[-1], attempts_count) from last_error
+
+    def analyze_video_file(
+        self,
+        video_file: io.IOBase,
+        mime_type: str,
+        size_bytes: int,
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        before_call: Callable[[str, str], dict[str, Any]] | None = None,
+    ) -> GeminiAnalysisOutcome:
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError as exc:
+            raise RuntimeError("Google Gen AI SDK is not installed.") from exc
+
+        attempts_count = 0
+        attempted_models: list[str] = []
+        last_error: Exception | None = None
+        last_code = "gemini_video_bytes_failed"
+        uploaded_file: Any | None = None
+
+        with genai.Client(api_key=self._api_key) as client:
+            try:
+                emit(
+                    on_event,
+                    "gemini_video_upload_started",
+                    {
+                        "stage": "video_upload",
+                        "mime_type": mime_type,
+                        "size_bytes": size_bytes,
+                        "timeout_seconds": self.files_upload_timeout_seconds,
+                    },
+                )
+                upload_started_at = perf_counter()
+                video_file.seek(0)
+                uploaded_file = call_with_timeout(
+                    lambda: client.files.upload(
+                        file=video_file,
+                        config=types.UploadFileConfig(
+                            mime_type=mime_type,
+                            display_name="recipe-dost-social-video.mp4",
+                        ),
+                    ),
+                    timeout_seconds=self.files_upload_timeout_seconds,
+                    timeout_code="gemini_video_observation_timeout",
+                )
+                emit(
+                    on_event,
+                    "gemini_video_upload_completed",
+                    {
+                        "stage": "video_upload",
+                        "mime_type": mime_type,
+                        "size_bytes": size_bytes,
+                        "elapsed_ms": int((perf_counter() - upload_started_at) * 1000),
+                    },
+                )
+                uploaded_file = wait_for_active_file(
+                    client,
+                    uploaded_file,
+                    timeout_seconds=self.files_processing_timeout_seconds,
+                    on_event=on_event,
+                )
+
+                for model in self.models:
+                    attempted_models.append(model)
+                    for attempt in range(1, self.max_retries + 1):
+                        call_metadata = before_call(model, "video_observation") if before_call else {}
+                        current_stage = "video_observation"
+                        attempts_count += 1
+                        try:
+                            started_at = perf_counter()
+                            interaction = call_with_timeout(
+                                lambda: client.models.generate_content(
+                                    model=model,
+                                    contents=[uploaded_file, OBSERVATION_PROMPT],
+                                ),
+                                timeout_seconds=self.video_observation_timeout_seconds,
+                                timeout_code="gemini_video_observation_timeout",
+                            )
+                            observations = extract_gemini_text(interaction)
+                            emit(on_event, "gemini_api_call_completed", {**call_metadata, "model": model, "stage": "video_observation", "elapsed_ms": int((perf_counter() - started_at) * 1000)})
+                            emit(on_event, "video_observation_completed", {"model": model, "observation_char_count": len(observations)})
+
+                            emit(on_event, "recipe_normalization_started", {"model": self.text_model})
+                            normalization_metadata = before_call(self.text_model, "recipe_normalization") if before_call else {}
+                            call_metadata = normalization_metadata
+                            current_stage = "recipe_normalization"
+                            started_at = perf_counter()
+                            normalized = call_with_timeout(
+                                lambda: client.interactions.create(
+                                    model=self.text_model,
+                                    input=[{"type": "text", "text": f"{RECIPE_PROMPT}\n\nOBSERVATIONS:\n{observations}"}],
+                                ),
+                                timeout_seconds=self.text_normalization_timeout_seconds,
+                                timeout_code="gemini_text_normalization_timeout",
+                            )
+                            normalized_text = extract_gemini_text(normalized)
+                            result = parse_recipe_response(normalized_text)
+                            emit(on_event, "gemini_api_call_completed", {**normalization_metadata, "model": self.text_model, "stage": "recipe_normalization", "elapsed_ms": int((perf_counter() - started_at) * 1000)})
+                            emit(on_event, "recipe_normalization_completed", {"model": self.text_model, "response_char_count": len(normalized_text)})
+                            return GeminiAnalysisOutcome(result, self.text_model, attempts_count + 1)
+                        except GeminiCallGuardError:
+                            raise
+                        except Exception as exc:
+                            last_error = exc
+                            last_code = classify_gemini_error(exc)
+                            failure_metadata = {
+                                **call_metadata,
+                                "model": model,
+                                "stage": current_stage,
+                                "error_code": last_code,
+                                "exception_type": type(exc).__name__,
+                                "elapsed_ms": int((perf_counter() - started_at) * 1000)
+                                if "started_at" in locals()
+                                else 0,
+                            }
+                            if last_code in {
+                                "gemini_video_observation_timeout",
+                                "gemini_text_normalization_timeout",
+                            }:
+                                emit(on_event, last_code, failure_metadata)
+                            emit(on_event, "gemini_api_call_failed", failure_metadata)
+                            if last_code not in TEMPORARY_GEMINI_ERRORS:
+                                raise build_analysis_error(exc, last_code, attempted_models, model, attempts_count) from exc
+                            if attempt < self.max_retries:
+                                time.sleep(self.retry_base_seconds * (2 ** (attempt - 1)))
+            except Exception as exc:
+                last_error = exc
+                last_code = classify_gemini_error(exc)
+                if uploaded_file is None:
+                    emit(
+                        on_event,
+                        "gemini_video_upload_failed",
+                        {
+                            "stage": "video_upload",
+                            "mime_type": mime_type,
+                            "size_bytes": size_bytes,
+                            "error_code": classify_gemini_error(exc),
+                            "exception_type": type(exc).__name__,
+                        },
+                    )
+                if last_code in {
+                    "gemini_video_observation_timeout",
+                    "gemini_text_normalization_timeout",
+                }:
+                    emit(
+                        on_event,
+                        last_code,
+                        {
+                            "stage": "video_upload",
+                            "error_code": last_code,
+                            "exception_type": type(exc).__name__,
+                            "timeout_seconds": (
+                                self.files_upload_timeout_seconds
+                                if uploaded_file is None
+                                else self.files_processing_timeout_seconds
+                            ),
+                        },
+                    )
+                if last_code not in TEMPORARY_GEMINI_ERRORS:
+                    raise build_analysis_error(
+                        exc,
+                        last_code,
+                        attempted_models or [self.model],
+                        attempted_models[-1] if attempted_models else self.model,
+                        attempts_count,
+                    ) from exc
+            finally:
+                delete_uploaded_file(client, uploaded_file, on_event)
+
+        assert last_error is not None
+        raise build_analysis_error(last_error, last_code, attempted_models or [self.model], attempted_models[-1] if attempted_models else self.model, attempts_count) from last_error
+
+    def analyze_social_text(
+        self,
+        *,
+        caption_text: str,
+        platform: str,
+        duration_seconds: float | None,
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        before_call: Callable[[str, str], dict[str, Any]] | None = None,
+    ) -> GeminiAnalysisOutcome:
+        try:
+            from google import genai
+        except ImportError as exc:
+            raise RuntimeError("Google Gen AI SDK is not installed.") from exc
+
+        model = self.text_model
+        call_metadata = (
+            before_call(model, "social_text_analysis")
+            if before_call is not None
+            else {}
+        )
+        started_at = perf_counter()
+        try:
+            with genai.Client(api_key=self._api_key) as client:
+                response = call_with_timeout(
+                    lambda: client.interactions.create(
+                        model=model,
+                        input=[
+                            {
+                                "type": "text",
+                                "text": social_text_prompt(
+                                    caption_text=caption_text,
+                                    platform=platform,
+                                    duration_seconds=duration_seconds,
+                                ),
+                            }
+                        ],
+                    ),
+                    timeout_seconds=self.social_text_timeout_seconds,
+                    timeout_code="gemini_text_normalization_timeout",
+                )
+            response_text = extract_gemini_text(response)
+            result = parse_social_text_response(response_text)
+            emit(
+                on_event,
+                "gemini_api_call_completed",
+                {
+                    **call_metadata,
+                    "model": model,
+                    "stage": "social_text_analysis",
+                    "elapsed_ms": int((perf_counter() - started_at) * 1000),
+                },
+            )
+            emit(
+                on_event,
+                "social_text_analysis_completed",
+                {"model": model, "stage": "social_text_analysis"},
+            )
+            return GeminiAnalysisOutcome(result, model, 1)
+        except GeminiCallGuardError:
+            raise
+        except Exception as exc:
+            code = classify_gemini_error(exc)
+            emit(
+                on_event,
+                "gemini_api_call_failed",
+                {
+                    **call_metadata,
+                    "model": model,
+                    "stage": "social_text_analysis",
+                    "error_code": code,
+                    "exception_type": type(exc).__name__,
+                    "elapsed_ms": int((perf_counter() - started_at) * 1000),
+                },
+            )
+            raise build_analysis_error(exc, code, [model], model, 1) from exc
 
 
 def parse_recipe_response(response_text: Any) -> GeminiRecipeResult:
@@ -400,6 +744,21 @@ def parse_recipe_response(response_text: Any) -> GeminiRecipeResult:
             raise ValueError("Expected a JSON object.")
         return GeminiRecipeResult.model_validate(payload)
     except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
+        raise GeminiInvalidJsonError from exc
+
+
+def parse_social_text_response(response_text: Any) -> GeminiRecipeResult:
+    if not isinstance(response_text, str) or not response_text.strip():
+        raise GeminiInvalidJsonError
+    try:
+        payload = parse_json_lenient(response_text)
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        raise GeminiInvalidJsonError from exc
+    if payload.get("error_code") == "insufficient_recipe_details":
+        raise GeminiInvalidJsonError("insufficient_recipe_details")
+    try:
+        return GeminiRecipeResult.model_validate(payload)
+    except ValidationError as exc:
         raise GeminiInvalidJsonError from exc
 
 
@@ -489,9 +848,13 @@ def unique_models(models: list[str]) -> list[str]:
 
 
 def classify_gemini_error(error: Exception) -> str:
+    if isinstance(error, GeminiTimeoutError):
+        return error.code
     if isinstance(error, GeminiEmptyResponseError):
         return "gemini_empty_observation"
     if isinstance(error, GeminiInvalidJsonError):
+        if str(error) == "insufficient_recipe_details":
+            return "insufficient_recipe_details"
         return "gemini_invalid_json"
     message = sanitize_error_message(error).lower()
     status = str(
@@ -545,3 +908,102 @@ def emit(
 ) -> None:
     if callback is not None:
         callback(event_type, metadata)
+
+
+def social_text_prompt(
+    *,
+    caption_text: str,
+    platform: str,
+    duration_seconds: float | None,
+) -> str:
+    duration = "unknown" if duration_seconds is None else str(duration_seconds)
+    return (
+        f"{SOCIAL_TEXT_PROMPT}\n\n"
+        f"Platform: {platform}\n"
+        f"Duration seconds: {duration}\n\n"
+        f"Caption/title:\n{caption_text.strip()}"
+    )
+
+
+def call_with_timeout(
+    func: Callable[[], Any],
+    *,
+    timeout_seconds: int,
+    timeout_code: str,
+) -> Any:
+    result_queue: queue.Queue[tuple[bool, Any]] = queue.Queue(maxsize=1)
+
+    def target() -> None:
+        try:
+            result_queue.put((True, func()))
+        except Exception as exc:
+            result_queue.put((False, exc))
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(timeout_seconds)
+    if thread.is_alive():
+        raise GeminiTimeoutError(timeout_code)
+    ok, value = result_queue.get_nowait()
+    if ok:
+        return value
+    raise value
+
+
+def wait_for_active_file(
+    client: Any,
+    uploaded_file: Any,
+    *,
+    timeout_seconds: int,
+    on_event: Callable[[str, dict[str, Any]], None] | None,
+) -> Any:
+    started_at = perf_counter()
+    current_file = uploaded_file
+    while True:
+        state = file_state(current_file)
+        if state in {"ACTIVE", "STATE_ACTIVE"}:
+            emit(
+                on_event,
+                "gemini_video_file_active",
+                {
+                    "stage": "video_upload",
+                    "file_state": state,
+                    "elapsed_ms": int((perf_counter() - started_at) * 1000),
+                },
+            )
+            return current_file
+        if state in {"FAILED", "STATE_FAILED"}:
+            raise RuntimeError("Gemini uploaded file processing failed.")
+        if perf_counter() - started_at >= timeout_seconds:
+            raise GeminiTimeoutError("gemini_video_observation_timeout")
+        time.sleep(2)
+        file_name = getattr(current_file, "name", None)
+        if file_name and hasattr(client.files, "get"):
+            current_file = client.files.get(name=file_name)
+
+
+def delete_uploaded_file(
+    client: Any,
+    uploaded_file: Any | None,
+    on_event: Callable[[str, dict[str, Any]], None] | None,
+) -> None:
+    if uploaded_file is None or not hasattr(client, "files"):
+        return
+    file_name = getattr(uploaded_file, "name", None)
+    if not file_name or not hasattr(client.files, "delete"):
+        return
+    try:
+        client.files.delete(name=file_name)
+        emit(
+            on_event,
+            "gemini_video_file_deleted",
+            {"stage": "video_upload"},
+        )
+    except Exception:
+        return
+
+
+def file_state(uploaded_file: Any) -> str:
+    state = getattr(uploaded_file, "state", "ACTIVE")
+    state_name = getattr(state, "name", None)
+    return str(state_name or state).upper()

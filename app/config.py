@@ -15,6 +15,8 @@ WorkerMode = Literal[
     "ytdlp_dev",
 ]
 MediaPipelineMode = Literal["youtube_direct", "social_stream"]
+GeminiSocialUploadMode = Literal["files_api", "inline"]
+SocialAnalysisMode = Literal["text_first", "video_first", "video_only"]
 
 
 class Settings(BaseSettings):
@@ -35,6 +37,17 @@ class Settings(BaseSettings):
     gemini_retry_base_seconds: float = 2.0
     gemini_max_calls_per_job: int = 2
     gemini_daily_dev_call_limit: int = 5
+    gemini_video_observation_timeout_seconds: int = 120
+    gemini_text_normalization_timeout_seconds: int = 60
+    gemini_files_upload_timeout_seconds: int = 90
+    gemini_files_processing_timeout_seconds: int = 120
+    gemini_social_upload_mode: GeminiSocialUploadMode = "files_api"
+    max_job_runtime_seconds: int = 240
+    social_analysis_mode: SocialAnalysisMode = "text_first"
+    enable_tiktok_text_fallback: bool = True
+    enable_social_video_gemini: bool = False
+    social_video_gemini_timeout_seconds: int = 90
+    social_text_gemini_timeout_seconds: int = 45
     enable_gemini_repair_call: bool = False
     enable_gemini_fallbacks: bool = False
     enable_auto_force_retry: bool = False
@@ -175,6 +188,22 @@ class Settings(BaseSettings):
     def fallback_unknown_media_pipeline_mode(cls, value: object) -> object:
         normalized = str(value).strip().lower()
         return normalized if normalized in {"youtube_direct", "social_stream"} else "youtube_direct"
+
+    @field_validator("gemini_social_upload_mode", mode="before")
+    @classmethod
+    def fallback_unknown_gemini_social_upload_mode(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return normalized if normalized in {"files_api", "inline"} else "files_api"
+
+    @field_validator("social_analysis_mode", mode="before")
+    @classmethod
+    def fallback_unknown_social_analysis_mode(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return (
+            normalized
+            if normalized in {"text_first", "video_first", "video_only"}
+            else "text_first"
+        )
 
 
 @lru_cache

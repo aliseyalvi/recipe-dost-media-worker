@@ -65,7 +65,7 @@ def stream_video_to_memory(
             if content_length is not None and content_length > max_bytes:
                 buffer.close()
                 raise SocialResolverError(
-                    "media_memory_limit_exceeded",
+                    "media_size_exceeded",
                     "This video is too large for automatic recipe analysis.",
                     {
                         "platform": info.platform,

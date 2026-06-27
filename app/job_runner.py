@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
+from threading import Event
 from time import perf_counter
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
@@ -34,16 +36,27 @@ GEMINI_INVALID_JSON_MESSAGE = (
     "Gemini returned an invalid recipe response. Please try again."
 )
 
+JOB_STATUS_PENDING = "pending"
+JOB_STATUS_RESOLVING = "resolving"
+JOB_STATUS_DOWNLOADING = "downloading"
+JOB_STATUS_ANALYZING = "analyzing"
+JOB_STATUS_COMPLETED = "completed"
+JOB_STATUS_FAILED = "failed"
+
+DB_SAFE_STATUSES = {
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RESOLVING,
+    JOB_STATUS_DOWNLOADING,
+    JOB_STATUS_ANALYZING,
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+}
+
 IDEMPOTENT_STATUSES = {
-    "resolving",
-    "downloading",
-    "validating",
-    "thumbnailing",
-    "uploading_to_ai",
-    "analyzing",
-    "saving_result",
-    "completed",
-    "needs_caption",
+    JOB_STATUS_RESOLVING,
+    JOB_STATUS_DOWNLOADING,
+    JOB_STATUS_ANALYZING,
+    JOB_STATUS_COMPLETED,
 }
 
 YOUTUBE_VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{11}$")
@@ -106,22 +119,18 @@ class JobRunner:
         if job is None:
             raise JobNotFoundError
         active = {
-            "queued",
-            "resolving",
-            "downloading",
-            "validating",
-            "thumbnailing",
-            "uploading_to_ai",
-            "analyzing",
-            "saving_result",
+            JOB_STATUS_PENDING,
+            JOB_STATUS_RESOLVING,
+            JOB_STATUS_DOWNLOADING,
+            JOB_STATUS_ANALYZING,
         }
-        if job.status in active and job.status != "queued":
+        if job.status in active and job.status != JOB_STATUS_PENDING:
             return self._to_response(job), False
         if job.status == "completed" and not (
             force and self._app_env == "development"
         ):
             return self._to_response(job), False
-        if job.status in {"failed", "needs_caption"} and not force:
+        if job.status == JOB_STATUS_FAILED and not force:
             return self._to_response(job), False
         if force_reset_attempt_budget and self._app_env == "development":
             self._repository.insert_event(
@@ -132,7 +141,7 @@ class JobRunner:
             )
         job = self._repository.update_job(
             media_job_id,
-            status="resolving",
+            status=JOB_STATUS_RESOLVING,
             progress=10,
             error_code=None,
             error_message=None,
@@ -142,7 +151,7 @@ class JobRunner:
             media_job_id,
             event_type="worker_started",
             message="Media worker accepted the job.",
-            metadata={"status": "resolving", "progress": 10},
+            metadata={"status": JOB_STATUS_RESOLVING, "progress": 10},
         )
         data = self._to_response(job)
         data.accepted = True
@@ -160,10 +169,11 @@ class JobRunner:
                 return self._to_response(job)
 
             platform = detect_social_platform(job.source_url)
+            job_started_at = perf_counter()
             if self._worker_mode == "youtube_direct" and platform == "youtube":
-                job = self._run_youtube(job)
+                job = self._run_youtube(job, job_started_at)
             elif self._worker_mode == "social_video" and platform in {"instagram", "tiktok", "facebook"}:
-                job = self._run_social_video(job, platform)
+                job = self._run_social_video(job, platform, job_started_at)
             else:
                 job = self._run_skeleton(job)
 
@@ -185,15 +195,26 @@ class JobRunner:
             raise WorkerProcessingError from exc
         except Exception as exc:
             self._log_job_failure(media_job_id, type(exc).__name__)
+            error_code = "job_update_failed" if is_postgrest_api_error(exc) else "worker_error"
+            error_message = (
+                "Media job update failed."
+                if error_code == "job_update_failed"
+                else "Media worker failed."
+            )
             self._record_failure(
                 media_job_id,
-                error_code="worker_error",
-                error_message="Media worker failed.",
+                error_code=error_code,
+                error_message=error_message,
                 exception_type=type(exc).__name__,
             )
             raise WorkerProcessingError from exc
 
-    def _run_social_video(self, job: MediaJobRecord, platform: str) -> MediaJobRecord:
+    def _run_social_video(
+        self,
+        job: MediaJobRecord,
+        platform: str,
+        job_started_at: float,
+    ) -> MediaJobRecord:
         settings = self._settings
         if settings is None or not settings.enable_social_video:
             raise PipelineFailure(
@@ -205,6 +226,7 @@ class JobRunner:
             raise PipelineFailure("gemini_not_configured", "Gemini video analysis is not configured yet.")
 
         resolver_name = expected_resolver_for_platform(platform)
+        self._check_job_runtime(job.id, job_started_at)
         self._repository.insert_event(
             job.id,
             event_type=f"{resolver_name}_resolver_started",
@@ -214,7 +236,7 @@ class JobRunner:
                 "resolver": resolver_name,
             },
         )
-        job = self._repository.update_job(job.id, status="resolving", progress=20, error_code=None, error_message=None)
+        job = self._repository.update_job(job.id, status=JOB_STATUS_RESOLVING, progress=20, error_code=None, error_message=None)
         resolver_started_at = perf_counter()
         try:
             info = resolve_social_video(
@@ -247,13 +269,35 @@ class JobRunner:
                 "elapsed_ms": int((perf_counter() - resolver_started_at) * 1000),
             },
         )
+        self._update_social_metadata_best_effort(job, info)
+        if self._should_use_tiktok_text_first(info, settings):
+            return self._run_social_text_analysis(
+                job,
+                info,
+                settings,
+                job_started_at,
+            )
         if (
             info.duration_seconds is not None
             and info.duration_seconds > settings.max_video_duration_seconds
         ):
+            self._repository.insert_event(
+                job.id,
+                event_type="video_duration_rejected",
+                message="Video duration exceeded the configured limit.",
+                metadata={
+                    "platform": platform,
+                    "resolver": info.resolver,
+                    "duration_seconds": info.duration_seconds,
+                    "max_video_duration_seconds": settings.max_video_duration_seconds,
+                },
+            )
             raise PipelineFailure(
-                "media_duration_too_long",
-                "This video is too long for automatic recipe analysis.",
+                "video_duration_exceeded",
+                (
+                    "This video is longer than the current 90 second limit. "
+                    "Please try a shorter recipe video."
+                ),
                 {
                     "platform": platform,
                     "resolver": info.resolver,
@@ -261,10 +305,33 @@ class JobRunner:
                     "max_video_duration_seconds": settings.max_video_duration_seconds,
                 },
             )
-        self._update_social_metadata_best_effort(job, info)
+        if not settings.enable_social_video_gemini:
+            if (
+                platform == "tiktok"
+                and settings.enable_tiktok_text_fallback
+                and settings.social_analysis_mode == "text_first"
+            ):
+                raise PipelineFailure(
+                    "social_caption_missing",
+                    (
+                        "This TikTok video could not be analyzed from its caption. "
+                        "Please paste the caption or try another recipe video."
+                    ),
+                    {
+                        "platform": platform,
+                        "resolver": info.resolver,
+                        "title_present": bool(info.title),
+                    },
+                )
+            raise PipelineFailure(
+                "social_video_gemini_disabled",
+                "Social video analysis is not enabled for this worker.",
+                {"platform": platform, "resolver": info.resolver},
+            )
 
-        job = self._repository.update_job(job.id, status="downloading", progress=35, error_code=None, error_message=None)
-        self._repository.insert_event(job.id, event_type="social_stream_started", message="Social video stream started.", metadata={"platform": platform, "resolver": info.resolver, "ext": info.ext})
+        self._check_job_runtime(job.id, job_started_at)
+        job = self._repository.update_job(job.id, status=JOB_STATUS_DOWNLOADING, progress=35, error_code=None, error_message=None)
+        self._repository.insert_event(job.id, event_type="social_stream_started", message="Social video stream started.", metadata={"platform": platform, "resolver": info.resolver, "ext": info.ext, "duration_known": info.duration_seconds is not None})
         video: VideoBuffer | None = None
         try:
             try:
@@ -295,39 +362,383 @@ class JobRunner:
                     exc.message,
                     {"platform": platform, **exc.metadata},
                 ) from exc
-            self._repository.insert_event(job.id, event_type="social_stream_completed", message="Social video stream completed.", metadata={"platform": platform, "resolver": info.resolver, "size_bytes": video.size_bytes, "mime_type": video.mime_type, "ext": info.ext})
+            self._repository.insert_event(job.id, event_type="social_stream_completed", message="Social video stream completed.", metadata={"platform": platform, "resolver": info.resolver, "size_bytes": video.size_bytes, "mime_type": video.mime_type, "ext": info.ext, "duration_known": info.duration_seconds is not None})
 
-            job = self._repository.update_job(job.id, status="thumbnailing", progress=45, error_code=None, error_message=None)
+            self._check_job_runtime(job.id, job_started_at)
+            job = self._repository.update_job(job.id, status=JOB_STATUS_DOWNLOADING, progress=45, error_code=None, error_message=None)
             thumbnail_url = self._upload_social_thumbnail_best_effort(job, info.thumbnail_url, settings)
 
             self._filter_model_candidates(job.id)
-            job = self._repository.update_job(job.id, status="analyzing", progress=60, thumbnail_url=thumbnail_url, error_code=None, error_message=None, ai_provider="gemini", ai_model=self._analyzer.model)
-            self._repository.insert_event(job.id, event_type="gemini_inline_video_started", message="Gemini inline video analysis started.", metadata={"model": self._analyzer.model, "stage": "video_observation", "mime_type": video.mime_type, "size_bytes": video.size_bytes})
+            self._check_job_runtime(job.id, job_started_at)
+            job = self._repository.update_job(job.id, status=JOB_STATUS_ANALYZING, progress=50, thumbnail_url=thumbnail_url, error_code=None, error_message=None, ai_provider="gemini", ai_model=self._analyzer.model)
+            upload_mode = settings.gemini_social_upload_mode
+            self._repository.insert_event(job.id, event_type="gemini_social_video_started", message="Gemini social video analysis started.", metadata={"model": self._analyzer.model, "stage": "video_observation", "mime_type": video.mime_type, "size_bytes": video.size_bytes})
             self._repository.insert_event(job.id, event_type="video_observation_started", message="Gemini video observation started.", metadata={"model": self._analyzer.model, "mime_type": video.mime_type, "size_bytes": video.size_bytes})
             try:
-                outcome = self._analyzer.analyze_video_bytes(
-                    video.buffer.getvalue(),
-                    video.mime_type,
-                    on_event=lambda event_type, metadata: self._repository.insert_event(job.id, event_type=event_type, message=event_type.replace("_", " ").capitalize() + ".", metadata=metadata),
-                    before_call=lambda model, stage: self._start_gemini_api_call(job.id, model=model, stage=stage),
+                outcome = self._run_social_video_gemini_call(
+                    job,
+                    video,
+                    thumbnail_url,
+                    upload_mode,
+                    settings,
                 )
             except GeminiCallGuardError as exc:
                 raise PipelineFailure(exc.code, exc.message, exc.metadata) from exc
             except GeminiAnalysisError as exc:
-                raise PipelineFailure(exc.code, gemini_user_message(exc.code), {"stage": "gemini_inline_video", "attempted_models": exc.attempted_models, "final_model": exc.final_model, "attempts_count": exc.attempts_count, "provider_error_type": exc.provider_error_type, "provider_error_message": exc.provider_error_message}) from exc
-            self._repository.insert_event(job.id, event_type="gemini_inline_video_completed", message="Gemini inline video analysis completed.", metadata={"model": outcome.model, "stage": "recipe_normalization"})
+                raise PipelineFailure(exc.code, gemini_user_message(exc.code), {"stage": "gemini_social_video", "attempted_models": exc.attempted_models, "final_model": exc.final_model, "attempts_count": exc.attempts_count, "provider_error_type": exc.provider_error_type}) from exc
+            self._repository.insert_event(job.id, event_type="gemini_social_video_completed", message="Gemini social video analysis completed.", metadata={"model": outcome.model, "stage": "recipe_normalization"})
 
-            job = self._repository.update_job(job.id, status="saving_result", progress=85, error_code=None, error_message=None)
+            self._check_job_runtime(job.id, job_started_at)
+            job = self._repository.update_job(job.id, status=JOB_STATUS_ANALYZING, progress=85, error_code=None, error_message=None)
+            self._repository.insert_event(job.id, event_type="recipe_card_saving_started", message="Recipe card save started.", metadata={"stage": "recipe_card_saving", "progress": 85})
             if job.recipe_item_id is None:
                 raise PipelineFailure("recipe_item_required", "A saved recipe is required before analysis can be completed.")
             recipe_card_id = self._repository.insert_recipe_card(job=job, result=outcome.result, model=outcome.model)
-            self._repository.insert_event(job.id, event_type="recipe_card_saved", message="Recipe card saved.", metadata={"ingredients_count": len(outcome.result.ingredients), "steps_count": len(outcome.result.steps)})
-            job = self._repository.update_job(job.id, status="completed", progress=100, result_recipe_card_id=recipe_card_id, ai_provider="gemini", ai_model=outcome.model, thumbnail_url=thumbnail_url, completed_at=datetime.now(timezone.utc).isoformat(), error_code=None, error_message=None)
-            self._repository.insert_event(job.id, event_type="completed", message="Social video recipe analysis completed.", metadata={"platform": platform, "model": outcome.model, "status": "completed"})
+            self._repository.insert_event(job.id, event_type="recipe_card_saved", message="Recipe card saved.", metadata={"stage": "recipe_card_saving"})
+            job = self._repository.update_job(job.id, status=JOB_STATUS_COMPLETED, progress=100, result_recipe_card_id=recipe_card_id, ai_provider="gemini", ai_model=outcome.model, thumbnail_url=thumbnail_url, completed_at=datetime.now(timezone.utc).isoformat(), error_code=None, error_message=None)
+            self._repository.insert_event(job.id, event_type="completed", message="Social video recipe analysis completed.", metadata={"platform": platform, "model": outcome.model, "status": JOB_STATUS_COMPLETED})
             return job
         finally:
             if video is not None:
                 video.buffer.close()
+
+    def _run_social_video_gemini_call(
+        self,
+        job: MediaJobRecord,
+        video: VideoBuffer,
+        thumbnail_url: str | None,
+        upload_mode: str,
+        settings: Settings,
+    ):
+        if self._analyzer is None:
+            raise PipelineFailure(
+                "gemini_not_configured",
+                "Gemini video analysis is not configured yet.",
+            )
+        cancelled = Event()
+        started_at = perf_counter()
+        metadata = {
+            "stage": "video_observation",
+            "model": self._analyzer.model,
+            "mime_type": video.mime_type,
+            "size_bytes": video.size_bytes,
+            "timeout_seconds": settings.social_video_gemini_timeout_seconds,
+        }
+        self._repository.insert_event(
+            job.id,
+            event_type="gemini_video_call_started",
+            message="Gemini social video call started.",
+            metadata=metadata,
+        )
+
+        def on_event(event_type: str, event_metadata: dict[str, object]) -> None:
+            if not cancelled.is_set():
+                self._handle_gemini_event(
+                    job.id,
+                    event_type,
+                    event_metadata,
+                    thumbnail_url,
+                )
+
+        def before_call(model: str, stage: str) -> dict[str, object]:
+            if cancelled.is_set():
+                raise RuntimeError("Gemini social video call was cancelled.")
+            return self._start_gemini_api_call(job.id, model=model, stage=stage)
+
+        def call():
+            if upload_mode == "files_api":
+                return self._analyzer.analyze_video_file(
+                    video.buffer,
+                    video.mime_type,
+                    video.size_bytes,
+                    on_event=on_event,
+                    before_call=before_call,
+                )
+            self._repository.update_job(
+                job.id,
+                status=JOB_STATUS_ANALYZING,
+                progress=60,
+                thumbnail_url=thumbnail_url,
+                error_code=None,
+                error_message=None,
+                ai_provider="gemini",
+                ai_model=self._analyzer.model,
+            )
+            self._repository.insert_event(
+                job.id,
+                event_type="gemini_inline_video_started",
+                message="Gemini inline video analysis started.",
+                metadata={
+                    "model": self._analyzer.model,
+                    "stage": "video_observation",
+                    "mime_type": video.mime_type,
+                    "size_bytes": video.size_bytes,
+                },
+            )
+            return self._analyzer.analyze_video_bytes(
+                video.buffer.getvalue(),
+                video.mime_type,
+                on_event=on_event,
+                before_call=before_call,
+            )
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(call)
+        try:
+            outcome = future.result(timeout=settings.social_video_gemini_timeout_seconds)
+            self._repository.insert_event(
+                job.id,
+                event_type="gemini_video_call_completed",
+                message="Gemini social video call completed.",
+                metadata={
+                    **metadata,
+                    "model": outcome.model,
+                    "elapsed_ms": int((perf_counter() - started_at) * 1000),
+                },
+            )
+            return outcome
+        except FutureTimeoutError as exc:
+            cancelled.set()
+            self._repository.insert_event(
+                job.id,
+                event_type="gemini_video_call_timeout",
+                message="Gemini social video call timed out.",
+                metadata={
+                    **metadata,
+                    "elapsed_ms": int((perf_counter() - started_at) * 1000),
+                    "error_code": "gemini_video_timeout",
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            raise PipelineFailure(
+                "gemini_video_timeout",
+                "Video analysis took too long. Please try a shorter video or paste the caption.",
+                {
+                    "stage": "video_observation",
+                    "final_model": self._analyzer.model,
+                    "elapsed_ms": int((perf_counter() - started_at) * 1000),
+                },
+            ) from exc
+        except GeminiCallGuardError:
+            cancelled.set()
+            raise
+        except GeminiAnalysisError as exc:
+            cancelled.set()
+            elapsed_ms = int((perf_counter() - started_at) * 1000)
+            if exc.code in {
+                "gemini_video_observation_timeout",
+                "gemini_text_normalization_timeout",
+                "gemini_timeout",
+            }:
+                self._repository.insert_event(
+                    job.id,
+                    event_type="gemini_video_call_timeout",
+                    message="Gemini social video call timed out.",
+                    metadata={
+                        **metadata,
+                        "elapsed_ms": elapsed_ms,
+                        "error_code": "gemini_video_timeout",
+                        "exception_type": exc.provider_error_type,
+                    },
+                )
+                raise PipelineFailure(
+                    "gemini_video_timeout",
+                    "Video analysis took too long. Please try a shorter video or paste the caption.",
+                    {
+                        "stage": "video_observation",
+                        "final_model": exc.final_model,
+                        "elapsed_ms": elapsed_ms,
+                    },
+                ) from exc
+            self._repository.insert_event(
+                job.id,
+                event_type="gemini_video_call_failed",
+                message="Gemini social video call failed.",
+                metadata={
+                    **metadata,
+                    "elapsed_ms": elapsed_ms,
+                    "error_code": exc.code,
+                    "exception_type": exc.provider_error_type,
+                },
+            )
+            raise
+        except Exception as exc:
+            cancelled.set()
+            self._repository.insert_event(
+                job.id,
+                event_type="gemini_video_call_failed",
+                message="Gemini social video call failed.",
+                metadata={
+                    **metadata,
+                    "elapsed_ms": int((perf_counter() - started_at) * 1000),
+                    "error_code": "gemini_video_bytes_failed",
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            raise
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _should_use_tiktok_text_first(
+        self,
+        info: SocialVideoInfo,
+        settings: Settings,
+    ) -> bool:
+        title = (info.title or "").strip()
+        return (
+            info.platform == "tiktok"
+            and info.resolver == "tikwm"
+            and settings.enable_tiktok_text_fallback
+            and settings.social_analysis_mode == "text_first"
+            and len(title) >= 10
+        )
+
+    def _run_social_text_analysis(
+        self,
+        job: MediaJobRecord,
+        info: SocialVideoInfo,
+        settings: Settings,
+        job_started_at: float,
+    ) -> MediaJobRecord:
+        if self._analyzer is None:
+            raise PipelineFailure(
+                "gemini_not_configured",
+                "Gemini video analysis is not configured yet.",
+            )
+        self._filter_model_candidates(job.id)
+        self._check_job_runtime(job.id, job_started_at)
+        video_duration_exceeded = (
+            info.duration_seconds is not None
+            and info.duration_seconds > settings.max_video_duration_seconds
+        )
+        job = self._repository.update_job(
+            job.id,
+            status=JOB_STATUS_ANALYZING,
+            progress=60,
+            error_code=None,
+            error_message=None,
+            ai_provider="gemini",
+            ai_model=self._analyzer.text_model,
+        )
+        self._repository.insert_event(
+            job.id,
+            event_type="social_text_analysis_started",
+            message="TikTok caption/title text analysis started.",
+            metadata={
+                "platform": info.platform,
+                "resolver": info.resolver,
+                "title_present": True,
+                "analysis_mode": "text_first",
+                "video_duration_exceeded": video_duration_exceeded,
+            },
+        )
+        try:
+            outcome = self._analyzer.analyze_social_text(
+                caption_text=(info.title or "").strip(),
+                platform=info.platform,
+                duration_seconds=info.duration_seconds,
+                on_event=lambda event_type, metadata: self._handle_gemini_event(
+                    job.id,
+                    event_type,
+                    metadata,
+                    None,
+                ),
+                before_call=lambda model, stage: self._start_gemini_api_call(
+                    job.id,
+                    model=model,
+                    stage=stage,
+                ),
+            )
+        except GeminiCallGuardError as exc:
+            raise PipelineFailure(exc.code, exc.message, exc.metadata) from exc
+        except GeminiAnalysisError as exc:
+            if exc.code == "insufficient_recipe_details":
+                raise PipelineFailure(
+                    "insufficient_recipe_details",
+                    (
+                        "The caption does not include enough recipe details. "
+                        "Please paste the recipe caption or try another video."
+                    ),
+                    {
+                        "platform": info.platform,
+                        "resolver": info.resolver,
+                        "stage": "social_text_analysis",
+                        "final_model": exc.final_model,
+                    },
+                ) from exc
+            raise PipelineFailure(
+                exc.code,
+                gemini_user_message(exc.code),
+                {
+                    "platform": info.platform,
+                    "resolver": info.resolver,
+                    "stage": "social_text_analysis",
+                    "final_model": exc.final_model,
+                    "provider_error_type": exc.provider_error_type,
+                },
+            ) from exc
+
+        thumbnail_url = self._upload_social_thumbnail_best_effort(
+            job,
+            info.thumbnail_url,
+            settings,
+        )
+        self._check_job_runtime(job.id, job_started_at)
+        job = self._repository.update_job(
+            job.id,
+            status=JOB_STATUS_ANALYZING,
+            progress=85,
+            thumbnail_url=thumbnail_url,
+            error_code=None,
+            error_message=None,
+        )
+        self._repository.insert_event(
+            job.id,
+            event_type="recipe_card_saving_started",
+            message="Recipe card save started.",
+            metadata={"stage": "recipe_card_saving", "progress": 85},
+        )
+        if job.recipe_item_id is None:
+            raise PipelineFailure(
+                "recipe_item_required",
+                "A saved recipe is required before analysis can be completed.",
+            )
+        recipe_card_id = self._repository.insert_recipe_card(
+            job=job,
+            result=outcome.result,
+            model=outcome.model,
+        )
+        self._repository.insert_event(
+            job.id,
+            event_type="recipe_card_saved",
+            message="Recipe card saved.",
+            metadata={"stage": "recipe_card_saving"},
+        )
+        job = self._repository.update_job(
+            job.id,
+            status=JOB_STATUS_COMPLETED,
+            progress=100,
+            result_recipe_card_id=recipe_card_id,
+            ai_provider="gemini",
+            ai_model=outcome.model,
+            thumbnail_url=thumbnail_url,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            error_code=None,
+            error_message=None,
+        )
+        self._repository.insert_event(
+            job.id,
+            event_type="completed",
+            message="Social text recipe analysis completed.",
+            metadata={
+                "platform": info.platform,
+                "resolver": info.resolver,
+                "model": outcome.model,
+                "status": JOB_STATUS_COMPLETED,
+                "analysis_mode": "text_first",
+            },
+        )
+        return job
 
     def _upload_social_thumbnail_best_effort(self, job: MediaJobRecord, thumbnail_url: str | None, settings: Settings) -> str | None:
         self._repository.insert_event(job.id, event_type="thumbnail_upload_started", message="Thumbnail upload started.", metadata={"thumbnail_uploaded": False})
@@ -348,7 +759,6 @@ class JobRunner:
             "source_title": info.title,
             "source_thumbnail_url": info.thumbnail_url,
             "thumbnail_url": info.thumbnail_url,
-            "resolver": info.resolver,
         }
         for key, value in values.items():
             if value is None:
@@ -357,8 +767,21 @@ class JobRunner:
                 self._repository.update_job_metadata_best_effort(job.id, {key: value})
             except Exception as exc:
                 logger.warning("social_metadata_update_failed", extra={"media_job_id": str(job.id), "exception_type": type(exc).__name__})
+                try:
+                    self._repository.insert_event(
+                        job.id,
+                        event_type="social_metadata_update_failed",
+                        message="Social metadata update failed.",
+                        metadata={
+                            "stage": "social_metadata_update",
+                            "exception_type": type(exc).__name__,
+                            **safe_exception_metadata(exc),
+                        },
+                    )
+                except Exception:
+                    pass
 
-    def _run_youtube(self, job: MediaJobRecord) -> MediaJobRecord:
+    def _run_youtube(self, job: MediaJobRecord, job_started_at: float) -> MediaJobRecord:
         media_job_id = job.id
         video_id = extract_youtube_video_id(job.source_url)
         if video_id is None:
@@ -378,7 +801,7 @@ class JobRunner:
 
         job = self._repository.update_job(
             media_job_id,
-            status="resolving",
+            status=JOB_STATUS_RESOLVING,
             progress=10,
             thumbnail_url=thumbnail_url,
             error_code=None,
@@ -399,9 +822,10 @@ class JobRunner:
             )
 
         self._filter_model_candidates(media_job_id)
+        self._check_job_runtime(media_job_id, job_started_at)
         job = self._repository.update_job(
             media_job_id,
-            status="analyzing",
+            status=JOB_STATUS_ANALYZING,
             progress=60,
             error_code=None,
             error_message=None,
@@ -412,7 +836,7 @@ class JobRunner:
             media_job_id,
             event_type="gemini_analysis_started",
             message="Gemini video analysis started.",
-            metadata={"model": self._analyzer.model, "status": "analyzing"},
+            metadata={"model": self._analyzer.model, "status": JOB_STATUS_ANALYZING},
         )
         self._repository.insert_event(
             media_job_id,
@@ -424,11 +848,11 @@ class JobRunner:
         try:
             outcome = self._analyzer.analyze(
                 canonical_url,
-                on_event=lambda event_type, metadata: self._repository.insert_event(
+                on_event=lambda event_type, metadata: self._handle_gemini_event(
                     media_job_id,
-                    event_type=event_type,
-                    message=event_type.replace("_", " ").capitalize() + ".",
-                    metadata=metadata,
+                    event_type,
+                    metadata,
+                    thumbnail_url,
                 ),
                 before_call=lambda model, stage: self._start_gemini_api_call(
                     media_job_id,
@@ -449,7 +873,6 @@ class JobRunner:
                     "final_model": exc.final_model,
                     "attempts_count": exc.attempts_count,
                     "provider_error_type": exc.provider_error_type,
-                    "provider_error_message": exc.provider_error_message,
                 },
             ) from exc
 
@@ -459,14 +882,13 @@ class JobRunner:
             message="Gemini video analysis completed.",
             metadata={
                 "model": outcome.model,
-                "ingredients_count": len(result.ingredients),
-                "steps_count": len(result.steps),
             },
         )
 
+        self._check_job_runtime(media_job_id, job_started_at)
         job = self._repository.update_job(
             media_job_id,
-            status="saving_result",
+            status=JOB_STATUS_ANALYZING,
             progress=85,
             error_code=None,
             error_message=None,
@@ -490,17 +912,25 @@ class JobRunner:
             ) from exc
         self._repository.insert_event(
             media_job_id,
+            event_type="recipe_card_saving_started",
+            message="Recipe card save started.",
+            metadata={
+                "stage": "recipe_card_saving",
+                "progress": 85,
+            },
+        )
+        self._repository.insert_event(
+            media_job_id,
             event_type="recipe_card_saved",
             message="Recipe card saved.",
             metadata={
-                "ingredients_count": len(result.ingredients),
-                "steps_count": len(result.steps),
+                "stage": "recipe_card_saving",
             },
         )
 
         job = self._repository.update_job(
             media_job_id,
-            status="completed",
+            status=JOB_STATUS_COMPLETED,
             progress=100,
             result_recipe_card_id=recipe_card_id,
             ai_provider="gemini",
@@ -517,9 +947,7 @@ class JobRunner:
             metadata={
                 "platform": "youtube",
                 "model": outcome.model,
-                "status": "completed",
-                "ingredients_count": len(result.ingredients),
-                "steps_count": len(result.steps),
+                "status": JOB_STATUS_COMPLETED,
             },
         )
         return job
@@ -565,15 +993,9 @@ class JobRunner:
         metadata: dict[str, object] = {
             "model": model,
             "stage": stage,
-            "job_call_number": job_count + 1,
-            "model_daily_count": self._repository.count_daily_gemini_calls(
-                budget_start,
-                model=model,
-            ),
-            "model_daily_limit": self._gemini_daily_dev_model_limits.get(model),
-            "global_daily_count": daily_count,
+            "call_number": job_count + 1,
             "max_calls_per_job": self._gemini_max_calls_per_job,
-            "global_daily_limit": self._gemini_daily_dev_call_limit,
+            "timeout_seconds": self._gemini_timeout_for_stage(stage),
         }
         self._repository.insert_event(
             media_job_id,
@@ -582,6 +1004,72 @@ class JobRunner:
             metadata=metadata,
         )
         return metadata
+
+    def _handle_gemini_event(
+        self,
+        media_job_id: UUID,
+        event_type: str,
+        metadata: dict[str, object],
+        thumbnail_url: str | None,
+    ) -> None:
+        if event_type in {"gemini_video_upload_completed", "gemini_video_file_active"}:
+            self._repository.update_job(
+                media_job_id,
+                status=JOB_STATUS_ANALYZING,
+                progress=60,
+                thumbnail_url=thumbnail_url,
+                error_code=None,
+                error_message=None,
+            )
+        elif event_type == "recipe_normalization_started":
+            self._repository.update_job(
+                media_job_id,
+                status=JOB_STATUS_ANALYZING,
+                progress=75,
+                thumbnail_url=thumbnail_url,
+                error_code=None,
+                error_message=None,
+            )
+        self._repository.insert_event(
+            media_job_id,
+            event_type=event_type,
+            message=event_type.replace("_", " ").capitalize() + ".",
+            metadata=safe_gemini_metadata(metadata),
+        )
+
+    def _check_job_runtime(self, media_job_id: UUID, job_started_at: float) -> None:
+        settings = self._settings
+        max_runtime = settings.max_job_runtime_seconds if settings is not None else 240
+        elapsed_ms = int((perf_counter() - job_started_at) * 1000)
+        if elapsed_ms <= max_runtime * 1000:
+            return
+        metadata = {
+            "stage": "job_runtime",
+            "elapsed_ms": elapsed_ms,
+            "timeout_seconds": max_runtime,
+            "error_code": "job_runtime_timeout",
+        }
+        self._repository.insert_event(
+            media_job_id,
+            event_type="job_runtime_timeout",
+            message="Job runtime timeout.",
+            metadata=metadata,
+        )
+        raise PipelineFailure(
+            "job_runtime_timeout",
+            "Video analysis took too long. Please try a shorter video.",
+            metadata,
+        )
+
+    def _gemini_timeout_for_stage(self, stage: str) -> int:
+        settings = self._settings
+        if settings is None:
+            return 120 if stage == "video_observation" else 60
+        if stage == "social_text_analysis":
+            return settings.social_text_gemini_timeout_seconds
+        if stage == "recipe_normalization":
+            return settings.gemini_text_normalization_timeout_seconds
+        return settings.gemini_video_observation_timeout_seconds
 
     def _filter_model_candidates(self, media_job_id: UUID) -> None:
         if self._analyzer is None:
@@ -645,12 +1133,12 @@ class JobRunner:
 
     def _run_skeleton(self, job: MediaJobRecord) -> MediaJobRecord:
         stages = (
-            ("resolving", 10, "Media worker started resolving the job."),
-            ("validating", 30, "Media worker started validating the job."),
-            ("needs_caption", 100, SKELETON_ERROR_MESSAGE),
+            (JOB_STATUS_RESOLVING, 10, "Media worker started resolving the job."),
+            (JOB_STATUS_ANALYZING, 30, "Media worker checked the job."),
+            (JOB_STATUS_FAILED, 100, SKELETON_ERROR_MESSAGE),
         )
         for status, progress, message in stages:
-            is_terminal = status == "needs_caption"
+            is_terminal = status == JOB_STATUS_FAILED
             job = self._repository.update_job(
                 job.id,
                 status=status,
@@ -704,7 +1192,7 @@ class JobRunner:
         try:
             self._repository.update_job(
                 media_job_id,
-                status="failed",
+                status=JOB_STATUS_FAILED,
                 progress=100,
                 error_code=error_code,
                 error_message=error_message,
@@ -810,6 +1298,11 @@ def first_path_segment(path: str) -> str | None:
 
 
 def gemini_user_message(error_code: str) -> str:
+    if error_code in {
+        "gemini_video_observation_timeout",
+        "gemini_text_normalization_timeout",
+    }:
+        return "Video analysis took too long. Please try a shorter video."
     if error_code == "gemini_model_overloaded":
         return (
             "Gemini video analysis is temporarily busy. "
@@ -836,6 +1329,7 @@ def _social_metadata(info: SocialVideoInfo) -> dict[str, object]:
         "resolver": info.resolver,
         "video_id_present": bool(info.video_id),
         "title_present": bool(info.title),
+        "duration_known": info.duration_seconds is not None,
         "duration_seconds": info.duration_seconds,
         "has_thumbnail": bool(info.thumbnail_url),
         "ext": info.ext,
@@ -858,4 +1352,40 @@ def safe_event_metadata(metadata: dict[str, object]) -> dict[str, object]:
         key: value
         for key, value in metadata.items()
         if key.lower() not in forbidden
+    }
+
+
+def is_postgrest_api_error(exception: Exception) -> bool:
+    return type(exception).__name__ == "APIError"
+
+
+def safe_exception_metadata(exception: Exception) -> dict[str, object]:
+    code = getattr(exception, "code", None)
+    if code is None:
+        details = getattr(exception, "details", None)
+        if isinstance(details, dict):
+            code = details.get("code")
+    if code is None and exception.args and isinstance(exception.args[0], dict):
+        code = exception.args[0].get("code")
+    return {"postgrest_code": str(code)} if code else {}
+
+
+def safe_gemini_metadata(metadata: dict[str, object]) -> dict[str, object]:
+    allowed = {
+        "stage",
+        "model",
+        "elapsed_ms",
+        "mime_type",
+        "size_bytes",
+        "timeout_seconds",
+        "file_state",
+        "error_code",
+        "exception_type",
+        "call_number",
+        "max_calls_per_job",
+    }
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key in allowed and value is not None
     }

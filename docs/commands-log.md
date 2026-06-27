@@ -70,3 +70,39 @@ python -m compileall app
 python3 -m compileall app
 # passed
 ```
+
+## W-M14G-4SOC2A Validation
+
+```bash
+python -m compileall app
+# zsh: command not found: python
+
+python3 -m compileall app
+# passed
+```
+
+## W-M14G-4SOC2B Validation
+
+```bash
+python -m compileall app
+# zsh: command not found: python
+
+python3 -m compileall app
+# passed
+
+grep -R "uploading_to_gemini\|normalizing_recipe\|saving_result\|analyzing_video" -n app
+# no matches
+```
+
+## W-M14G-4SOC2C Validation
+
+```bash
+python -m compileall app
+# zsh: command not found: python
+
+python3 -m compileall app
+# passed
+
+grep -R "uploading_to_gemini|normalizing_recipe|saving_result|analyzing_video" -n app
+# no matches
+```

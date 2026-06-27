@@ -125,6 +125,19 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         ),
         gemini_max_calls_per_job=settings.gemini_max_calls_per_job,
         gemini_daily_dev_call_limit=settings.gemini_daily_dev_call_limit,
+        gemini_social_upload_mode=settings.gemini_social_upload_mode,
+        gemini_video_observation_timeout_seconds=(
+            settings.gemini_video_observation_timeout_seconds
+        ),
+        gemini_text_normalization_timeout_seconds=(
+            settings.gemini_text_normalization_timeout_seconds
+        ),
+        max_job_runtime_seconds=settings.max_job_runtime_seconds,
+        social_analysis_mode=settings.social_analysis_mode,
+        enable_tiktok_text_fallback=settings.enable_tiktok_text_fallback,
+        enable_social_video_gemini=settings.enable_social_video_gemini,
+        social_video_gemini_timeout_seconds=settings.social_video_gemini_timeout_seconds,
+        social_text_gemini_timeout_seconds=settings.social_text_gemini_timeout_seconds,
         enable_gemini_repair_call=settings.enable_gemini_repair_call,
         enable_gemini_fallbacks=settings.enable_gemini_fallbacks,
         disabled_models=settings.gemini_disabled_models,
@@ -262,6 +275,17 @@ def process_job(
                 ),
                 max_retries=settings.gemini_max_retries,
                 retry_base_seconds=settings.gemini_retry_base_seconds,
+                video_observation_timeout_seconds=(
+                    settings.gemini_video_observation_timeout_seconds
+                ),
+                text_normalization_timeout_seconds=(
+                    settings.gemini_text_normalization_timeout_seconds
+                ),
+                files_upload_timeout_seconds=settings.gemini_files_upload_timeout_seconds,
+                files_processing_timeout_seconds=(
+                    settings.gemini_files_processing_timeout_seconds
+                ),
+                social_text_timeout_seconds=settings.social_text_gemini_timeout_seconds,
             )
         runner = JobRunner(
             create_repository(settings),

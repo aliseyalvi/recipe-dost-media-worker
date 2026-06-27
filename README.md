@@ -32,6 +32,17 @@ GEMINI_TEXT_MODEL=gemini-2.5-flash
 GEMINI_MAX_RETRIES=1
 GEMINI_MAX_CALLS_PER_JOB=2
 GEMINI_DAILY_DEV_CALL_LIMIT=5
+GEMINI_VIDEO_OBSERVATION_TIMEOUT_SECONDS=120
+GEMINI_TEXT_NORMALIZATION_TIMEOUT_SECONDS=60
+GEMINI_FILES_UPLOAD_TIMEOUT_SECONDS=90
+GEMINI_FILES_PROCESSING_TIMEOUT_SECONDS=120
+GEMINI_SOCIAL_UPLOAD_MODE=files_api
+MAX_JOB_RUNTIME_SECONDS=240
+SOCIAL_ANALYSIS_MODE=text_first
+ENABLE_TIKTOK_TEXT_FALLBACK=true
+ENABLE_SOCIAL_VIDEO_GEMINI=false
+SOCIAL_VIDEO_GEMINI_TIMEOUT_SECONDS=90
+SOCIAL_TEXT_GEMINI_TIMEOUT_SECONDS=45
 ENABLE_GEMINI_REPAIR_CALL=false
 ENABLE_GEMINI_FALLBACKS=false
 
@@ -70,6 +81,8 @@ ENABLE_TIKWM_RESOLVER=true
 ENABLE_COBALT_RESOLVER=true
 COBALT_API_URL=https://your-cobalt-service.example/
 ```
+
+For social testing, `SOCIAL_ANALYSIS_MODE=text_first` and `ENABLE_SOCIAL_VIDEO_GEMINI=false` are the development defaults. TikTok/TikWM jobs with a usable title/caption use one Gemini text call and skip stream download, video upload, and video observation. Instagram/Facebook video analysis only runs when `ENABLE_SOCIAL_VIDEO_GEMINI=true`.
 
 Optional platform cookies:
 
@@ -115,7 +128,7 @@ curl -X POST http://localhost:8080/debug/tikwm \
 
 ## Current Next Work
 
-M14G-4R2: run full social end-to-end tests.
+W-M14G-4SOC2C adds stable social analysis mode: TikTok uses text-first caption/title analysis by default to avoid video Gemini hangs and save quota. Social video Gemini calls are opt-in and guarded by a whole-call timeout so jobs do not remain stuck at analyzing progress 50.
 
 - TikWM is third-party, not an official TikTok API.
 - YouTube uses the existing native path.
@@ -123,6 +136,8 @@ M14G-4R2: run full social end-to-end tests.
 - Instagram and Facebook use Cobalt.
 - Cobalt is not used for TikTok or YouTube.
 - TikWM/Cobalt temporary stream URLs are never stored or returned.
+- Raw video is not stored. Gemini prompts, raw responses, source URLs, stream URLs, recipe ingredients, and recipe steps must not be logged or written to events.
+- Detailed worker stages are tracked with `media_job_events` and `progress`; `media_jobs.status` stays one of `pending`, `resolving`, `downloading`, `analyzing`, `completed`, or `failed`.
 
 See [docs/worker-context.md](docs/worker-context.md) for the compact current context.
 
