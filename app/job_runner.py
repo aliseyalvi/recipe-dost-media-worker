@@ -7,7 +7,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timezone
 from threading import Event
-from time import perf_counter
+from time import perf_counter, sleep
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
@@ -278,6 +278,53 @@ def _caption_result_to_recipe_result(parsed: dict) -> GeminiRecipeResult:
         source_assumptions_en=[],
         source_assumptions_ur=[],
     )
+
+
+def _load_mock_recipe_fixture(fixture_path: str) -> dict:
+    with open(fixture_path, encoding="utf-8") as f:
+        value = json.load(f)
+    if not isinstance(value, dict):
+        raise ValueError("Mock recipe fixture must be a JSON object.")
+    return value
+
+
+def _validate_parsed_recipe(
+    parsed: dict,
+    *,
+    platform: str,
+    stage: str,
+    model: str,
+    user_message: str,
+) -> None:
+    if parsed.get("is_recipe") is not True:
+        raise PipelineFailure(
+            "insufficient_recipe_details",
+            user_message,
+            {"platform": platform, "stage": stage, "model": model},
+        )
+
+    confidence = str(parsed.get("confidence", "medium")).strip().lower()
+    if confidence == "low":
+        raise PipelineFailure(
+            "insufficient_recipe_details",
+            user_message,
+            {"platform": platform, "stage": stage, "model": model},
+        )
+
+    ingredients = parsed.get("ingredients") or []
+    steps = parsed.get("steps") or []
+    if not isinstance(ingredients, list) or len(ingredients) == 0:
+        raise PipelineFailure(
+            "insufficient_recipe_details",
+            user_message,
+            {"platform": platform, "stage": stage, "model": model},
+        )
+    if not isinstance(steps, list) or len(steps) == 0:
+        raise PipelineFailure(
+            "insufficient_recipe_details",
+            user_message,
+            {"platform": platform, "stage": stage, "model": model},
+        )
 
 
 VIDEO_RECIPE_PROMPT = """\
@@ -1220,12 +1267,6 @@ class JobRunner:
         settings: Settings,
         job_started_at: float,
     ) -> MediaJobRecord:
-        if settings.gemini_api_key is None:
-            raise PipelineFailure(
-                "gemini_not_configured",
-                "Gemini video analysis is not configured yet.",
-            )
-        self._filter_model_candidates(job.id)
         self._check_job_runtime(job.id, job_started_at)
         video_duration_exceeded = (
             info.duration_seconds is not None
@@ -1236,6 +1277,21 @@ class JobRunner:
             info.thumbnail_url,
             settings,
         )
+        if settings.ai_analysis_mode == "mock_fixture":
+            return self._run_mock_fixture_analysis(
+                job,
+                info,
+                settings,
+                job_started_at,
+                thumbnail_url,
+            )
+
+        if settings.gemini_api_key is None:
+            raise PipelineFailure(
+                "gemini_not_configured",
+                "Gemini video analysis is not configured yet.",
+            )
+        self._filter_model_candidates(job.id)
         model = settings.effective_gemini_text_model
         job = self._repository.update_job(
             job.id,
@@ -1448,6 +1504,202 @@ class JobRunner:
                 "model": model,
                 "status": JOB_STATUS_COMPLETED,
                 "analysis_mode": "text_first",
+            },
+        )
+        return job
+
+    def _run_mock_fixture_analysis(
+        self,
+        job: MediaJobRecord,
+        info: SocialVideoInfo,
+        settings: Settings,
+        job_started_at: float,
+        thumbnail_url: str | None,
+    ) -> MediaJobRecord:
+        model = "mock-recipe-fixture"
+        fixture_path = settings.mock_recipe_fixture_path
+        if settings.mock_video_processing_mode == "download_then_mock":
+            file_path: str | None = None
+            self._check_job_runtime(job.id, job_started_at)
+            job = self._repository.update_job(
+                job.id,
+                status=JOB_STATUS_DOWNLOADING,
+                progress=35,
+                thumbnail_url=thumbnail_url,
+                error_code=None,
+                error_message=None,
+            )
+            self._repository.insert_event(
+                job.id,
+                event_type="social_video_download_started",
+                message="TikTok video download started.",
+                metadata={
+                    "platform": info.platform,
+                    "resolver": info.resolver,
+                    "stage": "mock_video_download",
+                    "ai_analysis_mode": "mock_fixture",
+                },
+            )
+            download_started_at = perf_counter()
+            try:
+                file_path, _mime_type, size_bytes = _download_tiktok_to_temp(
+                    info,
+                    str(job.id),
+                    settings,
+                )
+            except SocialResolverError as exc:
+                self._repository.insert_event(
+                    job.id,
+                    event_type="social_video_download_failed",
+                    message="TikTok video download failed.",
+                    metadata={
+                        "platform": info.platform,
+                        "resolver": info.resolver,
+                        "error_code": exc.code,
+                        "exception_type": type(exc).__name__,
+                        "stage": "mock_video_download",
+                        **safe_event_metadata(exc.metadata),
+                    },
+                )
+                raise PipelineFailure(
+                    exc.code,
+                    exc.message,
+                    {"platform": info.platform, **exc.metadata},
+                ) from exc
+            finally:
+                if file_path:
+                    _safe_unlink(file_path)
+                    try:
+                        self._repository.insert_event(
+                            job.id,
+                            event_type="temp_video_deleted",
+                            message="Temporary video file deleted.",
+                            metadata={"stage": "mock_video_download"},
+                        )
+                    except Exception:
+                        pass
+            self._repository.insert_event(
+                job.id,
+                event_type="social_video_download_completed",
+                message="TikTok video download completed.",
+                metadata={
+                    "platform": info.platform,
+                    "resolver": info.resolver,
+                    "size_bytes": size_bytes,
+                    "stage": "mock_video_download",
+                    "elapsed_ms": int((perf_counter() - download_started_at) * 1000),
+                },
+            )
+
+        self._check_job_runtime(job.id, job_started_at)
+        job = self._repository.update_job(
+            job.id,
+            status=JOB_STATUS_ANALYZING,
+            progress=60,
+            thumbnail_url=thumbnail_url,
+            error_code=None,
+            error_message=None,
+            ai_provider="mock",
+            ai_model=model,
+        )
+        self._repository.insert_event(
+            job.id,
+            event_type="mock_ai_analysis_started",
+            message="Mock fixture AI analysis started.",
+            metadata={
+                "ai_analysis_mode": "mock_fixture",
+                "fixture_path": fixture_path,
+                "platform": info.platform,
+            },
+        )
+        if settings.mock_analysis_delay_ms > 0:
+            sleep(settings.mock_analysis_delay_ms / 1000)
+        try:
+            parsed = _load_mock_recipe_fixture(fixture_path)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            raise PipelineFailure(
+                "mock_fixture_invalid",
+                "Mock recipe fixture could not be loaded.",
+                {
+                    "platform": info.platform,
+                    "stage": "mock_fixture_analysis",
+                    "fixture_path": fixture_path,
+                    "exception_type": type(exc).__name__,
+                },
+            ) from exc
+
+        _validate_parsed_recipe(
+            parsed,
+            platform=info.platform,
+            stage="mock_fixture_analysis",
+            model=model,
+            user_message="Mock recipe fixture does not include enough recipe details.",
+        )
+        self._repository.insert_event(
+            job.id,
+            event_type="mock_ai_analysis_completed",
+            message="Mock fixture AI analysis completed.",
+            metadata={
+                "ai_analysis_mode": "mock_fixture",
+                "fixture_path": fixture_path,
+                "platform": info.platform,
+                "title": str(parsed.get("title") or ""),
+            },
+        )
+        result = _caption_result_to_recipe_result(parsed)
+        self._check_job_runtime(job.id, job_started_at)
+        job = self._repository.update_job(
+            job.id,
+            status=JOB_STATUS_ANALYZING,
+            progress=85,
+            thumbnail_url=thumbnail_url,
+            error_code=None,
+            error_message=None,
+        )
+        self._repository.insert_event(
+            job.id,
+            event_type="recipe_card_saving_started",
+            message="Recipe card save started.",
+            metadata={"stage": "recipe_card_saving", "progress": 85},
+        )
+        if job.recipe_item_id is None:
+            raise PipelineFailure(
+                "recipe_item_required",
+                "A saved recipe is required before analysis can be completed.",
+            )
+        recipe_card_id = self._repository.insert_recipe_card(
+            job=job,
+            result=result,
+            model=model,
+        )
+        self._repository.insert_event(
+            job.id,
+            event_type="recipe_card_saved",
+            message="Recipe card saved.",
+            metadata={"stage": "recipe_card_saving"},
+        )
+        job = self._repository.update_job(
+            job.id,
+            status=JOB_STATUS_COMPLETED,
+            progress=100,
+            result_recipe_card_id=recipe_card_id,
+            ai_provider="mock",
+            ai_model=model,
+            thumbnail_url=thumbnail_url,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            error_code=None,
+            error_message=None,
+        )
+        self._repository.insert_event(
+            job.id,
+            event_type="completed",
+            message="Mock fixture recipe analysis completed.",
+            metadata={
+                "platform": info.platform,
+                "resolver": info.resolver,
+                "model": model,
+                "status": JOB_STATUS_COMPLETED,
+                "ai_analysis_mode": "mock_fixture",
             },
         )
         return job

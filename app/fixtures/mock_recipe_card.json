@@ -1,0 +1,32 @@
+{
+  "is_recipe": true,
+  "confidence": "high",
+  "title": "Creamy Chicken Pasta",
+  "summary": "A quick creamy chicken pasta with simple spices, garlic, cream, and cheese. Good for a fast family meal.",
+  "ingredients": [
+    "2 cups boiled pasta",
+    "250g boneless chicken, sliced",
+    "1 tablespoon oil",
+    "1 tablespoon butter",
+    "1 teaspoon garlic paste",
+    "1/2 teaspoon black pepper",
+    "1/2 teaspoon red chili flakes",
+    "1/2 teaspoon salt",
+    "1/2 cup cream",
+    "1/4 cup milk",
+    "1/4 cup grated cheese"
+  ],
+  "steps": [
+    "Heat oil and butter in a pan.",
+    "Add garlic paste and saute for a few seconds.",
+    "Add sliced chicken and cook until it changes color.",
+    "Season with salt, black pepper, and red chili flakes.",
+    "Add cream and milk, then simmer for 2 to 3 minutes.",
+    "Add boiled pasta and mix until coated with sauce.",
+    "Add grated cheese and cook until melted.",
+    "Serve hot."
+  ],
+  "servings": 2,
+  "time_minutes": 25,
+  "tags": ["pasta", "chicken", "quick dinner", "creamy"]
+}

@@ -20,9 +20,10 @@
 | 16 | W-M14R1B TikTok Routing Fix | Done | Queued TikTok jobs route to TikWM text-first before unsupported fallback |
 | 17 | W-M14R1C Replace Gemini text helper with sync REST call | Done | TikTok text-first uses direct sync REST call to Gemini generateContent instead of failing SDK helper |
 | 18 | W-M15A TikTok video-to-Gemini fallback | Done | After text-first insufficient, fall back to video Gemini behind ENABLE_SOCIAL_VIDEO_GEMINI flag |
-| 19 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 18 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 19 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 19 | W-M15D0 Mock Fixture AI Mode | Done | Development mode skips Gemini calls and saves a fixed fixture recipe through the real worker pipeline |
+| 20 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 21 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 22 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
@@ -37,3 +38,4 @@ Deploy and rerun M14G-4R2 after W-M14R1:
 - YouTube must continue using the unchanged native path.
 - No job should remain stuck at `analyzing` progress `50` or `60`; Gemini hangs should become controlled failed jobs.
 - Known videos longer than `MAX_VIDEO_DURATION_SECONDS` should fail with `video_duration_exceeded` before stream or Gemini events.
+- For quota-free app/backend testing, set `AI_ANALYSIS_MODE=mock_fixture`; TikTok still resolves through TikWM and uploads the real thumbnail, then emits `mock_ai_analysis_started`/`mock_ai_analysis_completed` and saves `app/fixtures/mock_recipe_card.json` without Gemini quota usage.

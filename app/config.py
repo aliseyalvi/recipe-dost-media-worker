@@ -17,6 +17,8 @@ WorkerMode = Literal[
 MediaPipelineMode = Literal["youtube_direct", "social_stream"]
 GeminiSocialUploadMode = Literal["files_api", "inline"]
 SocialAnalysisMode = Literal["text_first", "video_first", "video_only"]
+AIAnalysisMode = Literal["gemini", "mock_fixture"]
+MockVideoProcessingMode = Literal["skip_video_download", "download_then_mock"]
 
 
 class Settings(BaseSettings):
@@ -44,6 +46,10 @@ class Settings(BaseSettings):
     gemini_files_processing_timeout_seconds: int = 120
     gemini_social_upload_mode: GeminiSocialUploadMode = "files_api"
     max_job_runtime_seconds: int = 240
+    ai_analysis_mode: AIAnalysisMode = "gemini"
+    mock_recipe_fixture_path: str = "app/fixtures/mock_recipe_card.json"
+    mock_analysis_delay_ms: int = 500
+    mock_video_processing_mode: MockVideoProcessingMode = "skip_video_download"
     social_analysis_mode: SocialAnalysisMode = "text_first"
     enable_tiktok_text_fallback: bool = True
     enable_social_video_gemini: bool = False
@@ -207,6 +213,22 @@ class Settings(BaseSettings):
             normalized
             if normalized in {"text_first", "video_first", "video_only"}
             else "text_first"
+        )
+
+    @field_validator("ai_analysis_mode", mode="before")
+    @classmethod
+    def fallback_unknown_ai_analysis_mode(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return normalized if normalized in {"gemini", "mock_fixture"} else "gemini"
+
+    @field_validator("mock_video_processing_mode", mode="before")
+    @classmethod
+    def fallback_unknown_mock_video_processing_mode(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return (
+            normalized
+            if normalized in {"skip_video_download", "download_then_mock"}
+            else "skip_video_download"
         )
 
 

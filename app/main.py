@@ -129,6 +129,9 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         gemini_video_fallback_models_count=len(
             settings.gemini_video_fallback_models
         ),
+        ai_analysis_mode=settings.ai_analysis_mode,
+        mock_video_processing_mode=settings.mock_video_processing_mode,
+        mock_recipe_fixture_configured=bool(settings.mock_recipe_fixture_path.strip()),
         gemini_max_calls_per_job=settings.gemini_max_calls_per_job,
         gemini_daily_dev_call_limit=settings.gemini_daily_dev_call_limit,
         gemini_social_upload_mode=settings.gemini_social_upload_mode,

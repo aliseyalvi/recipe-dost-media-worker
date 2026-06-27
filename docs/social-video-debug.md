@@ -17,6 +17,7 @@
 - W-M14R1 keeps TikTok strictly text-first for the Render POC: TikWM metadata, duration guard, thumbnail upload, one Gemini text call, recipe card save. TikTok video bytes are not streamed in this milestone.
 - W-M14R1C replaces the failing Gemini SDK helper with a direct synchronous REST call (`requests.post`) to `generateContent`. The call uses `timeout=45`, JSON generation config (`temperature=0.2`, `responseMimeType=application/json`), and explicit error handling for timeouts, rate limits (429), API key missing, and JSON parse failures. The caption prompt is a module-level constant `CAPTION_RECIPE_PROMPT` separate from the SDK's `SOCIAL_TEXT_PROMPT`. TikTok text-first now emits `gemini_api_call_started` and `gemini_api_call_completed` (or `gemini_api_call_failed`) events.
 - W-M15A adds TikTok video-to-Gemini fallback: when `ENABLE_SOCIAL_VIDEO_GEMINI=true` and text-first returns `insufficient_recipe_details`, the worker falls back to video analysis. Video is downloaded from the TikWM internal URL to a temp file, uploaded to Gemini Files API via REST, and analyzed via `generateContent` with `fileData`. Temp files are cleaned up in `finally`. Gemini uploaded files are deleted best-effort. New events: `social_text_insufficient_video_fallback_started`, `social_video_download_started`/`completed`/`failed`, `gemini_video_upload_started`/`completed`/`failed`, `gemini_video_file_active`/`deleted`, `gemini_video_analysis_started`/`completed`/`failed`, `temp_video_deleted`.
+- W-M15D0 adds `AI_ANALYSIS_MODE=mock_fixture` for quota-free TikTok development testing. TikWM resolution, duration guard, thumbnail upload, Supabase job updates, and recipe-card save stay real. Gemini text/video calls and Gemini quota guards are skipped. Expected mock events are `mock_ai_analysis_started` and `mock_ai_analysis_completed`; final job status should be `completed` progress `100` with `result_recipe_card_id`.
 
 ## TikTok / TikWM Finding
 
@@ -42,6 +43,7 @@ TikWM debug was proven from Cloud Run. TikTok full jobs now use TikWM text-first
 - Raw social video is kept in memory only for non-TikTok video-mode tests. With `GEMINI_SOCIAL_UPLOAD_MODE=files_api`, the worker uploads the in-memory file to Gemini and deletes the Gemini file best-effort after analysis.
 - If TikWM metadata has a known duration above `MAX_VIDEO_DURATION_SECONDS`, the worker records `video_too_long` and fails with `video_duration_exceeded` before Gemini.
 - TikTok text-first does not store or log the TikWM CDN URL and does not stream TikTok video bytes in W-M14R1.
+- TikTok mock fixture mode uses `MOCK_VIDEO_PROCESSING_MODE=skip_video_download` by default, so no social video bytes are downloaded. `download_then_mock` may be used to exercise existing temp-file guards; the temp file is deleted before fixture analysis.
 - The old "Automatic video analysis is currently available for YouTube" fallback is only for truly unsupported platforms and must not catch TikTok.
 
 ## Expected `/debug/tikwm` Shape
@@ -91,6 +93,7 @@ curl -X POST http://localhost:8080/debug/social-resolve \
 Full test plan:
 
 - TikTok text-first: expect `worker_started`, `tikwm_resolver_started`, `tikwm_resolver_completed`, `thumbnail_upload_started`, `thumbnail_uploaded` or `thumbnail_upload_failed`, `social_text_analysis_started`, `gemini_api_call_started`, `gemini_api_call_completed`, `social_text_analysis_completed`, `recipe_card_saved`, and `completed`; or a controlled failure.
+- TikTok mock fixture: with `AI_ANALYSIS_MODE=mock_fixture`, expect `worker_started`, `tikwm_resolver_started`, `tikwm_resolver_completed`, `thumbnail_upload_started`, `thumbnail_uploaded` or `thumbnail_upload_failed`, `mock_ai_analysis_started`, `mock_ai_analysis_completed`, `recipe_card_saved`, and `completed`; no `gemini_api_call_started` event should be emitted.
 - TikTok with missing/thin title fails with `social_caption_missing` before stream download.
 - Long TikTok metadata fails with `video_duration_exceeded` and `video_too_long` before Gemini.
 - Instagram: with default Render POC config, expect `instagram_resolver_disabled`.

@@ -187,3 +187,16 @@ grep -R "temporary_download_url" -n app docs || true
 grep -Rn "cdn_download_url.*insert\|cdn_download_url.*update" app docs || true
 # no matches
 ```
+
+## W-M15D0 Validation
+
+```bash
+python3 -m compileall app
+# passed
+
+grep -R "temporary_download_url" -n app docs || true
+# matched only historical commands-log entries
+
+grep -R "cdn_download_url.*insert\|cdn_download_url.*update" -n app docs || true
+# matched only historical commands-log entries
+```

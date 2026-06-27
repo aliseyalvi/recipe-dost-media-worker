@@ -22,6 +22,9 @@ class HealthResponse(BaseModel):
     gemini_video_model: str
     gemini_text_model: str
     gemini_video_fallback_models_count: int
+    ai_analysis_mode: str
+    mock_video_processing_mode: str
+    mock_recipe_fixture_configured: bool
     gemini_max_calls_per_job: int
     gemini_daily_dev_call_limit: int
     gemini_social_upload_mode: str
