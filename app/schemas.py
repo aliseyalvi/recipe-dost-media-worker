@@ -3,11 +3,11 @@ from __future__ import annotations
 from typing import Any, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 class ProcessJobRequest(BaseModel):
-    media_job_id: UUID
+    media_job_id: UUID = Field(validation_alias=AliasChoices("media_job_id", "job_id"))
     force: bool = False
     force_reset_attempt_budget: bool = False
 
@@ -15,9 +15,12 @@ class ProcessJobRequest(BaseModel):
 class HealthResponse(BaseModel):
     ok: Literal[True] = True
     service: Literal["recipe-dost-media-worker"] = "recipe-dost-media-worker"
+    runtime_platform: str
     worker_mode: str
+    background_mode: Literal["fastapi_background_tasks"]
     gemini_configured: bool
     gemini_video_model: str
+    gemini_text_model: str
     gemini_video_fallback_models_count: int
     gemini_max_calls_per_job: int
     gemini_daily_dev_call_limit: int
@@ -28,6 +31,8 @@ class HealthResponse(BaseModel):
     social_analysis_mode: str
     enable_tiktok_text_fallback: bool
     enable_social_video_gemini: bool
+    enable_render_instagram_resolver: bool
+    enable_render_facebook_resolver: bool
     social_video_gemini_timeout_seconds: int
     social_text_gemini_timeout_seconds: int
     enable_gemini_repair_call: bool
@@ -63,6 +68,7 @@ class HealthResponse(BaseModel):
     yt_dlp_version: str
     enable_tikwm_resolver: bool
     tikwm_configured: bool
+    tikwm_api_url_configured: bool
     tikwm_enabled_platforms: list[str]
     tikwm_hd: bool
     tikwm_probe_bytes: int
@@ -81,7 +87,11 @@ class MediaJobData(BaseModel):
 
 class ProcessJobResponse(BaseModel):
     ok: Literal[True] = True
-    data: MediaJobData
+    accepted: bool
+    job_id: UUID
+    status: Optional[str] = None
+    reason: Optional[str] = None
+    message: Optional[str] = None
 
 
 class ErrorDetail(BaseModel):

@@ -695,7 +695,7 @@ class GeminiRecipeAnalyzer:
                         ],
                     ),
                     timeout_seconds=self.social_text_timeout_seconds,
-                    timeout_code="gemini_text_normalization_timeout",
+                    timeout_code="gemini_text_timeout",
                 )
             response_text = extract_gemini_text(response)
             result = parse_social_text_response(response_text)

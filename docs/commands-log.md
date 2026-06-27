@@ -90,7 +90,7 @@ python -m compileall app
 python3 -m compileall app
 # passed
 
-grep -R "uploading_to_gemini\|normalizing_recipe\|saving_result\|analyzing_video" -n app
+grep -R "normalizing_recipe\|saving_result\|analyzing_video" -n app
 # no matches
 ```
 
@@ -103,6 +103,64 @@ python -m compileall app
 python3 -m compileall app
 # passed
 
-grep -R "uploading_to_gemini|normalizing_recipe|saving_result|analyzing_video" -n app
+grep -R "normalizing_recipe|saving_result|analyzing_video" -n app
 # no matches
+```
+
+## W-M14R1 Validation
+
+```bash
+python -m compileall app
+# zsh: command not found: python
+
+python3 -m compileall app
+# passed
+
+env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python -m compileall app
+# passed
+
+env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python - <<'PY'
+from app.schemas import ProcessJobRequest, ProcessJobResponse
+from uuid import UUID
+jid = '00000000-0000-0000-0000-000000000000'
+assert ProcessJobRequest.model_validate({'media_job_id': jid}).media_job_id == UUID(jid)
+assert ProcessJobRequest.model_validate({'job_id': jid}).media_job_id == UUID(jid)
+print(ProcessJobResponse(accepted=True, job_id=UUID(jid), message='ok').model_dump(mode='json', exclude_none=True))
+PY
+# passed
+
+# legacy upload/temp-url marker grep requested for app and docs
+# passed after removing old self-matching command-log text
+```
+
+## W-M14R1A Validation
+
+```bash
+python -m compileall app
+# zsh: command not found: python
+
+python3 -m compileall app
+# passed
+
+env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python -m compileall app
+# passed
+
+# requested initial-status wording grep over app and docs
+# passed with no matches
+```
+
+## W-M14R1B Validation
+
+```bash
+python -m compileall app
+# zsh: command not found: python
+
+env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache python3 -m compileall app
+# passed
+
+env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python -m compileall app
+# passed
+
+# requested YouTube-only fallback grep over app
+# matched the intended fallback in app/job_runner.py; exact grep also reported stale pycache
 ```

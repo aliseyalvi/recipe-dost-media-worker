@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Annotated, Any, Optional, Union
 from uuid import UUID
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -33,6 +33,9 @@ from app.social.yt_dlp_resolver import (
 from app.social.tikwm_resolver import debug_tikwm
 
 logger = logging.getLogger("recipe_dost.worker")
+
+PROCESSING_STATUSES = {"resolving", "downloading", "analyzing"}
+INITIAL_JOB_STATUS = "queued"
 
 
 class JsonFormatter(logging.Formatter):
@@ -117,9 +120,12 @@ def handle_request_validation(
 @app.get("/health", response_model=HealthResponse)
 def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
     return HealthResponse(
+        runtime_platform=settings.runtime_platform,
         worker_mode=settings.worker_mode,
+        background_mode="fastapi_background_tasks",
         gemini_configured=settings.gemini_configured,
         gemini_video_model=settings.effective_gemini_video_model,
+        gemini_text_model=settings.effective_gemini_text_model,
         gemini_video_fallback_models_count=len(
             settings.gemini_video_fallback_models
         ),
@@ -136,6 +142,8 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         social_analysis_mode=settings.social_analysis_mode,
         enable_tiktok_text_fallback=settings.enable_tiktok_text_fallback,
         enable_social_video_gemini=settings.enable_social_video_gemini,
+        enable_render_instagram_resolver=settings.enable_render_instagram_resolver,
+        enable_render_facebook_resolver=settings.enable_render_facebook_resolver,
         social_video_gemini_timeout_seconds=settings.social_video_gemini_timeout_seconds,
         social_text_gemini_timeout_seconds=settings.social_text_gemini_timeout_seconds,
         enable_gemini_repair_call=settings.enable_gemini_repair_call,
@@ -171,6 +179,7 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         yt_dlp_version=get_yt_dlp_version(),
         enable_tikwm_resolver=settings.enable_tikwm_resolver,
         tikwm_configured=settings.tikwm_configured,
+        tikwm_api_url_configured=bool(settings.tikwm_api_url.strip()),
         tikwm_enabled_platforms=settings.tikwm_enabled_platforms,
         tikwm_hd=settings.tikwm_hd,
         tikwm_probe_bytes=settings.tikwm_probe_bytes,
@@ -178,6 +187,98 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         cobalt_configured=settings.cobalt_configured,
         cobalt_enabled_platforms=settings.cobalt_enabled_platforms,
     )
+
+
+def build_job_runner(settings: Settings) -> JobRunner:
+    analyzer = None
+    if settings.gemini_api_key is not None:
+        analyzer = GeminiRecipeAnalyzer(
+            api_key=settings.gemini_api_key.get_secret_value(),
+            model=settings.effective_gemini_video_model,
+            text_model=settings.effective_gemini_text_model,
+            fallback_models=(
+                settings.gemini_video_fallback_models
+                if settings.enable_gemini_fallbacks
+                else []
+            ),
+            max_retries=settings.gemini_max_retries,
+            retry_base_seconds=settings.gemini_retry_base_seconds,
+            video_observation_timeout_seconds=(
+                settings.gemini_video_observation_timeout_seconds
+            ),
+            text_normalization_timeout_seconds=(
+                settings.gemini_text_normalization_timeout_seconds
+            ),
+            files_upload_timeout_seconds=settings.gemini_files_upload_timeout_seconds,
+            files_processing_timeout_seconds=(
+                settings.gemini_files_processing_timeout_seconds
+            ),
+            social_text_timeout_seconds=settings.social_text_gemini_timeout_seconds,
+        )
+    return JobRunner(
+        create_repository(settings),
+        analyzer,
+        worker_mode=settings.worker_mode,
+        app_env=settings.app_env,
+        gemini_max_calls_per_job=settings.gemini_max_calls_per_job,
+        gemini_daily_dev_call_limit=settings.gemini_daily_dev_call_limit,
+        gemini_disabled_models=settings.gemini_disabled_models,
+        gemini_daily_dev_model_limits=settings.gemini_daily_dev_model_limits,
+        gemini_dev_budget_reset_at=settings.gemini_dev_budget_reset_at,
+        settings=settings,
+    )
+
+
+def run_job_background(job_id: UUID, force: bool = False) -> None:
+    repository = None
+    try:
+        settings = get_settings()
+        repository = create_repository(settings)
+        runner = build_job_runner(settings)
+        runner.run(job_id, force=force)
+    except JobNotFoundError:
+        logger.warning(
+            "background_job_not_found",
+            extra={"media_job_id": str(job_id)},
+        )
+    except Exception as exc:
+        logger.error(
+            "background_worker_failed",
+            extra={
+                "media_job_id": str(job_id),
+                "exception_type": type(exc).__name__,
+            },
+        )
+        if repository is None:
+            try:
+                repository = create_repository(get_settings())
+            except Exception:
+                return
+        try:
+            repository.update_job(
+                job_id,
+                status="failed",
+                progress=100,
+                error_code="background_worker_error",
+                error_message="Worker failed while processing this recipe.",
+            )
+            repository.insert_event(
+                job_id,
+                event_type="background_worker_error",
+                message="Background worker failed while processing the job.",
+                metadata={
+                    "error_code": "background_worker_error",
+                    "exception_type": type(exc).__name__,
+                },
+            )
+        except Exception as recovery_exc:
+            logger.error(
+                "background_worker_recovery_failed",
+                extra={
+                    "media_job_id": str(job_id),
+                    "exception_type": type(recovery_exc).__name__,
+                },
+            )
 
 
 class DebugSocialResolveRequest(BaseModel):
@@ -262,51 +363,70 @@ def process_job(
     settings: Settings = Depends(get_settings),
 ) -> Union[ProcessJobResponse, JSONResponse]:
     try:
-        analyzer = None
-        if settings.gemini_api_key is not None:
-            analyzer = GeminiRecipeAnalyzer(
-                api_key=settings.gemini_api_key.get_secret_value(),
-                model=settings.effective_gemini_video_model,
-                text_model=settings.effective_gemini_text_model,
-                fallback_models=(
-                    settings.gemini_video_fallback_models
-                    if settings.enable_gemini_fallbacks
-                    else []
-                ),
-                max_retries=settings.gemini_max_retries,
-                retry_base_seconds=settings.gemini_retry_base_seconds,
-                video_observation_timeout_seconds=(
-                    settings.gemini_video_observation_timeout_seconds
-                ),
-                text_normalization_timeout_seconds=(
-                    settings.gemini_text_normalization_timeout_seconds
-                ),
-                files_upload_timeout_seconds=settings.gemini_files_upload_timeout_seconds,
-                files_processing_timeout_seconds=(
-                    settings.gemini_files_processing_timeout_seconds
-                ),
-                social_text_timeout_seconds=settings.social_text_gemini_timeout_seconds,
+        repository = create_repository(settings)
+        job = repository.get_job(request.media_job_id)
+        if job is None:
+            raise JobNotFoundError
+        if job.status == "completed":
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content=ProcessJobResponse(
+                    accepted=False,
+                    job_id=request.media_job_id,
+                    status=job.status,
+                    reason="already_completed",
+                ).model_dump(mode="json", exclude_none=True),
             )
-        runner = JobRunner(
-            create_repository(settings),
-            analyzer,
-            worker_mode=settings.worker_mode,
-            app_env=settings.app_env,
-            gemini_max_calls_per_job=settings.gemini_max_calls_per_job,
-            gemini_daily_dev_call_limit=settings.gemini_daily_dev_call_limit,
-            gemini_disabled_models=settings.gemini_disabled_models,
-            gemini_daily_dev_model_limits=settings.gemini_daily_dev_model_limits,
-            gemini_dev_budget_reset_at=settings.gemini_dev_budget_reset_at,
-            settings=settings,
-        )
-        data, should_process = runner.accept(
+        if job.status in PROCESSING_STATUSES and not request.force:
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED,
+                content=ProcessJobResponse(
+                    accepted=False,
+                    job_id=request.media_job_id,
+                    status=job.status,
+                    reason="already_processing",
+                ).model_dump(mode="json", exclude_none=True),
+            )
+        if job.status == "failed" and not request.force:
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED,
+                content=ProcessJobResponse(
+                    accepted=False,
+                    job_id=request.media_job_id,
+                    status=job.status,
+                    reason="already_failed",
+                ).model_dump(mode="json", exclude_none=True),
+            )
+        if job.status != INITIAL_JOB_STATUS and not request.force:
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED,
+                content=ProcessJobResponse(
+                    accepted=False,
+                    job_id=request.media_job_id,
+                    status=job.status,
+                    reason="not_queued",
+                ).model_dump(mode="json", exclude_none=True),
+            )
+        if request.force_reset_attempt_budget and settings.app_env == "development":
+            repository.insert_event(
+                request.media_job_id,
+                event_type="dev_attempt_budget_reset_requested",
+                message="Development attempt budget reset requested.",
+                metadata={},
+            )
+        background_tasks.add_task(
+            run_job_background,
             request.media_job_id,
-            force=request.force,
-            force_reset_attempt_budget=request.force_reset_attempt_budget,
+            request.force,
         )
-        if should_process:
-            background_tasks.add_task(runner.run, request.media_job_id, True)
-        return ProcessJobResponse(data=data)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=ProcessJobResponse(
+                accepted=True,
+                job_id=request.media_job_id,
+                message="Job accepted for background processing.",
+            ).model_dump(mode="json", exclude_none=True),
+        )
     except JobNotFoundError:
         return error_response("job_not_found", "Media job not found.", 404)
     except WorkerProcessingError:

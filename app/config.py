@@ -21,6 +21,7 @@ SocialAnalysisMode = Literal["text_first", "video_first", "video_only"]
 
 class Settings(BaseSettings):
     app_env: str = "development"
+    runtime_platform: str = "cloud_run_compatible"
     worker_mode: WorkerMode = "skeleton"
     media_pipeline_mode: MediaPipelineMode = "youtube_direct"
     worker_api_secret: SecretStr
@@ -96,6 +97,8 @@ class Settings(BaseSettings):
     )
     tikwm_probe_bytes: int = 262144
     enable_cobalt_resolver: bool = False
+    enable_render_instagram_resolver: bool = False
+    enable_render_facebook_resolver: bool = False
     cobalt_api_url: Optional[str] = None
     cobalt_timeout_seconds: int = 45
     cobalt_always_proxy: bool = True

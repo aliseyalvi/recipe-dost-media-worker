@@ -26,7 +26,12 @@ def upload_source_thumbnail(
     if content_type not in ALLOWED:
         raise ValueError("Unsupported thumbnail type.")
     data = response.content
-    if len(data) > 1024 * 1024:
+    if len(data) > 3 * 1024 * 1024:
         raise ValueError("Thumbnail too large.")
-    path = f"{user_id}/{media_job_id}/thumbnail.{ALLOWED[content_type]}"
-    return repository.upload_public_object(settings.thumbnail_bucket, path, data, content_type)
+    path = f"media-jobs/{media_job_id}/thumbnail.{ALLOWED[content_type]}"
+    return repository.upload_public_object(
+        settings.thumbnail_bucket,
+        path,
+        data,
+        content_type,
+    )

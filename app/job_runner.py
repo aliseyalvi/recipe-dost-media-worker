@@ -36,7 +36,7 @@ GEMINI_INVALID_JSON_MESSAGE = (
     "Gemini returned an invalid recipe response. Please try again."
 )
 
-JOB_STATUS_PENDING = "pending"
+JOB_STATUS_QUEUED = "queued"
 JOB_STATUS_RESOLVING = "resolving"
 JOB_STATUS_DOWNLOADING = "downloading"
 JOB_STATUS_ANALYZING = "analyzing"
@@ -44,7 +44,7 @@ JOB_STATUS_COMPLETED = "completed"
 JOB_STATUS_FAILED = "failed"
 
 DB_SAFE_STATUSES = {
-    JOB_STATUS_PENDING,
+    JOB_STATUS_QUEUED,
     JOB_STATUS_RESOLVING,
     JOB_STATUS_DOWNLOADING,
     JOB_STATUS_ANALYZING,
@@ -118,19 +118,17 @@ class JobRunner:
         job = self._repository.get_job(media_job_id)
         if job is None:
             raise JobNotFoundError
-        active = {
-            JOB_STATUS_PENDING,
+        if job.status == JOB_STATUS_COMPLETED:
+            return self._to_response(job), False
+        if job.status in {
             JOB_STATUS_RESOLVING,
             JOB_STATUS_DOWNLOADING,
             JOB_STATUS_ANALYZING,
-        }
-        if job.status in active and job.status != JOB_STATUS_PENDING:
-            return self._to_response(job), False
-        if job.status == "completed" and not (
-            force and self._app_env == "development"
-        ):
+        } and not force:
             return self._to_response(job), False
         if job.status == JOB_STATUS_FAILED and not force:
+            return self._to_response(job), False
+        if job.status != JOB_STATUS_QUEUED and not force:
             return self._to_response(job), False
         if force_reset_attempt_budget and self._app_env == "development":
             self._repository.insert_event(
@@ -139,10 +137,11 @@ class JobRunner:
                 message="Development attempt budget reset requested.",
                 metadata={},
             )
+        previous_status = job.status
         job = self._repository.update_job(
             media_job_id,
             status=JOB_STATUS_RESOLVING,
-            progress=10,
+            progress=20,
             error_code=None,
             error_message=None,
             started_at=job.started_at or datetime.now(timezone.utc).isoformat(),
@@ -151,28 +150,83 @@ class JobRunner:
             media_job_id,
             event_type="worker_started",
             message="Media worker accepted the job.",
-            metadata={"status": JOB_STATUS_RESOLVING, "progress": 10},
+            metadata={
+                "status": JOB_STATUS_RESOLVING,
+                "progress": 20,
+                "previous_status": previous_status,
+            },
         )
         data = self._to_response(job)
         data.accepted = True
         return data, True
 
-    def run(self, media_job_id: UUID, background_resume: bool = False) -> MediaJobData:
+    def run(
+        self,
+        media_job_id: UUID,
+        *,
+        force: bool = False,
+        background_resume: bool = False,
+    ) -> MediaJobData:
         try:
             job = self._repository.get_job(media_job_id)
             if job is None:
                 raise JobNotFoundError
 
-            if not background_resume and job.status in IDEMPOTENT_STATUSES:
+            if background_resume:
+                force = True
+            if job.status == JOB_STATUS_COMPLETED:
                 return self._to_response(job)
-            if not background_resume and job.status == "failed":
+            if job.status in {
+                JOB_STATUS_RESOLVING,
+                JOB_STATUS_DOWNLOADING,
+                JOB_STATUS_ANALYZING,
+            } and not force:
+                self._repository.insert_event(
+                    media_job_id,
+                    event_type="worker_already_processing",
+                    message="Duplicate worker request skipped because the job is already processing.",
+                    metadata={"status": job.status},
+                )
+                return self._to_response(job)
+            if job.status == JOB_STATUS_FAILED and not force:
+                self._repository.insert_event(
+                    media_job_id,
+                    event_type="duplicate_job_skipped",
+                    message="Duplicate worker request skipped because force retry was not requested.",
+                    metadata={"status": job.status},
+                )
+                return self._to_response(job)
+            if job.status != JOB_STATUS_QUEUED and not force:
                 return self._to_response(job)
 
-            platform = detect_social_platform(job.source_url)
+            previous_status = job.status
+            job = self._repository.update_job(
+                media_job_id,
+                status=JOB_STATUS_RESOLVING,
+                progress=20,
+                error_code=None,
+                error_message=None,
+                started_at=job.started_at or datetime.now(timezone.utc).isoformat(),
+            )
+            self._repository.insert_event(
+                media_job_id,
+                event_type="worker_started",
+                message="Media worker accepted the job.",
+                metadata={
+                    "status": JOB_STATUS_RESOLVING,
+                    "progress": 20,
+                    "force": force,
+                    "previous_status": previous_status,
+                },
+            )
+
+            platform = platform_for_job(job)
             job_started_at = perf_counter()
-            if self._worker_mode == "youtube_direct" and platform == "youtube":
+            if platform == "tiktok":
+                job = self._run_tiktok_text_first(job, job_started_at)
+            elif platform == "youtube":
                 job = self._run_youtube(job, job_started_at)
-            elif self._worker_mode == "social_video" and platform in {"instagram", "tiktok", "facebook"}:
+            elif platform in {"instagram", "facebook"}:
                 job = self._run_social_video(job, platform, job_started_at)
             else:
                 job = self._run_skeleton(job)
@@ -209,6 +263,125 @@ class JobRunner:
             )
             raise WorkerProcessingError from exc
 
+    def _run_tiktok_text_first(
+        self,
+        job: MediaJobRecord,
+        job_started_at: float,
+    ) -> MediaJobRecord:
+        settings = self._settings
+        if settings is None:
+            raise PipelineFailure(
+                "social_video_not_enabled",
+                "Social video analysis is not enabled yet.",
+                {"platform": "tiktok"},
+            )
+        self._check_job_runtime(job.id, job_started_at)
+        job = self._repository.update_job(
+            job.id,
+            status=JOB_STATUS_RESOLVING,
+            progress=20,
+            error_code=None,
+            error_message=None,
+        )
+        self._repository.insert_event(
+            job.id,
+            event_type="tikwm_resolver_started",
+            message="TikWM resolver started.",
+            metadata={"platform": "tiktok", "resolver": "tikwm"},
+        )
+        resolver_started_at = perf_counter()
+        try:
+            info = resolve_social_video(
+                job.source_url,
+                "tiktok",
+                settings,
+                resolver="tikwm",
+            )
+        except SocialResolverError as exc:
+            self._repository.insert_event(
+                job.id,
+                event_type="tikwm_resolver_failed",
+                message="TikWM resolver failed.",
+                metadata={
+                    "platform": "tiktok",
+                    "resolver": "tikwm",
+                    "error_code": exc.code,
+                    "exception_type": type(exc).__name__,
+                    "elapsed_ms": int((perf_counter() - resolver_started_at) * 1000),
+                    **safe_event_metadata(exc.metadata),
+                },
+            )
+            raise PipelineFailure(
+                exc.code,
+                exc.message,
+                {"platform": "tiktok", **exc.metadata},
+            ) from exc
+
+        self._repository.insert_event(
+            job.id,
+            event_type="tikwm_resolver_completed",
+            message="TikWM resolver completed.",
+            metadata={
+                "platform": "tiktok",
+                "resolver": "tikwm",
+                "title_present": bool(info.title),
+                "has_thumbnail": bool(info.thumbnail_url),
+                "duration_seconds": info.duration_seconds,
+                "elapsed_ms": int((perf_counter() - resolver_started_at) * 1000),
+            },
+        )
+        self._update_social_metadata_best_effort(job, info)
+
+        if (
+            info.duration_seconds is not None
+            and info.duration_seconds > settings.max_video_duration_seconds
+        ):
+            self._repository.insert_event(
+                job.id,
+                event_type="video_too_long",
+                message="Video duration exceeded the configured limit.",
+                metadata={
+                    "platform": "tiktok",
+                    "resolver": "tikwm",
+                    "duration_seconds": info.duration_seconds,
+                    "max_video_duration_seconds": settings.max_video_duration_seconds,
+                },
+            )
+            raise PipelineFailure(
+                "video_duration_exceeded",
+                (
+                    "This video is longer than the current 90 second limit. "
+                    "Please try a shorter recipe video."
+                ),
+                {
+                    "platform": "tiktok",
+                    "resolver": "tikwm",
+                    "duration_seconds": info.duration_seconds,
+                    "max_video_duration_seconds": settings.max_video_duration_seconds,
+                },
+            )
+
+        if self._should_use_tiktok_text_first(info, settings):
+            return self._run_social_text_analysis(
+                job,
+                info,
+                settings,
+                job_started_at,
+            )
+
+        raise PipelineFailure(
+            "social_caption_missing",
+            (
+                "This TikTok video could not be analyzed from its caption. "
+                "Please paste the caption or try another recipe video."
+            ),
+            {
+                "platform": "tiktok",
+                "resolver": "tikwm",
+                "title_present": bool(info.title),
+            },
+        )
+
     def _run_social_video(
         self,
         job: MediaJobRecord,
@@ -216,7 +389,25 @@ class JobRunner:
         job_started_at: float,
     ) -> MediaJobRecord:
         settings = self._settings
-        if settings is None or not settings.enable_social_video:
+        if settings is None:
+            raise PipelineFailure(
+                "social_video_not_enabled",
+                "Social video analysis is not enabled yet.",
+                {"platform": platform},
+            )
+        if platform == "instagram" and not settings.enable_render_instagram_resolver:
+            raise PipelineFailure(
+                "instagram_resolver_disabled",
+                "Instagram processing is not enabled yet.",
+                {"platform": platform, "resolver": "disabled"},
+            )
+        if platform == "facebook" and not settings.enable_render_facebook_resolver:
+            raise PipelineFailure(
+                "facebook_resolver_disabled",
+                "Facebook processing is not enabled yet.",
+                {"platform": platform, "resolver": "disabled"},
+            )
+        if not settings.enable_social_video:
             raise PipelineFailure(
                 "social_video_not_enabled",
                 "Social video analysis is not enabled yet.",
@@ -270,20 +461,13 @@ class JobRunner:
             },
         )
         self._update_social_metadata_best_effort(job, info)
-        if self._should_use_tiktok_text_first(info, settings):
-            return self._run_social_text_analysis(
-                job,
-                info,
-                settings,
-                job_started_at,
-            )
         if (
             info.duration_seconds is not None
             and info.duration_seconds > settings.max_video_duration_seconds
         ):
             self._repository.insert_event(
                 job.id,
-                event_type="video_duration_rejected",
+                event_type="video_too_long",
                 message="Video duration exceeded the configured limit.",
                 metadata={
                     "platform": platform,
@@ -305,24 +489,27 @@ class JobRunner:
                     "max_video_duration_seconds": settings.max_video_duration_seconds,
                 },
             )
-        if not settings.enable_social_video_gemini:
-            if (
-                platform == "tiktok"
-                and settings.enable_tiktok_text_fallback
-                and settings.social_analysis_mode == "text_first"
-            ):
-                raise PipelineFailure(
-                    "social_caption_missing",
-                    (
-                        "This TikTok video could not be analyzed from its caption. "
-                        "Please paste the caption or try another recipe video."
-                    ),
-                    {
-                        "platform": platform,
-                        "resolver": info.resolver,
-                        "title_present": bool(info.title),
-                    },
+        if platform == "tiktok":
+            if self._should_use_tiktok_text_first(info, settings):
+                return self._run_social_text_analysis(
+                    job,
+                    info,
+                    settings,
+                    job_started_at,
                 )
+            raise PipelineFailure(
+                "social_caption_missing",
+                (
+                    "This TikTok video could not be analyzed from its caption. "
+                    "Please paste the caption or try another recipe video."
+                ),
+                {
+                    "platform": platform,
+                    "resolver": info.resolver,
+                    "title_present": bool(info.title),
+                },
+            )
+        if not settings.enable_social_video_gemini:
             raise PipelineFailure(
                 "social_video_gemini_disabled",
                 "Social video analysis is not enabled for this worker.",
@@ -611,10 +798,16 @@ class JobRunner:
             info.duration_seconds is not None
             and info.duration_seconds > settings.max_video_duration_seconds
         )
+        thumbnail_url = self._upload_social_thumbnail_best_effort(
+            job,
+            info.thumbnail_url,
+            settings,
+        )
         job = self._repository.update_job(
             job.id,
             status=JOB_STATUS_ANALYZING,
             progress=60,
+            thumbnail_url=thumbnail_url,
             error_code=None,
             error_message=None,
             ai_provider="gemini",
@@ -641,7 +834,7 @@ class JobRunner:
                     job.id,
                     event_type,
                     metadata,
-                    None,
+                    thumbnail_url,
                 ),
                 before_call=lambda model, stage: self._start_gemini_api_call(
                     job.id,
@@ -666,6 +859,20 @@ class JobRunner:
                         "final_model": exc.final_model,
                     },
                 ) from exc
+            if exc.code == "gemini_text_timeout":
+                raise PipelineFailure(
+                    "gemini_text_timeout",
+                    (
+                        "Recipe analysis took too long. Please try again or "
+                        "paste the caption manually."
+                    ),
+                    {
+                        "platform": info.platform,
+                        "resolver": info.resolver,
+                        "stage": "social_text_analysis",
+                        "final_model": exc.final_model,
+                    },
+                ) from exc
             raise PipelineFailure(
                 exc.code,
                 gemini_user_message(exc.code),
@@ -678,11 +885,6 @@ class JobRunner:
                 },
             ) from exc
 
-        thumbnail_url = self._upload_social_thumbnail_best_effort(
-            job,
-            info.thumbnail_url,
-            settings,
-        )
         self._check_job_runtime(job.id, job_started_at)
         job = self._repository.update_job(
             job.id,
@@ -802,7 +1004,7 @@ class JobRunner:
         job = self._repository.update_job(
             media_job_id,
             status=JOB_STATUS_RESOLVING,
-            progress=10,
+            progress=20,
             thumbnail_url=thumbnail_url,
             error_code=None,
             error_message=None,
@@ -1297,12 +1499,27 @@ def first_path_segment(path: str) -> str | None:
     return segment or None
 
 
+def platform_for_job(job: MediaJobRecord) -> str:
+    platform = (job.platform or "").strip().lower()
+    if platform in {"youtube", "tiktok", "instagram", "facebook"}:
+        return platform
+    detected = detect_social_platform(job.source_url)
+    if detected in {"youtube", "tiktok", "instagram", "facebook"}:
+        return detected
+    return "unknown"
+
+
 def gemini_user_message(error_code: str) -> str:
     if error_code in {
         "gemini_video_observation_timeout",
         "gemini_text_normalization_timeout",
     }:
         return "Video analysis took too long. Please try a shorter video."
+    if error_code == "gemini_text_timeout":
+        return (
+            "Recipe analysis took too long. Please try again or paste the "
+            "caption manually."
+        )
     if error_code == "gemini_model_overloaded":
         return (
             "Gemini video analysis is temporarily busy. "
