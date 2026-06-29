@@ -21,6 +21,7 @@
 - W-M15D1 saves resolver metadata after TikWM completes. Public `source_metadata` is app-visible and contains title/description/duration/thumbnail/media flags only. Private `media_job_private_metadata` stores the CDN URL and raw resolver metadata. Metadata write failures emit `source_metadata_update_failed` or `private_metadata_save_failed` and do not fail the recipe job.
 - W-M15D2 adds the mock-mode resolver matrix without Cobalt. TikTok keeps TikWM. YouTube uses yt-dlp metadata with no download. Instagram and Facebook use shallow experimental SnapInsta/SnapSave adapters behind disabled-by-default Render flags. Successful mock-mode resolver jobs save public/private metadata, upload thumbnails when available, save the mock fixture recipe, and complete without Gemini events.
 - W-M16Q-POC adds `WORKER_EXECUTION_MODE=queue`. In queue mode the FastAPI startup task polls the oldest `queued` row, claims one job as `resolving`, uses unified `yt-dlp` extraction to create either a temp file or memory buffer, saves public/private metadata, uploads a thumbnail when available, saves the mock fixture recipe, and deletes temp media before polling again. The `/process-job` webhook path remains unchanged outside queue mode.
+- W-M16Q-POC post-extraction fix: production proved `unified_extractor_completed`, so queue mode now reuses the webhook mock fixture recipe-card save helper after metadata persistence. Optional media-job source backfill failures no longer block mock analysis, and terminal failures report the real stage instead of defaulting to `unified_extractor_failed`.
 
 ## TikTok / TikWM Finding
 
@@ -51,6 +52,7 @@ TikWM debug was proven from Cloud Run. TikTok full jobs now use TikWM text-first
 - SnapInsta/SnapSave parsing is intentionally minimal: JSON first, then obvious OpenGraph/direct media links only. Unreliable pages should fail controlled with `instagram_resolver_failed` or `facebook_resolver_failed`.
 - The old "Automatic video analysis is currently available for YouTube" fallback is only for truly unsupported platforms and must not catch TikTok.
 - Queue mode never calls Gemini in this POC. Expected extractor failures should become terminal `failed` jobs with `video_duration_exceeded`, `media_size_exceeded`, or `unified_extractor_failed`, not `worker_error` or `background_worker_error`.
+- Post-extraction queue failures should use `private_metadata_save_failed`, `source_metadata_update_failed`, `mock_fixture_failed`, `recipe_card_insert_failed`, or `job_completion_update_failed` with sanitized `stage`, `exception_type`, `error_code`, and `safe_error_message` metadata only.
 
 ## Expected `/debug/tikwm` Shape
 

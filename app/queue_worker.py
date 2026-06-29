@@ -12,10 +12,9 @@ from uuid import UUID
 
 from app.config import Settings, get_settings
 from app.job_runner import (
-    _caption_result_to_recipe_result,
-    _load_mock_recipe_fixture,
-    _validate_parsed_recipe,
+    PipelineFailure,
     platform_for_job,
+    save_mock_recipe_card_for_job,
 )
 from app.schemas import MediaJobRecord
 from app.social.stream_download import extract_social_video
@@ -26,10 +25,19 @@ logger = logging.getLogger("recipe_dost.worker")
 
 
 class QueueJobFailure(Exception):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        stage: str,
+        exception_type: str | None = None,
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.message = message
+        self.stage = stage
+        self.exception_type = exception_type
 
 
 async def run_queue_loop(_build_job_runner: Callable[[Settings], object]) -> None:
@@ -73,6 +81,7 @@ def process_queue_job(
     video_buffer: io.BytesIO | None = None
     temp_file_path: str | None = None
     started_at = perf_counter()
+    current_stage = "queue_claim"
     try:
         previous_status = job.status
         job = repository.update_job(
@@ -103,6 +112,7 @@ def process_queue_job(
         )
 
         if not settings.enable_unified_ytdlp_stream_extractor:
+            current_stage = "unified_extractor"
             add_event(
                 repository,
                 job.id,
@@ -117,9 +127,11 @@ def process_queue_job(
             raise QueueJobFailure(
                 "unified_extractor_failed",
                 "Unified social video extraction is not enabled.",
+                stage=current_stage,
             )
 
         platform = platform_for_job(job)
+        current_stage = "unified_extractor"
         add_event(
             repository,
             job.id,
@@ -155,6 +167,7 @@ def process_queue_job(
                     extract_result.get("safe_error_message")
                     or "This social video could not be processed."
                 ),
+                stage=current_stage,
             )
         add_event(
             repository,
@@ -172,87 +185,37 @@ def process_queue_job(
             job,
             str_or_none(extract_result.get("thumbnail_url")),
         )
+        current_stage = "metadata_save"
         save_metadata(repository, job.id, extract_result, uploaded_thumbnail_url)
         update_job_source_fields(repository, job.id, extract_result, uploaded_thumbnail_url)
 
-        job = repository.update_job(
-            job.id,
-            status="analyzing",
-            progress=60,
-            thumbnail_url=uploaded_thumbnail_url,
-            error_code=None,
-            error_message=None,
-            ai_provider="mock",
-            ai_model="mock-recipe-fixture",
-        )
-        add_event(
-            repository,
-            job.id,
-            "mock_ai_analysis_started",
-            "Mock fixture AI analysis started.",
-            {"platform": platform, "resolver": "ytdlp_stream"},
-        )
+        current_stage = "mock_fixture_analysis"
         try:
-            parsed = _load_mock_recipe_fixture(settings.mock_recipe_fixture_path)
-            _validate_parsed_recipe(
-                parsed,
-                platform=platform,
-                stage="mock_fixture_analysis",
-                model="mock-recipe-fixture",
-                user_message="Mock recipe fixture does not include enough recipe details.",
-            )
-            result = _caption_result_to_recipe_result(parsed)
-        except Exception as exc:
-            raise QueueJobFailure(
-                "mock_fixture_failed",
-                "Mock recipe fixture could not be loaded.",
-            ) from exc
-        add_event(
-            repository,
-            job.id,
-            "mock_ai_analysis_completed",
-            "Mock fixture AI analysis completed.",
-            {"platform": platform, "resolver": "ytdlp_stream"},
-        )
-
-        job = repository.update_job(
-            job.id,
-            status="analyzing",
-            progress=85,
-            thumbnail_url=uploaded_thumbnail_url,
-            error_code=None,
-            error_message=None,
-        )
-        try:
-            recipe_card_id = repository.insert_recipe_card(
+            job = save_mock_recipe_card_for_job(
+                repository=repository,
                 job=job,
-                result=result,
-                model="mock-recipe-fixture",
+                settings=settings,
+                platform=platform,
+                resolver="ytdlp_stream",
+                thumbnail_url=uploaded_thumbnail_url,
+                job_started_at=started_at,
+                fixture_error_code="mock_fixture_failed",
             )
+        except PipelineFailure as exc:
+            current_stage = str(exc.metadata.get("stage") or current_stage)
+            raise QueueJobFailure(
+                exc.code,
+                exc.user_message,
+                stage=current_stage,
+                exception_type=type(exc.__cause__ or exc).__name__,
+            ) from exc
         except Exception as exc:
             raise QueueJobFailure(
-                "recipe_card_insert_failed",
-                "Recipe card could not be saved.",
+                error_code_for_stage(current_stage),
+                safe_message_for_stage(current_stage),
+                stage=current_stage,
+                exception_type=type(exc).__name__,
             ) from exc
-        add_event(
-            repository,
-            job.id,
-            "recipe_card_saved",
-            "Recipe card saved.",
-            {"stage": "recipe_card_saving"},
-        )
-        repository.update_job(
-            job.id,
-            status="completed",
-            progress=100,
-            result_recipe_card_id=recipe_card_id,
-            ai_provider="mock",
-            ai_model="mock-recipe-fixture",
-            thumbnail_url=uploaded_thumbnail_url,
-            completed_at=datetime.now(timezone.utc).isoformat(),
-            error_code=None,
-            error_message=None,
-        )
         add_event(
             repository,
             job.id,
@@ -265,7 +228,14 @@ def process_queue_job(
             },
         )
     except QueueJobFailure as exc:
-        record_queue_failure(repository, job.id, exc.code, exc.message)
+        record_queue_failure(
+            repository,
+            job.id,
+            exc.code,
+            exc.message,
+            stage=exc.stage,
+            exception_type=exc.exception_type,
+        )
     except Exception as exc:
         logger.error(
             "queue_job_failed",
@@ -274,8 +244,10 @@ def process_queue_job(
         record_queue_failure(
             repository,
             job.id,
-            "unified_extractor_failed",
-            "Queue worker failed while processing this recipe.",
+            error_code_for_stage(current_stage),
+            safe_message_for_stage(current_stage),
+            stage=current_stage,
+            exception_type=type(exc).__name__,
         )
     finally:
         if video_buffer is not None:
@@ -299,31 +271,73 @@ def save_metadata(
     uploaded_thumbnail_url: str | None,
 ) -> None:
     cdn_url = str_or_none(result.get("cdn_download_url"))
-    repository.upsert_private_metadata(
-        media_job_id,
-        platform=str(result.get("platform") or ""),
-        resolver="ytdlp_stream",
-        cdn_url=cdn_url,
-        raw_metadata=result.get("raw_metadata") if isinstance(result.get("raw_metadata"), dict) else None,
-    )
-    add_event(
-        repository,
-        media_job_id,
-        "private_metadata_saved",
-        "Private source metadata saved.",
-        safe_extract_event_metadata(result),
-    )
-    repository.update_source_metadata(
-        media_job_id,
-        public_source_metadata(result, uploaded_thumbnail_url),
-    )
-    add_event(
-        repository,
-        media_job_id,
-        "source_metadata_updated",
-        "Source metadata updated.",
-        safe_extract_event_metadata(result),
-    )
+    try:
+        repository.upsert_private_metadata(
+            media_job_id,
+            platform=str(result.get("platform") or ""),
+            resolver="ytdlp_stream",
+            cdn_url=cdn_url,
+            raw_metadata=result.get("raw_metadata") if isinstance(result.get("raw_metadata"), dict) else None,
+        )
+        add_event(
+            repository,
+            media_job_id,
+            "private_metadata_saved",
+            "Private source metadata saved.",
+            safe_extract_event_metadata(result),
+        )
+    except Exception as exc:
+        metadata = safe_failure_metadata(
+            stage="private_metadata_save",
+            error_code="private_metadata_save_failed",
+            message="Private source metadata could not be saved.",
+            exception_type=type(exc).__name__,
+        )
+        add_event_safely(
+            repository,
+            media_job_id,
+            "private_metadata_save_failed",
+            "Private source metadata save failed.",
+            metadata,
+        )
+        raise QueueJobFailure(
+            "private_metadata_save_failed",
+            "Private source metadata could not be saved.",
+            stage="private_metadata_save",
+            exception_type=type(exc).__name__,
+        ) from exc
+    try:
+        repository.update_source_metadata(
+            media_job_id,
+            public_source_metadata(result, uploaded_thumbnail_url),
+        )
+        add_event(
+            repository,
+            media_job_id,
+            "source_metadata_updated",
+            "Source metadata updated.",
+            safe_extract_event_metadata(result),
+        )
+    except Exception as exc:
+        metadata = safe_failure_metadata(
+            stage="source_metadata_update",
+            error_code="source_metadata_update_failed",
+            message="Source metadata could not be saved.",
+            exception_type=type(exc).__name__,
+        )
+        add_event_safely(
+            repository,
+            media_job_id,
+            "source_metadata_update_failed",
+            "Source metadata update failed.",
+            metadata,
+        )
+        raise QueueJobFailure(
+            "source_metadata_update_failed",
+            "Source metadata could not be saved.",
+            stage="source_metadata_update",
+            exception_type=type(exc).__name__,
+        ) from exc
 
 
 def public_source_metadata(
@@ -366,14 +380,28 @@ def update_job_source_fields(
         "source_title": result.get("title"),
         "source_thumbnail_url": result.get("thumbnail_url"),
     }
-    repository.update_job_metadata_best_effort(
-        media_job_id,
-        {key: value for key, value in values.items() if value is not None},
-    )
-    if uploaded_thumbnail_url:
+    try:
         repository.update_job_metadata_best_effort(
             media_job_id,
-            {"thumbnail_url": uploaded_thumbnail_url},
+            {key: value for key, value in values.items() if value is not None},
+        )
+        if uploaded_thumbnail_url:
+            repository.update_job_metadata_best_effort(
+                media_job_id,
+                {"thumbnail_url": uploaded_thumbnail_url},
+            )
+    except Exception as exc:
+        add_event_safely(
+            repository,
+            media_job_id,
+            "source_metadata_update_failed",
+            "Optional source metadata backfill failed.",
+            safe_failure_metadata(
+                stage="source_metadata_backfill",
+                error_code="source_metadata_update_failed",
+                message="Optional source metadata backfill failed.",
+                exception_type=type(exc).__name__,
+            ),
         )
 
 
@@ -440,6 +468,9 @@ def record_queue_failure(
     media_job_id: UUID,
     error_code: str,
     message: str,
+    *,
+    stage: str,
+    exception_type: str | None = None,
 ) -> None:
     repository.update_job(
         media_job_id,
@@ -454,8 +485,62 @@ def record_queue_failure(
         media_job_id,
         "queue_job_failed",
         "Queue job failed.",
-        {"error_code": error_code},
+        safe_failure_metadata(
+            stage=stage,
+            error_code=error_code,
+            message=message,
+            exception_type=exception_type,
+        ),
     )
+
+
+def error_code_for_stage(stage: str) -> str:
+    if stage == "unified_extractor":
+        return "unified_extractor_failed"
+    if stage == "private_metadata_save":
+        return "private_metadata_save_failed"
+    if stage in {"source_metadata_update", "source_metadata_backfill", "metadata_save"}:
+        return "source_metadata_update_failed"
+    if stage == "recipe_card_saving":
+        return "recipe_card_insert_failed"
+    if stage == "job_completion_update":
+        return "job_completion_update_failed"
+    if stage == "mock_fixture_analysis":
+        return "mock_fixture_failed"
+    return "queue_job_failed"
+
+
+def safe_message_for_stage(stage: str) -> str:
+    if stage == "recipe_card_saving":
+        return "Recipe card could not be saved."
+    if stage == "job_completion_update":
+        return "Recipe card was saved, but the job could not be marked completed."
+    if stage in {"private_metadata_save", "source_metadata_update", "metadata_save"}:
+        return "Source metadata could not be saved."
+    if stage == "source_metadata_backfill":
+        return "Optional source metadata backfill failed."
+    if stage == "mock_fixture_analysis":
+        return "Mock recipe fixture could not be loaded."
+    if stage == "unified_extractor":
+        return "This social video could not be processed."
+    return "Queue worker failed while processing this recipe."
+
+
+def safe_failure_metadata(
+    *,
+    stage: str,
+    error_code: str,
+    message: str,
+    exception_type: str | None,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "stage": stage,
+        "error_code": error_code,
+        "safe_error_message": message,
+    }
+    if exception_type:
+        metadata["exception_type"] = exception_type
+    return metadata
 
 
 def delete_temp_media(temp_file_path: str | None) -> bool:
@@ -492,6 +577,25 @@ def add_event(
         message=message,
         metadata=metadata,
     )
+
+
+def add_event_safely(
+    repository: MediaJobRepository,
+    media_job_id: UUID,
+    event_type: str,
+    message: str,
+    metadata: dict[str, object],
+) -> None:
+    try:
+        add_event(
+            repository,
+            media_job_id,
+            event_type,
+            message,
+            metadata,
+        )
+    except Exception:
+        pass
 
 
 def str_or_none(value: object) -> str | None:

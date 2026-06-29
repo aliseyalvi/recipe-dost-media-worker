@@ -243,3 +243,16 @@ print("settings smoke passed")
 PY
 # passed
 ```
+
+## W-M16Q-POC Post-Extraction Fix Validation
+
+```bash
+python3 -m compileall app
+# passed
+
+env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python -m compileall app
+# passed
+
+grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url" -n app docs || true
+# matched generated app/__pycache__ plus historical commands-log entries only; no source-code public CDN storage match
+```

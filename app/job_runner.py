@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from threading import Event
 from time import perf_counter, sleep
+from typing import Callable
 from urllib.parse import parse_qs, urlparse
 from uuid import UUID
 
@@ -286,6 +287,144 @@ def _load_mock_recipe_fixture(fixture_path: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError("Mock recipe fixture must be a JSON object.")
     return value
+
+
+def save_mock_recipe_card_for_job(
+    *,
+    repository: MediaJobRepository,
+    job: MediaJobRecord,
+    settings: Settings,
+    platform: str,
+    resolver: str,
+    thumbnail_url: str | None,
+    job_started_at: float,
+    check_job_runtime: Callable[[UUID, float], None] | None = None,
+    fixture_error_code: str = "mock_fixture_invalid",
+) -> MediaJobRecord:
+    model = "mock-recipe-fixture"
+    fixture_path = settings.mock_recipe_fixture_path
+    if check_job_runtime is not None:
+        check_job_runtime(job.id, job_started_at)
+    job = repository.update_job(
+        job.id,
+        status=JOB_STATUS_ANALYZING,
+        progress=60,
+        thumbnail_url=thumbnail_url,
+        error_code=None,
+        error_message=None,
+        ai_provider="mock",
+        ai_model=model,
+    )
+    repository.insert_event(
+        job.id,
+        event_type="mock_ai_analysis_started",
+        message="Mock fixture AI analysis started.",
+        metadata={
+            "platform": platform,
+            "resolver": resolver,
+        },
+    )
+    if settings.mock_analysis_delay_ms > 0:
+        sleep(settings.mock_analysis_delay_ms / 1000)
+    try:
+        parsed = _load_mock_recipe_fixture(fixture_path)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise PipelineFailure(
+            fixture_error_code,
+            "Mock recipe fixture could not be loaded.",
+            {
+                "platform": platform,
+                "stage": "mock_fixture_analysis",
+                "fixture_path": fixture_path,
+                "exception_type": type(exc).__name__,
+            },
+        ) from exc
+
+    _validate_parsed_recipe(
+        parsed,
+        platform=platform,
+        stage="mock_fixture_analysis",
+        model=model,
+        user_message="Mock recipe fixture does not include enough recipe details.",
+    )
+    repository.insert_event(
+        job.id,
+        event_type="mock_ai_analysis_completed",
+        message="Mock fixture AI analysis completed.",
+        metadata={
+            "platform": platform,
+            "resolver": resolver,
+            "title_present": bool(parsed.get("title")),
+        },
+    )
+    result = _caption_result_to_recipe_result(parsed)
+    if check_job_runtime is not None:
+        check_job_runtime(job.id, job_started_at)
+    job = repository.update_job(
+        job.id,
+        status=JOB_STATUS_ANALYZING,
+        progress=85,
+        thumbnail_url=thumbnail_url,
+        error_code=None,
+        error_message=None,
+    )
+    repository.insert_event(
+        job.id,
+        event_type="recipe_card_saving_started",
+        message="Recipe card save started.",
+        metadata={"stage": "recipe_card_saving", "progress": 85},
+    )
+    if job.recipe_item_id is None:
+        raise PipelineFailure(
+            "recipe_item_required",
+            "A saved recipe is required before analysis can be completed.",
+        )
+    try:
+        recipe_card_id = repository.insert_recipe_card(
+            job=job,
+            result=result,
+            model=model,
+        )
+    except Exception as exc:
+        raise PipelineFailure(
+            "recipe_card_insert_failed",
+            "Recipe card could not be saved.",
+            {
+                "platform": platform,
+                "stage": "recipe_card_saving",
+                "exception_type": type(exc).__name__,
+            },
+        ) from exc
+    repository.insert_event(
+        job.id,
+        event_type="recipe_card_saved",
+        message="Recipe card saved.",
+        metadata={"stage": "recipe_card_saving"},
+    )
+    try:
+        job = repository.update_job(
+            job.id,
+            status=JOB_STATUS_COMPLETED,
+            progress=100,
+            result_recipe_card_id=recipe_card_id,
+            ai_provider="mock",
+            ai_model=model,
+            thumbnail_url=thumbnail_url,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            error_code=None,
+            error_message=None,
+        )
+    except Exception as exc:
+        raise PipelineFailure(
+            "job_completion_update_failed",
+            "Recipe card was saved, but the job could not be marked completed.",
+            {
+                "platform": platform,
+                "stage": "job_completion_update",
+                "exception_type": type(exc).__name__,
+            },
+        ) from exc
+    return job
 
 
 def _validate_parsed_recipe(
@@ -1712,102 +1851,15 @@ class JobRunner:
                 },
             )
 
-        self._check_job_runtime(job.id, job_started_at)
-        job = self._repository.update_job(
-            job.id,
-            status=JOB_STATUS_ANALYZING,
-            progress=60,
-            thumbnail_url=thumbnail_url,
-            error_code=None,
-            error_message=None,
-            ai_provider="mock",
-            ai_model=model,
-        )
-        self._repository.insert_event(
-            job.id,
-            event_type="mock_ai_analysis_started",
-            message="Mock fixture AI analysis started.",
-            metadata={
-                "platform": info.platform,
-                "resolver": info.resolver,
-            },
-        )
-        if settings.mock_analysis_delay_ms > 0:
-            sleep(settings.mock_analysis_delay_ms / 1000)
-        try:
-            parsed = _load_mock_recipe_fixture(fixture_path)
-        except (OSError, json.JSONDecodeError, ValueError) as exc:
-            raise PipelineFailure(
-                "mock_fixture_invalid",
-                "Mock recipe fixture could not be loaded.",
-                {
-                    "platform": info.platform,
-                    "stage": "mock_fixture_analysis",
-                    "fixture_path": fixture_path,
-                    "exception_type": type(exc).__name__,
-                },
-            ) from exc
-
-        _validate_parsed_recipe(
-            parsed,
-            platform=info.platform,
-            stage="mock_fixture_analysis",
-            model=model,
-            user_message="Mock recipe fixture does not include enough recipe details.",
-        )
-        self._repository.insert_event(
-            job.id,
-            event_type="mock_ai_analysis_completed",
-            message="Mock fixture AI analysis completed.",
-            metadata={
-                "platform": info.platform,
-                "resolver": info.resolver,
-                "title_present": bool(parsed.get("title")),
-            },
-        )
-        result = _caption_result_to_recipe_result(parsed)
-        self._check_job_runtime(job.id, job_started_at)
-        job = self._repository.update_job(
-            job.id,
-            status=JOB_STATUS_ANALYZING,
-            progress=85,
-            thumbnail_url=thumbnail_url,
-            error_code=None,
-            error_message=None,
-        )
-        self._repository.insert_event(
-            job.id,
-            event_type="recipe_card_saving_started",
-            message="Recipe card save started.",
-            metadata={"stage": "recipe_card_saving", "progress": 85},
-        )
-        if job.recipe_item_id is None:
-            raise PipelineFailure(
-                "recipe_item_required",
-                "A saved recipe is required before analysis can be completed.",
-            )
-        recipe_card_id = self._repository.insert_recipe_card(
+        job = save_mock_recipe_card_for_job(
+            repository=self._repository,
             job=job,
-            result=result,
-            model=model,
-        )
-        self._repository.insert_event(
-            job.id,
-            event_type="recipe_card_saved",
-            message="Recipe card saved.",
-            metadata={"stage": "recipe_card_saving"},
-        )
-        job = self._repository.update_job(
-            job.id,
-            status=JOB_STATUS_COMPLETED,
-            progress=100,
-            result_recipe_card_id=recipe_card_id,
-            ai_provider="mock",
-            ai_model=model,
+            settings=settings,
+            platform=info.platform,
+            resolver=info.resolver,
             thumbnail_url=thumbnail_url,
-            completed_at=datetime.now(timezone.utc).isoformat(),
-            error_code=None,
-            error_message=None,
+            job_started_at=job_started_at,
+            check_job_runtime=self._check_job_runtime,
         )
         self._repository.insert_event(
             job.id,
