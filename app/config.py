@@ -17,6 +17,7 @@ WorkerMode = Literal[
 MediaPipelineMode = Literal["youtube_direct", "social_stream"]
 GeminiSocialUploadMode = Literal["files_api", "inline"]
 GeminiVideoInputMode = Literal["file_api"]
+GeminiVideoAnalysisMode = Literal["two_step_brief_then_json"]
 SocialAnalysisMode = Literal["text_first", "video_first", "video_only"]
 AIAnalysisMode = Literal["gemini", "mock_fixture", "gemini_video_poc"]
 MockVideoProcessingMode = Literal["skip_video_download", "download_then_mock"]
@@ -52,6 +53,7 @@ class Settings(BaseSettings):
     gemini_files_processing_timeout_seconds: int = 120
     gemini_social_upload_mode: GeminiSocialUploadMode = "files_api"
     gemini_video_input_mode: GeminiVideoInputMode = "file_api"
+    gemini_video_analysis_mode: GeminiVideoAnalysisMode = "two_step_brief_then_json"
     gemini_file_upload_timeout_seconds: int = 120
     gemini_file_poll_interval_seconds: int = 5
     gemini_file_max_wait_seconds: int = 120
@@ -167,7 +169,7 @@ class Settings(BaseSettings):
 
     @property
     def effective_gemini_text_model(self) -> str:
-        return self.gemini_text_model or self.gemini_model or "gemini-2.5-flash"
+        return self.gemini_text_model or "gemini-2.5-flash-lite"
 
     @property
     def gemini_configured(self) -> bool:
@@ -249,6 +251,16 @@ class Settings(BaseSettings):
     def fallback_unknown_gemini_video_input_mode(cls, value: object) -> object:
         normalized = str(value).strip().lower()
         return normalized if normalized == "file_api" else "file_api"
+
+    @field_validator("gemini_video_analysis_mode", mode="before")
+    @classmethod
+    def fallback_unknown_gemini_video_analysis_mode(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return (
+            normalized
+            if normalized == "two_step_brief_then_json"
+            else "two_step_brief_then_json"
+        )
 
     @field_validator("social_analysis_mode", mode="before")
     @classmethod

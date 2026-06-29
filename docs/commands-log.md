@@ -314,3 +314,13 @@ python3 -m compileall app
 grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url\|COOKIES_B64\|cookies.txt\|file_uri\|uploaded_file.uri" -n app docs || true
 # matched intentional cookie file config/path strings, generated __pycache__, and historical commands-log entries; no queue Gemini event/source metadata leakage and no app source lower-snake Gemini file reference after cleanup
 ```
+
+## W-M16G-C2 Validation
+
+```bash
+python3 -m compileall app
+# passed
+
+grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url\|COOKIES_B64\|cookies.txt\|file_uri\|uploaded_file.uri" -n app docs || true
+# matched intentional cookie file config/path strings, generated __pycache__, and historical commands-log entries only
+```

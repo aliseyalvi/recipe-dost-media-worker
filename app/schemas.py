@@ -24,6 +24,7 @@ class HealthResponse(BaseModel):
     gemini_video_fallback_models_count: int
     ai_analysis_mode: str
     gemini_video_input_mode: str
+    gemini_video_analysis_mode: str
     gemini_file_upload_timeout_seconds: int
     gemini_file_poll_interval_seconds: int
     gemini_file_max_wait_seconds: int

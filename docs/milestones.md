@@ -27,9 +27,10 @@
 | 23 | W-M16Q-POC-C1 Cookie-aware yt-dlp extractor + metadata fallback | Done | Unified yt-dlp tries no-cookie first, retries platform cookies when configured, and can complete mock jobs from OpenGraph metadata-only fallback |
 | 24 | W-M16G-POC Real Gemini video analysis from verified temp file | Done | Queue mode can send extractor-verified temp-file video bytes to Gemini and save a real recipe card |
 | 25 | W-M16G-C1 Gemini Files API video analysis | Done | Queue Gemini POC uses the official google-genai Files API, waits for ACTIVE, analyzes the verified temp file, and saves the recipe card |
-| 26 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 27 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 28 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 26 | W-M16G-C2 Two-step Gemini video recipe pipeline | Done | Queue Gemini POC extracts a plain video recipe brief first, then converts that brief to strict recipe JSON |
+| 27 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 28 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 29 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
@@ -52,3 +53,4 @@ Deploy and rerun M14G-4R2 after W-M14R1:
 - W-M16Q-POC-C1 makes the unified extractor cookie-aware and metadata tolerant: first try no cookies, retry platform cookies when configured, emit video-byte verification for real downloads, and in mock mode complete from OpenGraph metadata when video bytes are inaccessible.
 - W-M16G-POC adds `AI_ANALYSIS_MODE=gemini_video_poc`: queue mode requires `video_bytes_verified=true` plus an existing temp file, uploads that temp file to Gemini, validates strict recipe JSON, saves a real recipe card with `ai_provider=gemini`, and deletes temp media in `finally`.
 - W-M16G-C1 switches queue Gemini POC upload/read to the official `google-genai` Files API with `GEMINI_VIDEO_INPUT_MODE=file_api`, sanitized file upload/processing/analysis events, ACTIVE polling, specific Gemini/file error codes, and no CDN URL/source URL/cookie path/temp path/prompt/raw response/file reference in events or public metadata.
+- W-M16G-C2 changes queue Gemini POC from direct video-to-JSON to two steps: video file to plain recipe brief, then brief to strict JSON. Empty brief/JSON responses now fail with specific codes and safe diagnostics.

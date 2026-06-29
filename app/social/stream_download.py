@@ -63,7 +63,16 @@ def extract_social_video(
 
     normalized_platform = platform.strip().lower() or "unknown"
     output_mode = settings.media_extract_output_mode
-    opts = ytdlp_options(normalized_platform, settings, cookie_file=None)
+    cookie_file, cookie_setup_failed = get_platform_cookie_file(
+        normalized_platform,
+        settings,
+    )
+    use_cookie_first = normalized_platform == "instagram" and bool(cookie_file)
+    opts = ytdlp_options(
+        normalized_platform,
+        settings,
+        cookie_file if use_cookie_first else None,
+    )
 
     no_cookie_result = try_ytdlp_extract(
         url,
@@ -71,18 +80,17 @@ def extract_social_video(
         job_id,
         settings,
         opts,
-        cookie_mode="none",
-        resolver="ytdlp_stream",
+        cookie_mode="platform_cookie_file" if use_cookie_first else "none",
+        resolver="ytdlp_stream_cookies" if use_cookie_first else "ytdlp_stream",
         output_mode=output_mode,
     )
+    if use_cookie_first:
+        no_cookie_result["cookie_retry_attempted"] = True
+        no_cookie_result["cookie_setup_failed"] = cookie_setup_failed
     if no_cookie_result.get("success"):
         return no_cookie_result
 
-    cookie_file, cookie_setup_failed = get_platform_cookie_file(
-        normalized_platform,
-        settings,
-    )
-    if cookie_file:
+    if cookie_file and not use_cookie_first:
         cookie_opts = ytdlp_options(normalized_platform, settings, cookie_file)
         cookie_result = try_ytdlp_extract(
             url,

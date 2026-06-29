@@ -134,6 +134,7 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         ),
         ai_analysis_mode=settings.ai_analysis_mode,
         gemini_video_input_mode=settings.gemini_video_input_mode,
+        gemini_video_analysis_mode=settings.gemini_video_analysis_mode,
         gemini_file_upload_timeout_seconds=settings.gemini_file_upload_timeout_seconds,
         gemini_file_poll_interval_seconds=settings.gemini_file_poll_interval_seconds,
         gemini_file_max_wait_seconds=settings.gemini_file_max_wait_seconds,

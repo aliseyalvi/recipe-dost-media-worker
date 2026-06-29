@@ -13,7 +13,6 @@ from uuid import UUID
 from app.config import Settings, get_settings
 from app.job_runner import (
     PipelineFailure,
-    VIDEO_RECIPE_PROMPT,
     _caption_result_to_recipe_result,
     _extract_json_object,
     _validate_parsed_recipe,
@@ -26,6 +25,18 @@ from app.social.thumbnail_upload import upload_source_thumbnail
 from app.supabase_client import MediaJobRepository, create_repository
 
 logger = logging.getLogger("recipe_dost.worker")
+
+VIDEO_BRIEF_PROMPT = """Describe the recipe shown in this video as concise plain text.
+Include recipe title, visible ingredients, likely quantities if inferable, cooking steps,
+timing, cuisine/style, confidence, and uncertainties. Do not return JSON."""
+
+RECIPE_JSON_PROMPT = """Convert this recipe brief into strict JSON only.
+Required keys: title, summary, ingredients, steps, prep_time_minutes, cook_time_minutes,
+servings, difficulty, cuisine, tags. Use null when unknown and arrays for ingredients,
+steps, and tags.
+
+Brief:
+"""
 
 
 class QueueJobFailure(Exception):
@@ -571,44 +582,122 @@ def extract_gemini_text(response: object) -> str:
     return "\n".join(chunks).strip()
 
 
-def analyze_gemini_video_file(
+def gemini_response_metadata(response: object) -> dict[str, object]:
+    candidates = getattr(response, "candidates", []) or []
+    parts_count = 0
+    finish_reason = None
+    for candidate in candidates:
+        if finish_reason is None:
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if hasattr(finish_reason, "name"):
+                finish_reason = getattr(finish_reason, "name")
+        content = getattr(candidate, "content", None)
+        parts_count += len(getattr(content, "parts", []) or [])
+    prompt_feedback = getattr(response, "prompt_feedback", None)
+    return {
+        "candidate_count": len(candidates),
+        "parts_count": parts_count,
+        "finish_reason": str(finish_reason) if finish_reason else None,
+        "prompt_feedback_present": prompt_feedback is not None,
+        "safety_block_present": bool(prompt_feedback),
+    }
+
+
+def generate_video_brief(
     *,
     client: object,
     uploaded_file: object,
     model: str,
-    mime_type: str,
-) -> dict:
-    response: object | None = None
-    interactions_api = getattr(client, "interactions", None)
-    location_value = getattr(uploaded_file, "uri", None)
-    if interactions_api is not None and location_value:
-        try:
-            response = interactions_api.create(
-                model=model,
-                input=[
-                    {
-                        "type": "video",
-                        "uri": location_value,
-                        "mime_type": mime_type,
-                    },
-                    {"type": "text", "text": VIDEO_RECIPE_PROMPT},
-                ],
-            )
-        except (AttributeError, TypeError):
-            response = None
-    if response is None:
+    repository: MediaJobRepository,
+    job: MediaJobRecord,
+    event_metadata: dict[str, object],
+) -> str:
+    try:
         response = client.models.generate_content(
             model=model,
-            contents=[uploaded_file, VIDEO_RECIPE_PROMPT],
+            contents=[uploaded_file, VIDEO_BRIEF_PROMPT],
         )
+    except Exception as exc:
+        raise QueueJobFailure(
+            "gemini_video_brief_failed",
+            "Gemini video brief failed.",
+            stage="gemini_video_brief",
+            exception_type=type(exc).__name__,
+        ) from exc
+    text = extract_gemini_text(response)
+    if not text:
+        metadata = {**event_metadata, **gemini_response_metadata(response)}
+        repository.insert_event(
+            job.id,
+            event_type="gemini_video_brief_failed",
+            message="Gemini video brief failed.",
+            metadata={**metadata, "error_code": "gemini_video_brief_empty"},
+        )
+        raise QueueJobFailure(
+            "gemini_video_brief_empty",
+            "Gemini returned an empty video brief.",
+            stage="gemini_video_brief",
+        )
+    repository.insert_event(
+        job.id,
+        event_type="gemini_video_brief_completed",
+        message="Gemini video brief completed.",
+        metadata={
+            **event_metadata,
+            **gemini_response_metadata(response),
+            "text_length": len(text),
+        },
+    )
+    return text
+
+
+def generate_recipe_json(*, client: object, model: str, brief: str) -> dict:
+    prompt = f"{RECIPE_JSON_PROMPT}{brief}"
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=[prompt],
+            config={"response_mime_type": "application/json"},
+        )
+    except TypeError:
+        response = client.models.generate_content(model=model, contents=[prompt])
     text = extract_gemini_text(response)
     if not text:
         raise QueueJobFailure(
-            "gemini_video_empty_response",
-            "Gemini returned an empty recipe response.",
-            stage="gemini_video_analysis",
+            "gemini_recipe_json_empty",
+            "Gemini returned empty recipe JSON.",
+            stage="gemini_recipe_json",
         )
-    return _extract_json_object(text)
+    parsed = _extract_json_object(text)
+    required = {"title", "summary", "ingredients", "steps"}
+    if not required.issubset(parsed):
+        raise ValueError("Recipe JSON missing required keys.")
+    return parsed
+
+
+def recipe_json_to_caption_shape(parsed: dict) -> dict:
+    total_time = None
+    prep = parsed.get("prep_time_minutes")
+    cook = parsed.get("cook_time_minutes")
+    if isinstance(prep, int) or isinstance(cook, int):
+        total_time = (prep if isinstance(prep, int) else 0) + (
+            cook if isinstance(cook, int) else 0
+        )
+    tags = parsed.get("tags") or []
+    cuisine = parsed.get("cuisine")
+    if cuisine and isinstance(tags, list):
+        tags = [*tags, str(cuisine)]
+    return {
+        "is_recipe": True,
+        "confidence": "medium",
+        "title": parsed.get("title") or "Recipe",
+        "summary": parsed.get("summary") or "",
+        "ingredients": parsed.get("ingredients") or [],
+        "steps": parsed.get("steps") or [],
+        "servings": parsed.get("servings"),
+        "time_minutes": total_time,
+        "tags": tags,
+    }
 
 
 def delete_gemini_file_best_effort(
@@ -685,21 +774,23 @@ def run_gemini_video_poc_analysis(
             api_key,
             settings.gemini_file_upload_timeout_seconds,
         )
+        base_ai_metadata = safe_ai_event_metadata(
+            platform=platform,
+            resolver=resolver,
+            model=model,
+            duration_seconds=duration_seconds,
+            size_bytes=size_bytes,
+            video_bytes_verified=True,
+            stage="gemini_file_upload",
+            input_mode=settings.gemini_video_input_mode,
+            analysis_mode=settings.gemini_video_analysis_mode,
+            mime_type=mime_type,
+        )
         repository.insert_event(
             job.id,
             event_type="gemini_file_upload_started",
             message="Gemini video file upload started.",
-            metadata=safe_ai_event_metadata(
-                platform=platform,
-                resolver=resolver,
-                model=model,
-                duration_seconds=duration_seconds,
-                size_bytes=size_bytes,
-                video_bytes_verified=True,
-                stage="gemini_file_upload",
-                input_mode=settings.gemini_video_input_mode,
-                mime_type=mime_type,
-            ),
+            metadata=base_ai_metadata,
         )
         try:
             uploaded_file = upload_gemini_video_file(
@@ -718,33 +809,13 @@ def run_gemini_video_poc_analysis(
             job.id,
             event_type="gemini_file_upload_completed",
             message="Gemini video file upload completed.",
-            metadata=safe_ai_event_metadata(
-                platform=platform,
-                resolver=resolver,
-                model=model,
-                duration_seconds=duration_seconds,
-                size_bytes=size_bytes,
-                video_bytes_verified=True,
-                stage="gemini_file_upload",
-                input_mode=settings.gemini_video_input_mode,
-                mime_type=mime_type,
-            ),
+            metadata=base_ai_metadata,
         )
         repository.insert_event(
             job.id,
             event_type="gemini_file_processing_started",
             message="Gemini video file processing started.",
-            metadata=safe_ai_event_metadata(
-                platform=platform,
-                resolver=resolver,
-                model=model,
-                duration_seconds=duration_seconds,
-                size_bytes=size_bytes,
-                video_bytes_verified=True,
-                stage="gemini_file_processing",
-                input_mode=settings.gemini_video_input_mode,
-                mime_type=mime_type,
-            ),
+            metadata={**base_ai_metadata, "stage": "gemini_file_processing"},
         )
         uploaded_file = wait_for_gemini_file_active(
             client=client,
@@ -755,53 +826,75 @@ def run_gemini_video_poc_analysis(
             job.id,
             event_type="gemini_file_active",
             message="Gemini video file is active.",
-            metadata=safe_ai_event_metadata(
-                platform=platform,
-                resolver=resolver,
-                model=model,
-                duration_seconds=duration_seconds,
-                size_bytes=size_bytes,
-                video_bytes_verified=True,
-                stage="gemini_file_processing",
-                input_mode=settings.gemini_video_input_mode,
-                mime_type=mime_type,
-                file_state="ACTIVE",
-            ),
+            metadata={
+                **base_ai_metadata,
+                "stage": "gemini_file_processing",
+                "file_state": "ACTIVE",
+            },
         )
+        brief_metadata = {
+            **base_ai_metadata,
+            "stage": "gemini_video_brief",
+            "model": model,
+        }
         repository.insert_event(
             job.id,
-            event_type="gemini_video_analysis_started",
-            message="Gemini video analysis started.",
-            metadata=safe_ai_event_metadata(
-                platform=platform,
-                resolver=resolver,
-                model=model,
-                duration_seconds=duration_seconds,
-                size_bytes=size_bytes,
-                video_bytes_verified=True,
-                stage="gemini_video_analysis",
-                input_mode=settings.gemini_video_input_mode,
-                mime_type=mime_type,
-            ),
+            event_type="gemini_video_brief_started",
+            message="Gemini video brief started.",
+            metadata=brief_metadata,
         )
-        parsed = analyze_gemini_video_file(
+        brief = generate_video_brief(
             client=client,
             uploaded_file=uploaded_file,
             model=model,
-            mime_type=mime_type,
+            repository=repository,
+            job=job,
+            event_metadata=brief_metadata,
         )
+        text_model = settings.effective_gemini_text_model
+        json_metadata = {
+            **base_ai_metadata,
+            "stage": "gemini_recipe_json",
+            "model": text_model,
+            "text_length": len(brief),
+        }
+        repository.insert_event(
+            job.id,
+            event_type="gemini_recipe_json_started",
+            message="Gemini recipe JSON started.",
+            metadata=json_metadata,
+        )
+        parsed = generate_recipe_json(
+            client=client,
+            model=text_model,
+            brief=brief,
+        )
+        parsed = recipe_json_to_caption_shape(parsed)
         _validate_parsed_recipe(
             parsed,
             platform=platform,
-            stage="gemini_video_analysis",
-            model=model,
+            stage="gemini_recipe_json",
+            model=text_model,
             user_message="Gemini did not return a usable recipe.",
+        )
+        repository.insert_event(
+            job.id,
+            event_type="gemini_recipe_json_completed",
+            message="Gemini recipe JSON completed.",
+            metadata={**json_metadata, "json_keys_count": len(parsed.keys())},
         )
         result = _caption_result_to_recipe_result(parsed)
     except QueueJobFailure as exc:
+        if exc.code == "gemini_video_brief_empty":
+            raise
+        failed_event = "gemini_video_analysis_failed"
+        if exc.stage == "gemini_video_brief":
+            failed_event = "gemini_video_brief_failed"
+        elif exc.stage == "gemini_recipe_json":
+            failed_event = "gemini_recipe_json_failed"
         repository.insert_event(
             job.id,
-            event_type="gemini_video_analysis_failed",
+            event_type=failed_event,
             message="Gemini video analysis failed.",
             metadata=safe_ai_event_metadata(
                 platform=platform,
@@ -814,33 +907,36 @@ def run_gemini_video_poc_analysis(
                 error_code=exc.code,
                 exception_type=exc.exception_type,
                 input_mode=settings.gemini_video_input_mode,
+                analysis_mode=settings.gemini_video_analysis_mode,
                 mime_type=mime_type,
             ),
         )
         raise
     except ValueError as exc:
+        fail_stage = "gemini_recipe_json"
         repository.insert_event(
             job.id,
-            event_type="gemini_video_analysis_failed",
-            message="Gemini video analysis failed.",
+            event_type="gemini_recipe_json_failed",
+            message="Gemini recipe JSON failed.",
             metadata=safe_ai_event_metadata(
                 platform=platform,
                 resolver=resolver,
-                model=model,
+                model=settings.effective_gemini_text_model,
                 duration_seconds=duration_seconds,
                 size_bytes=size_bytes,
                 video_bytes_verified=True,
-                stage="gemini_video_analysis",
+                stage=fail_stage,
                 error_code="gemini_recipe_json_invalid",
                 exception_type=type(exc).__name__,
                 input_mode=settings.gemini_video_input_mode,
+                analysis_mode=settings.gemini_video_analysis_mode,
                 mime_type=mime_type,
             ),
         )
         raise QueueJobFailure(
             "gemini_recipe_json_invalid",
             "Gemini returned an invalid recipe response.",
-            stage="gemini_video_analysis",
+            stage=fail_stage,
             exception_type=type(exc).__name__,
         ) from exc
     except PipelineFailure as exc:
@@ -859,6 +955,7 @@ def run_gemini_video_poc_analysis(
                 error_code="gemini_recipe_json_invalid",
                 exception_type=type(exc).__name__,
                 input_mode=settings.gemini_video_input_mode,
+                analysis_mode=settings.gemini_video_analysis_mode,
                 mime_type=mime_type,
             ),
         )
@@ -884,6 +981,7 @@ def run_gemini_video_poc_analysis(
                 error_code="gemini_video_analysis_failed",
                 exception_type=type(exc).__name__,
                 input_mode=settings.gemini_video_input_mode,
+                analysis_mode=settings.gemini_video_analysis_mode,
                 mime_type=mime_type,
             ),
         )
@@ -919,6 +1017,7 @@ def run_gemini_video_poc_analysis(
             size_bytes=size_bytes,
             video_bytes_verified=True,
             stage="gemini_video_analysis",
+            analysis_mode=settings.gemini_video_analysis_mode,
             input_mode=settings.gemini_video_input_mode,
             mime_type=mime_type,
         ),
@@ -1032,8 +1131,15 @@ def safe_ai_event_metadata(
     error_code: str | None = None,
     exception_type: str | None = None,
     input_mode: str | None = None,
+    analysis_mode: str | None = None,
     mime_type: str | None = None,
     file_state: str | None = None,
+    text_length: int | None = None,
+    candidate_count: int | None = None,
+    parts_count: int | None = None,
+    finish_reason: str | None = None,
+    prompt_feedback_present: bool | None = None,
+    safety_block_present: bool | None = None,
 ) -> dict[str, object]:
     metadata: dict[str, object] = {
         "platform": platform,
@@ -1052,10 +1158,24 @@ def safe_ai_event_metadata(
         metadata["exception_type"] = exception_type
     if input_mode is not None:
         metadata["input_mode"] = input_mode
+    if analysis_mode is not None:
+        metadata["analysis_mode"] = analysis_mode
     if mime_type is not None:
         metadata["mime_type"] = mime_type
     if file_state is not None:
         metadata["file_state"] = file_state
+    if text_length is not None:
+        metadata["text_length"] = text_length
+    if candidate_count is not None:
+        metadata["candidate_count"] = candidate_count
+    if parts_count is not None:
+        metadata["parts_count"] = parts_count
+    if finish_reason is not None:
+        metadata["finish_reason"] = finish_reason
+    if prompt_feedback_present is not None:
+        metadata["prompt_feedback_present"] = prompt_feedback_present
+    if safety_block_present is not None:
+        metadata["safety_block_present"] = safety_block_present
     return metadata
 
 
@@ -1178,6 +1298,10 @@ def error_code_for_stage(stage: str) -> str:
         return "gemini_file_upload_failed"
     if stage == "gemini_file_processing":
         return "gemini_file_processing_failed"
+    if stage == "gemini_video_brief":
+        return "gemini_video_brief_failed"
+    if stage == "gemini_recipe_json":
+        return "gemini_recipe_json_invalid"
     if stage == "gemini_video_analysis":
         return "gemini_video_analysis_failed"
     return "queue_job_failed"
@@ -1202,6 +1326,10 @@ def safe_message_for_stage(stage: str) -> str:
         return "Gemini video file upload failed."
     if stage == "gemini_file_processing":
         return "Gemini video file processing failed."
+    if stage == "gemini_video_brief":
+        return "Gemini video brief failed."
+    if stage == "gemini_recipe_json":
+        return "Gemini recipe JSON failed."
     if stage == "gemini_video_analysis":
         return "Gemini video analysis failed."
     return "Queue worker failed while processing this recipe."
