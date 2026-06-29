@@ -15,9 +15,7 @@ from app.job_runner import (
     PipelineFailure,
     VIDEO_RECIPE_PROMPT,
     _caption_result_to_recipe_result,
-    _gemini_delete_file_rest,
-    _gemini_upload_video_rest,
-    _gemini_video_to_recipe_rest,
+    _extract_json_object,
     _validate_parsed_recipe,
     platform_for_job,
     save_mock_recipe_card_for_job,
@@ -468,6 +466,170 @@ def upload_thumbnail_best_effort(
         return None
 
 
+def create_gemini_client(api_key: str, timeout_seconds: int) -> object:
+    from google import genai
+
+    timeout_ms = max(1, timeout_seconds) * 1000
+    try:
+        return genai.Client(
+            api_key=api_key,
+            http_options={"timeout": timeout_ms},
+        )
+    except TypeError:
+        return genai.Client(api_key=api_key)
+
+
+def upload_gemini_video_file(
+    *,
+    client: object,
+    temp_file_path: str,
+    mime_type: str,
+) -> object:
+    files_api = getattr(client, "files")
+    try:
+        return files_api.upload(
+            file=temp_file_path,
+            config={"mime_type": mime_type},
+        )
+    except TypeError:
+        try:
+            return files_api.upload(
+                path=temp_file_path,
+                config={"mime_type": mime_type},
+            )
+        except TypeError:
+            return files_api.upload(file=temp_file_path)
+
+
+def get_gemini_file_name(uploaded_file: object) -> str | None:
+    name = getattr(uploaded_file, "name", None)
+    return str(name) if name else None
+
+
+def get_gemini_file_state(uploaded_file: object) -> str:
+    state = getattr(uploaded_file, "state", None)
+    if hasattr(state, "name"):
+        state = getattr(state, "name")
+    state_text = str(state or "").upper()
+    return state_text.rsplit(".", 1)[-1]
+
+
+def wait_for_gemini_file_active(
+    *,
+    client: object,
+    uploaded_file: object,
+    settings: Settings,
+) -> object:
+    deadline = perf_counter() + max(1, settings.gemini_file_max_wait_seconds)
+    active_file = uploaded_file
+    while perf_counter() < deadline:
+        state = get_gemini_file_state(active_file)
+        if state == "ACTIVE":
+            return active_file
+        if state in {"FAILED", "ERROR"}:
+            raise QueueJobFailure(
+                "gemini_file_processing_failed",
+                "Gemini video file processing failed.",
+                stage="gemini_file_processing",
+            )
+        name = get_gemini_file_name(active_file)
+        if not name:
+            raise QueueJobFailure(
+                "gemini_file_processing_failed",
+                "Gemini video file processing failed.",
+                stage="gemini_file_processing",
+            )
+        sleep_seconds = max(1, settings.gemini_file_poll_interval_seconds)
+        if perf_counter() + sleep_seconds > deadline:
+            break
+        import time
+
+        time.sleep(sleep_seconds)
+        files_api = getattr(client, "files")
+        try:
+            active_file = files_api.get(name=name)
+        except TypeError:
+            active_file = files_api.get(name)
+    raise QueueJobFailure(
+        "gemini_file_processing_timeout",
+        "Gemini video file processing timed out.",
+        stage="gemini_file_processing",
+    )
+
+
+def extract_gemini_text(response: object) -> str:
+    text = getattr(response, "text", None)
+    if isinstance(text, str) and text.strip():
+        return text
+    chunks: list[str] = []
+    for candidate in getattr(response, "candidates", []) or []:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", []) or []:
+            part_text = getattr(part, "text", None)
+            if isinstance(part_text, str) and part_text.strip():
+                chunks.append(part_text)
+    return "\n".join(chunks).strip()
+
+
+def analyze_gemini_video_file(
+    *,
+    client: object,
+    uploaded_file: object,
+    model: str,
+    mime_type: str,
+) -> dict:
+    response: object | None = None
+    interactions_api = getattr(client, "interactions", None)
+    location_value = getattr(uploaded_file, "uri", None)
+    if interactions_api is not None and location_value:
+        try:
+            response = interactions_api.create(
+                model=model,
+                input=[
+                    {
+                        "type": "video",
+                        "uri": location_value,
+                        "mime_type": mime_type,
+                    },
+                    {"type": "text", "text": VIDEO_RECIPE_PROMPT},
+                ],
+            )
+        except (AttributeError, TypeError):
+            response = None
+    if response is None:
+        response = client.models.generate_content(
+            model=model,
+            contents=[uploaded_file, VIDEO_RECIPE_PROMPT],
+        )
+    text = extract_gemini_text(response)
+    if not text:
+        raise QueueJobFailure(
+            "gemini_video_empty_response",
+            "Gemini returned an empty recipe response.",
+            stage="gemini_video_analysis",
+        )
+    return _extract_json_object(text)
+
+
+def delete_gemini_file_best_effort(
+    client: object | None,
+    uploaded_file: object | None,
+) -> None:
+    if client is None or uploaded_file is None:
+        return
+    name = get_gemini_file_name(uploaded_file)
+    if not name:
+        return
+    try:
+        files_api = getattr(client, "files")
+        try:
+            files_api.delete(name=name)
+        except TypeError:
+            files_api.delete(name)
+    except Exception:
+        pass
+
+
 def run_gemini_video_poc_analysis(
     *,
     repository: MediaJobRepository,
@@ -478,10 +640,13 @@ def run_gemini_video_poc_analysis(
     uploaded_thumbnail_url: str | None,
 ) -> MediaJobRecord:
     temp_file_path = str_or_none(extract_result.get("temp_file_path"))
+    temp_file = Path(temp_file_path) if temp_file_path is not None else None
     if (
         not extract_result.get("video_bytes_verified")
         or temp_file_path is None
-        or not Path(temp_file_path).exists()
+        or temp_file is None
+        or not temp_file.exists()
+        or temp_file.stat().st_size <= 0
     ):
         raise QueueJobFailure(
             "video_required_for_ai",
@@ -490,18 +655,20 @@ def run_gemini_video_poc_analysis(
         )
     if settings.gemini_api_key is None:
         raise QueueJobFailure(
-            "gemini_video_analysis_failed",
+            "gemini_api_key_missing",
             "Gemini video analysis is not configured.",
             stage="gemini_video_analysis",
         )
 
-    model = settings.gemini_video_model or "gemini-2.5-flash"
+    model = settings.effective_gemini_video_model
     resolver = str(extract_result.get("resolver") or "ytdlp_stream")
     size_bytes = safe_int_or_none(extract_result.get("size_bytes"))
+    size_bytes = size_bytes if size_bytes is not None else temp_file.stat().st_size
     duration_seconds = safe_int_or_none(extract_result.get("duration_seconds"))
-    mime_type = str_or_none(extract_result.get("mime_type")) or "video/mp4"
+    mime_type = "video/mp4"
     api_key = settings.gemini_api_key.get_secret_value()
-    file_name: str | None = None
+    client: object | None = None
+    uploaded_file: object | None = None
 
     job = repository.update_job(
         job.id,
@@ -513,34 +680,115 @@ def run_gemini_video_poc_analysis(
         ai_provider="gemini",
         ai_model=model,
     )
-    repository.insert_event(
-        job.id,
-        event_type="gemini_video_analysis_started",
-        message="Gemini video analysis started.",
-        metadata=safe_ai_event_metadata(
-            platform=platform,
-            resolver=resolver,
-            model=model,
-            duration_seconds=duration_seconds,
-            size_bytes=size_bytes,
-            video_bytes_verified=True,
-            stage="gemini_video_analysis",
-        ),
-    )
     try:
-        file_uri, file_name = _gemini_upload_video_rest(
-            api_key=api_key,
-            file_path=temp_file_path,
-            mime_type=mime_type,
-            timeout_seconds=settings.gemini_files_upload_timeout_seconds,
+        client = create_gemini_client(
+            api_key,
+            settings.gemini_file_upload_timeout_seconds,
         )
-        parsed = _gemini_video_to_recipe_rest(
-            api_key=api_key,
+        repository.insert_event(
+            job.id,
+            event_type="gemini_file_upload_started",
+            message="Gemini video file upload started.",
+            metadata=safe_ai_event_metadata(
+                platform=platform,
+                resolver=resolver,
+                model=model,
+                duration_seconds=duration_seconds,
+                size_bytes=size_bytes,
+                video_bytes_verified=True,
+                stage="gemini_file_upload",
+                input_mode=settings.gemini_video_input_mode,
+                mime_type=mime_type,
+            ),
+        )
+        try:
+            uploaded_file = upload_gemini_video_file(
+                client=client,
+                temp_file_path=temp_file_path,
+                mime_type=mime_type,
+            )
+        except Exception as exc:
+            raise QueueJobFailure(
+                "gemini_file_upload_failed",
+                "Gemini video file upload failed.",
+                stage="gemini_file_upload",
+                exception_type=type(exc).__name__,
+            ) from exc
+        repository.insert_event(
+            job.id,
+            event_type="gemini_file_upload_completed",
+            message="Gemini video file upload completed.",
+            metadata=safe_ai_event_metadata(
+                platform=platform,
+                resolver=resolver,
+                model=model,
+                duration_seconds=duration_seconds,
+                size_bytes=size_bytes,
+                video_bytes_verified=True,
+                stage="gemini_file_upload",
+                input_mode=settings.gemini_video_input_mode,
+                mime_type=mime_type,
+            ),
+        )
+        repository.insert_event(
+            job.id,
+            event_type="gemini_file_processing_started",
+            message="Gemini video file processing started.",
+            metadata=safe_ai_event_metadata(
+                platform=platform,
+                resolver=resolver,
+                model=model,
+                duration_seconds=duration_seconds,
+                size_bytes=size_bytes,
+                video_bytes_verified=True,
+                stage="gemini_file_processing",
+                input_mode=settings.gemini_video_input_mode,
+                mime_type=mime_type,
+            ),
+        )
+        uploaded_file = wait_for_gemini_file_active(
+            client=client,
+            uploaded_file=uploaded_file,
+            settings=settings,
+        )
+        repository.insert_event(
+            job.id,
+            event_type="gemini_file_active",
+            message="Gemini video file is active.",
+            metadata=safe_ai_event_metadata(
+                platform=platform,
+                resolver=resolver,
+                model=model,
+                duration_seconds=duration_seconds,
+                size_bytes=size_bytes,
+                video_bytes_verified=True,
+                stage="gemini_file_processing",
+                input_mode=settings.gemini_video_input_mode,
+                mime_type=mime_type,
+                file_state="ACTIVE",
+            ),
+        )
+        repository.insert_event(
+            job.id,
+            event_type="gemini_video_analysis_started",
+            message="Gemini video analysis started.",
+            metadata=safe_ai_event_metadata(
+                platform=platform,
+                resolver=resolver,
+                model=model,
+                duration_seconds=duration_seconds,
+                size_bytes=size_bytes,
+                video_bytes_verified=True,
+                stage="gemini_video_analysis",
+                input_mode=settings.gemini_video_input_mode,
+                mime_type=mime_type,
+            ),
+        )
+        parsed = analyze_gemini_video_file(
+            client=client,
+            uploaded_file=uploaded_file,
             model=model,
-            file_uri=file_uri,
             mime_type=mime_type,
-            prompt=VIDEO_RECIPE_PROMPT,
-            timeout_seconds=settings.social_video_gemini_timeout_seconds,
         )
         _validate_parsed_recipe(
             parsed,
@@ -550,6 +798,26 @@ def run_gemini_video_poc_analysis(
             user_message="Gemini did not return a usable recipe.",
         )
         result = _caption_result_to_recipe_result(parsed)
+    except QueueJobFailure as exc:
+        repository.insert_event(
+            job.id,
+            event_type="gemini_video_analysis_failed",
+            message="Gemini video analysis failed.",
+            metadata=safe_ai_event_metadata(
+                platform=platform,
+                resolver=resolver,
+                model=model,
+                duration_seconds=duration_seconds,
+                size_bytes=size_bytes,
+                video_bytes_verified=True,
+                stage=exc.stage,
+                error_code=exc.code,
+                exception_type=exc.exception_type,
+                input_mode=settings.gemini_video_input_mode,
+                mime_type=mime_type,
+            ),
+        )
+        raise
     except ValueError as exc:
         repository.insert_event(
             job.id,
@@ -565,6 +833,8 @@ def run_gemini_video_poc_analysis(
                 stage="gemini_video_analysis",
                 error_code="gemini_recipe_json_invalid",
                 exception_type=type(exc).__name__,
+                input_mode=settings.gemini_video_input_mode,
+                mime_type=mime_type,
             ),
         )
         raise QueueJobFailure(
@@ -588,6 +858,8 @@ def run_gemini_video_poc_analysis(
                 stage="gemini_video_analysis",
                 error_code="gemini_recipe_json_invalid",
                 exception_type=type(exc).__name__,
+                input_mode=settings.gemini_video_input_mode,
+                mime_type=mime_type,
             ),
         )
         raise QueueJobFailure(
@@ -611,6 +883,8 @@ def run_gemini_video_poc_analysis(
                 stage="gemini_video_analysis",
                 error_code="gemini_video_analysis_failed",
                 exception_type=type(exc).__name__,
+                input_mode=settings.gemini_video_input_mode,
+                mime_type=mime_type,
             ),
         )
         if settings.real_ai_fallback_to_mock:
@@ -631,12 +905,7 @@ def run_gemini_video_poc_analysis(
             exception_type=type(exc).__name__,
         ) from exc
     finally:
-        if file_name:
-            _gemini_delete_file_rest(
-                api_key=api_key,
-                file_name=file_name,
-                timeout_seconds=settings.gemini_files_upload_timeout_seconds,
-            )
+        delete_gemini_file_best_effort(client, uploaded_file)
 
     repository.insert_event(
         job.id,
@@ -650,6 +919,8 @@ def run_gemini_video_poc_analysis(
             size_bytes=size_bytes,
             video_bytes_verified=True,
             stage="gemini_video_analysis",
+            input_mode=settings.gemini_video_input_mode,
+            mime_type=mime_type,
         ),
     )
     return save_gemini_recipe_card(
@@ -760,6 +1031,9 @@ def safe_ai_event_metadata(
     stage: str,
     error_code: str | None = None,
     exception_type: str | None = None,
+    input_mode: str | None = None,
+    mime_type: str | None = None,
+    file_state: str | None = None,
 ) -> dict[str, object]:
     metadata: dict[str, object] = {
         "platform": platform,
@@ -776,6 +1050,12 @@ def safe_ai_event_metadata(
         metadata["error_code"] = error_code
     if exception_type is not None:
         metadata["exception_type"] = exception_type
+    if input_mode is not None:
+        metadata["input_mode"] = input_mode
+    if mime_type is not None:
+        metadata["mime_type"] = mime_type
+    if file_state is not None:
+        metadata["file_state"] = file_state
     return metadata
 
 
@@ -894,6 +1174,10 @@ def error_code_for_stage(stage: str) -> str:
         return "mock_fixture_failed"
     if stage == "metadata_fallback":
         return "metadata_unavailable"
+    if stage == "gemini_file_upload":
+        return "gemini_file_upload_failed"
+    if stage == "gemini_file_processing":
+        return "gemini_file_processing_failed"
     if stage == "gemini_video_analysis":
         return "gemini_video_analysis_failed"
     return "queue_job_failed"
@@ -914,6 +1198,10 @@ def safe_message_for_stage(stage: str) -> str:
         return "This social video could not be processed."
     if stage == "metadata_fallback":
         return "This social video could not be accessed publicly."
+    if stage == "gemini_file_upload":
+        return "Gemini video file upload failed."
+    if stage == "gemini_file_processing":
+        return "Gemini video file processing failed."
     if stage == "gemini_video_analysis":
         return "Gemini video analysis failed."
     return "Queue worker failed while processing this recipe."

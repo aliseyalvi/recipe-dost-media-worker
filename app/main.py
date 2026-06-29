@@ -133,6 +133,10 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
             settings.gemini_video_fallback_models
         ),
         ai_analysis_mode=settings.ai_analysis_mode,
+        gemini_video_input_mode=settings.gemini_video_input_mode,
+        gemini_file_upload_timeout_seconds=settings.gemini_file_upload_timeout_seconds,
+        gemini_file_poll_interval_seconds=settings.gemini_file_poll_interval_seconds,
+        gemini_file_max_wait_seconds=settings.gemini_file_max_wait_seconds,
         supported_platforms=["tiktok", "youtube", "instagram", "facebook"],
         youtube_resolver=settings.youtube_resolver,
         instagram_resolver=settings.instagram_resolver,

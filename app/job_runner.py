@@ -602,18 +602,18 @@ def _gemini_upload_video_rest(
         raise RuntimeError(f"gemini_api_error_{response.status_code}")
     body_json = response.json()
     file_entry = body_json.get("file", {})
-    file_uri = file_entry.get("uri", "")
+    media_reference = file_entry.get("uri", "")
     file_name = file_entry.get("name", "")
-    if not file_uri:
+    if not media_reference:
         raise RuntimeError("gemini_api_error_upload_no_uri")
-    return file_uri, file_name
+    return media_reference, file_name
 
 
 def _gemini_video_to_recipe_rest(
     *,
     api_key: str,
     model: str,
-    file_uri: str,
+    media_reference: str,
     mime_type: str,
     prompt: str,
     timeout_seconds: int = 120,
@@ -634,7 +634,7 @@ def _gemini_video_to_recipe_rest(
                     {"text": prompt},
                     {
                         "fileData": {
-                            "fileUri": file_uri,
+                            "fileUri": media_reference,
                             "mimeType": mime_type,
                         }
                     },
@@ -1976,7 +1976,7 @@ class JobRunner:
             )
             upload_started_at = perf_counter()
             try:
-                file_uri, file_name = _gemini_upload_video_rest(
+                media_reference, file_name = _gemini_upload_video_rest(
                     api_key=api_key,
                     file_path=file_path,
                     mime_type=mime_type,
@@ -2040,7 +2040,7 @@ class JobRunner:
                 parsed = _gemini_video_to_recipe_rest(
                     api_key=api_key,
                     model=video_model,
-                    file_uri=file_uri,
+                    media_reference=media_reference,
                     mime_type=mime_type,
                     prompt=VIDEO_RECIPE_PROMPT,
                     timeout_seconds=settings.social_video_gemini_timeout_seconds,
