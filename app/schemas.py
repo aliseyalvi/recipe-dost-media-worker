@@ -88,6 +88,18 @@ class HealthResponse(BaseModel):
     queue_poll_interval_seconds: int
     enable_unified_ytdlp_stream_extractor: bool
     media_extract_output_mode: str
+    enable_ytdlp_cookies: bool
+    enable_instagram_cookies: bool
+    enable_youtube_cookies: bool
+    enable_facebook_cookies: bool
+    enable_tiktok_cookies: bool
+    instagram_cookies_configured: bool
+    youtube_cookies_configured: bool
+    facebook_cookies_configured: bool
+    tiktok_cookies_configured: bool
+    enable_metadata_only_mock_fallback: bool
+    enable_og_metadata_fallback: bool
+    allow_mock_completion_without_video: bool
 
 
 class MediaJobData(BaseModel):

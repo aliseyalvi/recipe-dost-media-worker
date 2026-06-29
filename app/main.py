@@ -206,7 +206,35 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
             settings.enable_unified_ytdlp_stream_extractor
         ),
         media_extract_output_mode=settings.media_extract_output_mode,
+        enable_ytdlp_cookies=settings.enable_ytdlp_cookies,
+        enable_instagram_cookies=settings.enable_instagram_cookies,
+        enable_youtube_cookies=settings.enable_youtube_cookies,
+        enable_facebook_cookies=settings.enable_facebook_cookies,
+        enable_tiktok_cookies=settings.enable_tiktok_cookies,
+        instagram_cookies_configured=cookies_configured(settings, "instagram"),
+        youtube_cookies_configured=cookies_configured(settings, "youtube"),
+        facebook_cookies_configured=cookies_configured(settings, "facebook"),
+        tiktok_cookies_configured=cookies_configured(settings, "tiktok"),
+        enable_metadata_only_mock_fallback=settings.enable_metadata_only_mock_fallback,
+        enable_og_metadata_fallback=settings.enable_og_metadata_fallback,
+        allow_mock_completion_without_video=settings.allow_mock_completion_without_video,
     )
+
+
+def cookies_configured(settings: Settings, platform: str) -> bool:
+    file_value = {
+        "instagram": settings.instagram_cookies_file or settings.instagram_cookie_file,
+        "youtube": settings.youtube_cookies_file,
+        "facebook": settings.facebook_cookies_file or settings.facebook_cookie_file,
+        "tiktok": settings.tiktok_cookies_file or settings.tiktok_cookie_file,
+    }.get(platform)
+    b64_value = {
+        "instagram": settings.instagram_cookies_b64,
+        "youtube": settings.youtube_cookies_b64,
+        "facebook": settings.facebook_cookies_b64,
+        "tiktok": settings.tiktok_cookies_b64,
+    }.get(platform)
+    return bool((file_value and Path(file_value).exists()) or b64_value is not None)
 
 
 @app.get("/ping")

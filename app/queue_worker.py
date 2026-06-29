@@ -152,22 +152,28 @@ def process_queue_job(
             str(job.id),
             settings,
         )
+        emit_extractor_progress_events(repository, job.id, extract_result)
         if not extract_result.get("success"):
             error_code = str(extract_result.get("error_code") or "unified_extractor_failed")
-            add_event(
-                repository,
-                job.id,
-                "unified_extractor_failed",
-                "Unified yt-dlp extractor failed.",
-                safe_extract_event_metadata(extract_result, error_code=error_code),
-            )
+            if not extract_result.get("metadata_fallback_attempted"):
+                add_event(
+                    repository,
+                    job.id,
+                    "unified_extractor_failed",
+                    "Unified yt-dlp extractor failed.",
+                    safe_extract_event_metadata(extract_result, error_code=error_code),
+                )
             raise QueueJobFailure(
                 error_code,
                 str(
                     extract_result.get("safe_error_message")
                     or "This social video could not be processed."
                 ),
-                stage=current_stage,
+                stage=(
+                    "metadata_fallback"
+                    if extract_result.get("metadata_fallback_attempted")
+                    else current_stage
+                ),
             )
         add_event(
             repository,
@@ -196,7 +202,7 @@ def process_queue_job(
                 job=job,
                 settings=settings,
                 platform=platform,
-                resolver="ytdlp_stream",
+                resolver=str(extract_result.get("resolver") or "ytdlp_stream"),
                 thumbnail_url=uploaded_thumbnail_url,
                 job_started_at=started_at,
                 fixture_error_code="mock_fixture_failed",
@@ -223,7 +229,7 @@ def process_queue_job(
             "Queue job completed.",
             {
                 "platform": platform,
-                "resolver": "ytdlp_stream",
+                "resolver": str(extract_result.get("resolver") or "ytdlp_stream"),
                 "elapsed_ms": int((perf_counter() - started_at) * 1000),
             },
         )
@@ -275,7 +281,7 @@ def save_metadata(
         repository.upsert_private_metadata(
             media_job_id,
             platform=str(result.get("platform") or ""),
-            resolver="ytdlp_stream",
+            resolver=str(result.get("resolver") or "ytdlp_stream"),
             cdn_url=cdn_url,
             raw_metadata=result.get("raw_metadata") if isinstance(result.get("raw_metadata"), dict) else None,
         )
@@ -346,16 +352,19 @@ def public_source_metadata(
 ) -> dict[str, object]:
     has_cdn_url = bool(result.get("cdn_download_url"))
     has_local_media = bool(result.get("temp_file_path") or result.get("video_buffer"))
+    resolution_mode = str(result.get("resolution_mode") or (
+        "local_file_ready" if has_local_media else "metadata_only"
+    ))
     return {
         "platform": result.get("platform"),
-        "resolver": "ytdlp_stream",
+        "resolver": result.get("resolver") or "ytdlp_stream",
         "title": result.get("title"),
         "description": result.get("description"),
         "author_username": result.get("author_username"),
         "duration_seconds": result.get("duration_seconds"),
         "thumbnail_source_present": bool(result.get("thumbnail_url")),
         "uploaded_thumbnail_url": uploaded_thumbnail_url,
-        "resolution_mode": "local_file_ready" if has_local_media else "metadata_only",
+        "resolution_mode": resolution_mode,
         "media": {
             "has_cdn_url": has_cdn_url,
             "cdn_url_stored_private": has_cdn_url,
@@ -363,6 +372,9 @@ def public_source_metadata(
             "size_bytes": result.get("size_bytes"),
             "width": result.get("width"),
             "height": result.get("height"),
+            "video_bytes_verified": bool(result.get("video_bytes_verified")),
+            "output_mode": result.get("output_mode"),
+            "cookie_mode": result.get("cookie_mode"),
         },
         "resolved_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -447,7 +459,7 @@ def safe_extract_event_metadata(
 ) -> dict[str, object]:
     metadata = {
         "platform": result.get("platform"),
-        "resolver": "ytdlp_stream",
+        "resolver": result.get("resolver") or "ytdlp_stream",
         "title_present": bool(result.get("title")),
         "description_present": bool(result.get("description")),
         "duration_seconds": result.get("duration_seconds"),
@@ -457,10 +469,83 @@ def safe_extract_event_metadata(
         "size_bytes": result.get("size_bytes"),
         "width": result.get("width"),
         "height": result.get("height"),
+        "resolution_mode": result.get("resolution_mode"),
+        "video_bytes_verified": result.get("video_bytes_verified"),
+        "output_mode": result.get("output_mode"),
+        "cookie_mode": result.get("cookie_mode"),
     }
     if error_code is not None:
         metadata["error_code"] = error_code
     return {key: value for key, value in metadata.items() if value is not None}
+
+
+def emit_extractor_progress_events(
+    repository: MediaJobRepository,
+    media_job_id: UUID,
+    result: dict[str, object],
+) -> None:
+    platform = str(result.get("platform") or "")
+    if result.get("cookie_setup_failed"):
+        add_event_safely(
+            repository,
+            media_job_id,
+            "cookie_setup_failed",
+            "Cookie setup failed.",
+            {"platform": platform},
+        )
+    if result.get("cookie_retry_attempted"):
+        add_event_safely(
+            repository,
+            media_job_id,
+            "unified_extractor_retry_with_cookies",
+            "Unified yt-dlp extractor retrying with platform cookies.",
+            {
+                "platform": platform,
+                "resolver": "ytdlp_stream_cookies",
+                "cookie_mode": "platform_cookie_file",
+            },
+        )
+    if result.get("metadata_fallback_attempted"):
+        add_event_safely(
+            repository,
+            media_job_id,
+            "metadata_fallback_started",
+            "Metadata-only fallback started.",
+            {"platform": platform},
+        )
+        add_event_safely(
+            repository,
+            media_job_id,
+            "metadata_fallback_completed" if result.get("success") else "metadata_fallback_failed",
+            (
+                "Metadata-only fallback completed."
+                if result.get("success")
+                else "Metadata-only fallback failed."
+            ),
+            {
+                "platform": platform,
+                "resolver": result.get("resolver") or f"{platform}_opengraph",
+                "title_present": bool(result.get("title")),
+                "has_thumbnail": bool(result.get("thumbnail_url")),
+                "error_code": result.get("error_code"),
+            },
+        )
+    if result.get("video_bytes_verified"):
+        add_event_safely(
+            repository,
+            media_job_id,
+            "unified_extractor_video_verified",
+            "Unified yt-dlp extractor verified downloaded video bytes.",
+            {
+                "platform": platform,
+                "resolver": result.get("resolver") or "ytdlp_stream",
+                "output_mode": result.get("output_mode"),
+                "size_bytes": result.get("size_bytes"),
+                "duration_seconds": result.get("duration_seconds"),
+                "video_bytes_verified": True,
+                "cookie_mode": result.get("cookie_mode") or "none",
+            },
+        )
 
 
 def record_queue_failure(
@@ -507,6 +592,8 @@ def error_code_for_stage(stage: str) -> str:
         return "job_completion_update_failed"
     if stage == "mock_fixture_analysis":
         return "mock_fixture_failed"
+    if stage == "metadata_fallback":
+        return "metadata_unavailable"
     return "queue_job_failed"
 
 
@@ -523,6 +610,8 @@ def safe_message_for_stage(stage: str) -> str:
         return "Mock recipe fixture could not be loaded."
     if stage == "unified_extractor":
         return "This social video could not be processed."
+    if stage == "metadata_fallback":
+        return "This social video could not be accessed publicly."
     return "Queue worker failed while processing this recipe."
 
 

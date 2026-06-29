@@ -24,9 +24,10 @@
 | 20 | W-M15D1 Public/private resolver metadata persistence | Done | Save app-visible resolver metadata separately from private CDN/raw metadata |
 | 21 | W-M15D2 Resolver adapter matrix without Cobalt | Done | Mock mode supports TikTok, YouTube, Instagram, and Facebook resolver adapters without Gemini quota |
 | 22 | W-M16Q-POC Serialized Queue Worker | Done | Queue execution mode polls oldest queued job and processes one at a time through unified yt-dlp extractor plus mock fixture save |
-| 23 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 24 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 25 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 23 | W-M16Q-POC-C1 Cookie-aware yt-dlp extractor + metadata fallback | Done | Unified yt-dlp tries no-cookie first, retries platform cookies when configured, and can complete mock jobs from OpenGraph metadata-only fallback |
+| 24 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 25 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 26 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
@@ -46,3 +47,4 @@ Deploy and rerun M14G-4R2 after W-M14R1:
 - Mock mode resolver matrix: TikTok uses TikWM, YouTube uses yt-dlp metadata, Instagram uses SnapInsta behind `ENABLE_RENDER_INSTAGRAM_RESOLVER`, and Facebook uses SnapSave behind `ENABLE_RENDER_FACEBOOK_RESOLVER`.
 - W-M16Q-POC adds `WORKER_EXECUTION_MODE=queue`: FastAPI starts one in-process queue loop, selects the oldest `queued` job, claims it as `resolving`, extracts metadata/temp media with unified yt-dlp, saves public/private metadata, uses the mock fixture recipe save path, completes or fails at progress `100`, then deletes temp media before polling again.
 - W-M16Q-POC post-extraction fix: queue mode now shares the webhook mock fixture recipe-card save helper and reports post-extraction DB/API failures with stage-specific error codes instead of `unified_extractor_failed`.
+- W-M16Q-POC-C1 makes the unified extractor cookie-aware and metadata tolerant: first try no cookies, retry platform cookies when configured, emit video-byte verification for real downloads, and in mock mode complete from OpenGraph metadata when video bytes are inaccessible.

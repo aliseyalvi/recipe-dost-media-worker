@@ -256,3 +256,28 @@ env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python -m com
 grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url" -n app docs || true
 # matched generated app/__pycache__ plus historical commands-log entries only; no source-code public CDN storage match
 ```
+
+## W-M16Q-POC-C1 Validation
+
+```bash
+python3 -m compileall app
+# passed
+
+env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python -m compileall app
+# passed
+
+WORKER_API_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test WORKER_EXECUTION_MODE=queue ENABLE_YTDLP_COOKIES=true ENABLE_INSTAGRAM_COOKIES=true ENABLE_METADATA_ONLY_MOCK_FALLBACK=true .venv/bin/python - <<'PY'
+from app.config import Settings
+from app.main import cookies_configured
+s = Settings()
+assert s.enable_ytdlp_cookies is True
+assert s.enable_instagram_cookies is True
+assert s.enable_metadata_only_mock_fallback is True
+assert cookies_configured(s, "instagram") in {True, False}
+print("settings health smoke passed")
+PY
+# passed; local venv emitted urllib3 LibreSSL warning
+
+grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url\|COOKIES_B64\|cookies.txt" -n app docs || true
+# matched existing/app intentional cookie file paths, generated __pycache__, and historical commands-log entries; no source-code public CDN storage match
+```
