@@ -13,10 +13,16 @@ from uuid import UUID
 from app.config import Settings, get_settings
 from app.job_runner import (
     PipelineFailure,
+    VIDEO_RECIPE_PROMPT,
+    _caption_result_to_recipe_result,
+    _gemini_delete_file_rest,
+    _gemini_upload_video_rest,
+    _gemini_video_to_recipe_rest,
+    _validate_parsed_recipe,
     platform_for_job,
     save_mock_recipe_card_for_job,
 )
-from app.schemas import MediaJobRecord
+from app.schemas import GeminiRecipeResult, MediaJobRecord
 from app.social.stream_download import extract_social_video
 from app.social.thumbnail_upload import upload_source_thumbnail
 from app.supabase_client import MediaJobRepository, create_repository
@@ -195,33 +201,54 @@ def process_queue_job(
         save_metadata(repository, job.id, extract_result, uploaded_thumbnail_url)
         update_job_source_fields(repository, job.id, extract_result, uploaded_thumbnail_url)
 
-        current_stage = "mock_fixture_analysis"
-        try:
-            job = save_mock_recipe_card_for_job(
-                repository=repository,
-                job=job,
-                settings=settings,
-                platform=platform,
-                resolver=str(extract_result.get("resolver") or "ytdlp_stream"),
-                thumbnail_url=uploaded_thumbnail_url,
-                job_started_at=started_at,
-                fixture_error_code="mock_fixture_failed",
-            )
-        except PipelineFailure as exc:
-            current_stage = str(exc.metadata.get("stage") or current_stage)
-            raise QueueJobFailure(
-                exc.code,
-                exc.user_message,
-                stage=current_stage,
-                exception_type=type(exc.__cause__ or exc).__name__,
-            ) from exc
-        except Exception as exc:
-            raise QueueJobFailure(
-                error_code_for_stage(current_stage),
-                safe_message_for_stage(current_stage),
-                stage=current_stage,
-                exception_type=type(exc).__name__,
-            ) from exc
+        if settings.ai_analysis_mode == "gemini_video_poc":
+            current_stage = "gemini_video_analysis"
+            try:
+                job = run_gemini_video_poc_analysis(
+                    repository=repository,
+                    job=job,
+                    settings=settings,
+                    extract_result=extract_result,
+                    platform=platform,
+                    uploaded_thumbnail_url=uploaded_thumbnail_url,
+                )
+            except QueueJobFailure:
+                raise
+            except Exception as exc:
+                raise QueueJobFailure(
+                    error_code_for_stage(current_stage),
+                    safe_message_for_stage(current_stage),
+                    stage=current_stage,
+                    exception_type=type(exc).__name__,
+                ) from exc
+        else:
+            current_stage = "mock_fixture_analysis"
+            try:
+                job = save_mock_recipe_card_for_job(
+                    repository=repository,
+                    job=job,
+                    settings=settings,
+                    platform=platform,
+                    resolver=str(extract_result.get("resolver") or "ytdlp_stream"),
+                    thumbnail_url=uploaded_thumbnail_url,
+                    job_started_at=started_at,
+                    fixture_error_code="mock_fixture_failed",
+                )
+            except PipelineFailure as exc:
+                current_stage = str(exc.metadata.get("stage") or current_stage)
+                raise QueueJobFailure(
+                    exc.code,
+                    exc.user_message,
+                    stage=current_stage,
+                    exception_type=type(exc.__cause__ or exc).__name__,
+                ) from exc
+            except Exception as exc:
+                raise QueueJobFailure(
+                    error_code_for_stage(current_stage),
+                    safe_message_for_stage(current_stage),
+                    stage=current_stage,
+                    exception_type=type(exc).__name__,
+                ) from exc
         add_event(
             repository,
             job.id,
@@ -402,19 +429,8 @@ def update_job_source_fields(
                 media_job_id,
                 {"thumbnail_url": uploaded_thumbnail_url},
             )
-    except Exception as exc:
-        add_event_safely(
-            repository,
-            media_job_id,
-            "source_metadata_update_failed",
-            "Optional source metadata backfill failed.",
-            safe_failure_metadata(
-                stage="source_metadata_backfill",
-                error_code="source_metadata_update_failed",
-                message="Optional source metadata backfill failed.",
-                exception_type=type(exc).__name__,
-            ),
-        )
+    except Exception:
+        pass
 
 
 def upload_thumbnail_best_effort(
@@ -452,6 +468,260 @@ def upload_thumbnail_best_effort(
         return None
 
 
+def run_gemini_video_poc_analysis(
+    *,
+    repository: MediaJobRepository,
+    job: MediaJobRecord,
+    settings: Settings,
+    extract_result: dict[str, object],
+    platform: str,
+    uploaded_thumbnail_url: str | None,
+) -> MediaJobRecord:
+    temp_file_path = str_or_none(extract_result.get("temp_file_path"))
+    if (
+        not extract_result.get("video_bytes_verified")
+        or temp_file_path is None
+        or not Path(temp_file_path).exists()
+    ):
+        raise QueueJobFailure(
+            "video_required_for_ai",
+            "Video could not be prepared for AI analysis.",
+            stage="gemini_video_analysis",
+        )
+    if settings.gemini_api_key is None:
+        raise QueueJobFailure(
+            "gemini_video_analysis_failed",
+            "Gemini video analysis is not configured.",
+            stage="gemini_video_analysis",
+        )
+
+    model = settings.gemini_video_model or "gemini-2.5-flash"
+    resolver = str(extract_result.get("resolver") or "ytdlp_stream")
+    size_bytes = safe_int_or_none(extract_result.get("size_bytes"))
+    duration_seconds = safe_int_or_none(extract_result.get("duration_seconds"))
+    mime_type = str_or_none(extract_result.get("mime_type")) or "video/mp4"
+    api_key = settings.gemini_api_key.get_secret_value()
+    file_name: str | None = None
+
+    job = repository.update_job(
+        job.id,
+        status="analyzing",
+        progress=60,
+        thumbnail_url=uploaded_thumbnail_url,
+        error_code=None,
+        error_message=None,
+        ai_provider="gemini",
+        ai_model=model,
+    )
+    repository.insert_event(
+        job.id,
+        event_type="gemini_video_analysis_started",
+        message="Gemini video analysis started.",
+        metadata=safe_ai_event_metadata(
+            platform=platform,
+            resolver=resolver,
+            model=model,
+            duration_seconds=duration_seconds,
+            size_bytes=size_bytes,
+            video_bytes_verified=True,
+            stage="gemini_video_analysis",
+        ),
+    )
+    try:
+        file_uri, file_name = _gemini_upload_video_rest(
+            api_key=api_key,
+            file_path=temp_file_path,
+            mime_type=mime_type,
+            timeout_seconds=settings.gemini_files_upload_timeout_seconds,
+        )
+        parsed = _gemini_video_to_recipe_rest(
+            api_key=api_key,
+            model=model,
+            file_uri=file_uri,
+            mime_type=mime_type,
+            prompt=VIDEO_RECIPE_PROMPT,
+            timeout_seconds=settings.social_video_gemini_timeout_seconds,
+        )
+        _validate_parsed_recipe(
+            parsed,
+            platform=platform,
+            stage="gemini_video_analysis",
+            model=model,
+            user_message="Gemini did not return a usable recipe.",
+        )
+        result = _caption_result_to_recipe_result(parsed)
+    except ValueError as exc:
+        repository.insert_event(
+            job.id,
+            event_type="gemini_video_analysis_failed",
+            message="Gemini video analysis failed.",
+            metadata=safe_ai_event_metadata(
+                platform=platform,
+                resolver=resolver,
+                model=model,
+                duration_seconds=duration_seconds,
+                size_bytes=size_bytes,
+                video_bytes_verified=True,
+                stage="gemini_video_analysis",
+                error_code="gemini_recipe_json_invalid",
+                exception_type=type(exc).__name__,
+            ),
+        )
+        raise QueueJobFailure(
+            "gemini_recipe_json_invalid",
+            "Gemini returned an invalid recipe response.",
+            stage="gemini_video_analysis",
+            exception_type=type(exc).__name__,
+        ) from exc
+    except PipelineFailure as exc:
+        repository.insert_event(
+            job.id,
+            event_type="gemini_video_analysis_failed",
+            message="Gemini video analysis failed.",
+            metadata=safe_ai_event_metadata(
+                platform=platform,
+                resolver=resolver,
+                model=model,
+                duration_seconds=duration_seconds,
+                size_bytes=size_bytes,
+                video_bytes_verified=True,
+                stage="gemini_video_analysis",
+                error_code="gemini_recipe_json_invalid",
+                exception_type=type(exc).__name__,
+            ),
+        )
+        raise QueueJobFailure(
+            "gemini_recipe_json_invalid",
+            "Gemini returned an invalid recipe response.",
+            stage="gemini_video_analysis",
+            exception_type=type(exc).__name__,
+        ) from exc
+    except Exception as exc:
+        repository.insert_event(
+            job.id,
+            event_type="gemini_video_analysis_failed",
+            message="Gemini video analysis failed.",
+            metadata=safe_ai_event_metadata(
+                platform=platform,
+                resolver=resolver,
+                model=model,
+                duration_seconds=duration_seconds,
+                size_bytes=size_bytes,
+                video_bytes_verified=True,
+                stage="gemini_video_analysis",
+                error_code="gemini_video_analysis_failed",
+                exception_type=type(exc).__name__,
+            ),
+        )
+        if settings.real_ai_fallback_to_mock:
+            return save_mock_recipe_card_for_job(
+                repository=repository,
+                job=job,
+                settings=settings,
+                platform=platform,
+                resolver=resolver,
+                thumbnail_url=uploaded_thumbnail_url,
+                job_started_at=perf_counter(),
+                fixture_error_code="mock_fixture_failed",
+            )
+        raise QueueJobFailure(
+            "gemini_video_analysis_failed",
+            "Gemini video analysis failed.",
+            stage="gemini_video_analysis",
+            exception_type=type(exc).__name__,
+        ) from exc
+    finally:
+        if file_name:
+            _gemini_delete_file_rest(
+                api_key=api_key,
+                file_name=file_name,
+                timeout_seconds=settings.gemini_files_upload_timeout_seconds,
+            )
+
+    repository.insert_event(
+        job.id,
+        event_type="gemini_video_analysis_completed",
+        message="Gemini video analysis completed.",
+        metadata=safe_ai_event_metadata(
+            platform=platform,
+            resolver=resolver,
+            model=model,
+            duration_seconds=duration_seconds,
+            size_bytes=size_bytes,
+            video_bytes_verified=True,
+            stage="gemini_video_analysis",
+        ),
+    )
+    return save_gemini_recipe_card(
+        repository=repository,
+        job=job,
+        result=result,
+        model=model,
+        platform=platform,
+        resolver=resolver,
+        uploaded_thumbnail_url=uploaded_thumbnail_url,
+    )
+
+
+def save_gemini_recipe_card(
+    *,
+    repository: MediaJobRepository,
+    job: MediaJobRecord,
+    result: GeminiRecipeResult,
+    model: str,
+    platform: str,
+    resolver: str,
+    uploaded_thumbnail_url: str | None,
+) -> MediaJobRecord:
+    job = repository.update_job(
+        job.id,
+        status="analyzing",
+        progress=85,
+        thumbnail_url=uploaded_thumbnail_url,
+        error_code=None,
+        error_message=None,
+        ai_provider="gemini",
+        ai_model=model,
+    )
+    repository.insert_event(
+        job.id,
+        event_type="recipe_card_saving_started",
+        message="Recipe card save started.",
+        metadata={"platform": platform, "resolver": resolver, "model": model, "stage": "recipe_card_saving"},
+    )
+    try:
+        recipe_card_id = repository.insert_recipe_card(
+            job=job,
+            result=result,
+            model=model,
+        )
+    except Exception as exc:
+        raise QueueJobFailure(
+            "recipe_card_insert_failed",
+            "Recipe card could not be saved.",
+            stage="recipe_card_saving",
+            exception_type=type(exc).__name__,
+        ) from exc
+    repository.insert_event(
+        job.id,
+        event_type="recipe_card_saved",
+        message="Recipe card saved.",
+        metadata={"platform": platform, "resolver": resolver, "model": model, "stage": "recipe_card_saving"},
+    )
+    return repository.update_job(
+        job.id,
+        status="completed",
+        progress=100,
+        result_recipe_card_id=recipe_card_id,
+        ai_provider="gemini",
+        ai_model=model,
+        thumbnail_url=uploaded_thumbnail_url,
+        completed_at=datetime.now(timezone.utc).isoformat(),
+        error_code=None,
+        error_message=None,
+    )
+
+
 def safe_extract_event_metadata(
     result: dict[str, object],
     *,
@@ -477,6 +747,36 @@ def safe_extract_event_metadata(
     if error_code is not None:
         metadata["error_code"] = error_code
     return {key: value for key, value in metadata.items() if value is not None}
+
+
+def safe_ai_event_metadata(
+    *,
+    platform: str,
+    resolver: str,
+    model: str,
+    duration_seconds: int | None,
+    size_bytes: int | None,
+    video_bytes_verified: bool,
+    stage: str,
+    error_code: str | None = None,
+    exception_type: str | None = None,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "platform": platform,
+        "resolver": resolver,
+        "model": model,
+        "video_bytes_verified": video_bytes_verified,
+        "stage": stage,
+    }
+    if duration_seconds is not None:
+        metadata["duration_seconds"] = duration_seconds
+    if size_bytes is not None:
+        metadata["size_bytes"] = size_bytes
+    if error_code is not None:
+        metadata["error_code"] = error_code
+    if exception_type is not None:
+        metadata["exception_type"] = exception_type
+    return metadata
 
 
 def emit_extractor_progress_events(
@@ -594,6 +894,8 @@ def error_code_for_stage(stage: str) -> str:
         return "mock_fixture_failed"
     if stage == "metadata_fallback":
         return "metadata_unavailable"
+    if stage == "gemini_video_analysis":
+        return "gemini_video_analysis_failed"
     return "queue_job_failed"
 
 
@@ -612,6 +914,8 @@ def safe_message_for_stage(stage: str) -> str:
         return "This social video could not be processed."
     if stage == "metadata_fallback":
         return "This social video could not be accessed publicly."
+    if stage == "gemini_video_analysis":
+        return "Gemini video analysis failed."
     return "Queue worker failed while processing this recipe."
 
 
@@ -689,3 +993,10 @@ def add_event_safely(
 
 def str_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def safe_int_or_none(value: object) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None

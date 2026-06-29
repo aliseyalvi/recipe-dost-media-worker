@@ -17,7 +17,7 @@ WorkerMode = Literal[
 MediaPipelineMode = Literal["youtube_direct", "social_stream"]
 GeminiSocialUploadMode = Literal["files_api", "inline"]
 SocialAnalysisMode = Literal["text_first", "video_first", "video_only"]
-AIAnalysisMode = Literal["gemini", "mock_fixture"]
+AIAnalysisMode = Literal["gemini", "mock_fixture", "gemini_video_poc"]
 MockVideoProcessingMode = Literal["skip_video_download", "download_then_mock"]
 YouTubeResolver = Literal["ytdlp"]
 InstagramResolver = Literal["snapinsta"]
@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     gemini_social_upload_mode: GeminiSocialUploadMode = "files_api"
     max_job_runtime_seconds: int = 240
     ai_analysis_mode: AIAnalysisMode = "gemini"
+    real_ai_fallback_to_mock: bool = False
     mock_recipe_fixture_path: str = "app/fixtures/mock_recipe_card.json"
     mock_analysis_delay_ms: int = 500
     mock_video_processing_mode: MockVideoProcessingMode = "skip_video_download"
@@ -157,7 +158,7 @@ class Settings(BaseSettings):
 
     @property
     def effective_gemini_video_model(self) -> str:
-        return self.gemini_video_model or self.gemini_model or "gemini-3.5-flash"
+        return self.gemini_video_model or "gemini-2.5-flash"
 
     @property
     def effective_gemini_text_model(self) -> str:
@@ -252,7 +253,11 @@ class Settings(BaseSettings):
     @classmethod
     def fallback_unknown_ai_analysis_mode(cls, value: object) -> object:
         normalized = str(value).strip().lower()
-        return normalized if normalized in {"gemini", "mock_fixture"} else "gemini"
+        return (
+            normalized
+            if normalized in {"gemini", "mock_fixture", "gemini_video_poc"}
+            else "gemini"
+        )
 
     @field_validator("mock_video_processing_mode", mode="before")
     @classmethod

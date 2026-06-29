@@ -281,3 +281,26 @@ PY
 grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url\|COOKIES_B64\|cookies.txt" -n app docs || true
 # matched existing/app intentional cookie file paths, generated __pycache__, and historical commands-log entries; no source-code public CDN storage match
 ```
+
+## W-M16G-POC Validation
+
+```bash
+python3 -m compileall app
+# passed
+
+env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python -m compileall app
+# passed
+
+WORKER_API_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test AI_ANALYSIS_MODE=gemini_video_poc .venv/bin/python - <<'PY'
+from app.config import Settings
+s = Settings()
+assert s.ai_analysis_mode == "gemini_video_poc"
+assert s.effective_gemini_video_model
+assert s.real_ai_fallback_to_mock is False
+print("gemini_video_poc settings smoke passed")
+PY
+# passed
+
+grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url\|COOKIES_B64\|cookies.txt" -n app docs || true
+# matched existing/app intentional cookie file paths, generated __pycache__, and historical commands-log entries; no source-code public CDN storage match
+```
