@@ -28,6 +28,9 @@ class HealthResponse(BaseModel):
     gemini_file_upload_timeout_seconds: int
     gemini_file_poll_interval_seconds: int
     gemini_file_max_wait_seconds: int
+    gemini_save_mode: str
+    gemini_json_retry_enabled: bool
+    gemini_json_fallback_enabled: bool
     supported_platforms: list[str]
     youtube_resolver: str
     instagram_resolver: str

@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     gemini_file_upload_timeout_seconds: int = 120
     gemini_file_poll_interval_seconds: int = 5
     gemini_file_max_wait_seconds: int = 120
+    gemini_save_mode: str = "brief_json_with_local_fallback"
+    gemini_json_retry_enabled: bool = True
+    gemini_json_fallback_enabled: bool = True
     max_job_runtime_seconds: int = 240
     ai_analysis_mode: AIAnalysisMode = "gemini"
     real_ai_fallback_to_mock: bool = False

@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -553,8 +554,6 @@ def wait_for_gemini_file_active(
         sleep_seconds = max(1, settings.gemini_file_poll_interval_seconds)
         if perf_counter() + sleep_seconds > deadline:
             break
-        import time
-
         time.sleep(sleep_seconds)
         files_api = getattr(client, "files")
         try:
@@ -657,7 +656,11 @@ def generate_recipe_json(*, client: object, model: str, brief: str) -> dict:
         response = client.models.generate_content(
             model=model,
             contents=[prompt],
-            config={"response_mime_type": "application/json"},
+            config={
+                "response_mime_type": "application/json",
+                "temperature": 0.1,
+                "max_output_tokens": 2048,
+            },
         )
     except TypeError:
         response = client.models.generate_content(model=model, contents=[prompt])
@@ -673,6 +676,219 @@ def generate_recipe_json(*, client: object, model: str, brief: str) -> dict:
     if not required.issubset(parsed):
         raise ValueError("Recipe JSON missing required keys.")
     return parsed
+
+
+def exception_status(exc: Exception) -> int | None:
+    for name in ("status_code", "code"):
+        value = getattr(exc, name, None)
+        if isinstance(value, int):
+            return value
+    response = getattr(exc, "response", None)
+    value = getattr(response, "status_code", None)
+    return value if isinstance(value, int) else None
+
+
+def is_retryable_json_error(exc: Exception) -> bool:
+    status = exception_status(exc)
+    if status is not None and status >= 500:
+        return True
+    return type(exc).__name__ in {"ServerError", "InternalServerError"}
+
+
+def normalize_recipe_json(parsed: dict) -> dict:
+    ingredients = []
+    for item in parsed.get("ingredients") or []:
+        if isinstance(item, dict):
+            text = " ".join(
+                str(item.get(key) or "").strip()
+                for key in ("quantity", "name", "notes")
+                if item.get(key)
+            ).strip()
+            if text:
+                ingredients.append(text)
+        elif str(item).strip():
+            ingredients.append(str(item).strip())
+    steps = []
+    for item in parsed.get("steps") or []:
+        if isinstance(item, dict):
+            text = str(item.get("text") or "").strip()
+            if text:
+                steps.append(text)
+        elif str(item).strip():
+            steps.append(str(item).strip())
+    return {
+        "title": str(parsed.get("title") or "AI Recipe from Video").strip(),
+        "summary": str(parsed.get("summary") or "").strip(),
+        "ingredients": ingredients,
+        "steps": steps,
+        "prep_time_minutes": parsed.get("prep_time_minutes"),
+        "cook_time_minutes": parsed.get("cook_time_minutes"),
+        "servings": parsed.get("servings"),
+        "difficulty": parsed.get("difficulty"),
+        "cuisine": parsed.get("cuisine"),
+        "tags": parsed.get("tags") if isinstance(parsed.get("tags"), list) else [],
+    }
+
+
+def fallback_recipe_json_from_brief(
+    brief_text: str,
+    source_metadata: dict[str, object],
+) -> dict:
+    title = str(source_metadata.get("title") or "").strip()
+    if not title:
+        title = next(
+            (line.strip("#:- ") for line in brief_text.splitlines() if line.strip()),
+            "AI Recipe from Video",
+        )
+    platform = str(source_metadata.get("platform") or "").strip().lower()
+    tags = ["ai-video-recipe"]
+    if platform:
+        tags.append(platform)
+    return {
+        "title": title or "AI Recipe from Video",
+        "summary": brief_text.strip(),
+        "ingredients": [],
+        "steps": [brief_text.strip()],
+        "prep_time_minutes": None,
+        "cook_time_minutes": None,
+        "servings": None,
+        "difficulty": None,
+        "cuisine": None,
+        "tags": tags,
+    }
+
+
+def convert_brief_to_recipe_json(
+    brief_text: str,
+    source_metadata: dict[str, object],
+    settings: Settings,
+    *,
+    client: object,
+    repository: MediaJobRepository,
+    job: MediaJobRecord,
+    event_metadata: dict[str, object],
+) -> tuple[dict, str]:
+    primary_model = settings.gemini_text_model or settings.effective_gemini_video_model
+    models = [primary_model]
+    if primary_model != "gemini-2.5-flash":
+        models.append("gemini-2.5-flash")
+    last_exc: Exception | None = None
+    retry_count = 0
+    for model_name in models:
+        attempts = 3 if settings.gemini_json_retry_enabled else 1
+        for attempt in range(attempts):
+            try:
+                parsed = normalize_recipe_json(
+                    generate_recipe_json(client=client, model=model_name, brief=brief_text)
+                )
+                if not parsed["title"] or not parsed["steps"]:
+                    raise ValueError("Recipe JSON missing usable title or steps.")
+                repository.insert_event(
+                    job.id,
+                    event_type="gemini_recipe_json_completed",
+                    message="Gemini recipe JSON completed.",
+                    metadata={
+                        **event_metadata,
+                        "model": model_name,
+                        "json_keys_count": len(parsed.keys()),
+                        "ingredients_count": len(parsed["ingredients"]),
+                        "steps_count": len(parsed["steps"]),
+                        "retry_count": retry_count,
+                        "save_mode": "gemini_json",
+                    },
+                )
+                return parsed, "gemini_json"
+            except (ValueError, QueueJobFailure) as exc:
+                last_exc = exc
+                break
+            except Exception as exc:
+                last_exc = exc
+                if not is_retryable_json_error(exc) or attempt == attempts - 1:
+                    break
+                retry_count += 1
+                repository.insert_event(
+                    job.id,
+                    event_type="gemini_recipe_json_retry",
+                    message="Gemini recipe JSON retry.",
+                    metadata={
+                        **event_metadata,
+                        "model": model_name,
+                        "retry_count": retry_count,
+                        "error_code": "gemini_recipe_json_failed",
+                        "exception_type": type(exc).__name__,
+                        "http_status": exception_status(exc),
+                    },
+                )
+                time.sleep(min(2, 0.5 * (2 ** (retry_count - 1))))
+        retry_count += 1
+        if model_name != models[-1]:
+            repository.insert_event(
+                job.id,
+                event_type="gemini_recipe_json_retry",
+                message="Gemini recipe JSON retry with fallback model.",
+                metadata={
+                    **event_metadata,
+                    "model": model_name,
+                    "fallback_model": models[-1],
+                    "retry_count": retry_count,
+                    "error_code": "gemini_recipe_json_failed",
+                    "exception_type": type(last_exc).__name__ if last_exc else None,
+                    "http_status": exception_status(last_exc) if last_exc else None,
+                },
+            )
+    repository.insert_event(
+        job.id,
+        event_type="gemini_recipe_json_failed",
+        message="Gemini recipe JSON failed.",
+        metadata={
+            **event_metadata,
+            "model": models[-1],
+            "retry_count": retry_count,
+            "error_code": (
+                last_exc.code
+                if isinstance(last_exc, QueueJobFailure)
+                else "gemini_recipe_json_invalid"
+            ),
+            "exception_type": type(last_exc).__name__ if last_exc else None,
+            "http_status": exception_status(last_exc) if last_exc else None,
+        },
+    )
+    if not settings.gemini_json_fallback_enabled:
+        raise QueueJobFailure(
+            "gemini_recipe_json_invalid",
+            "Gemini returned an invalid recipe response.",
+            stage="gemini_recipe_json",
+            exception_type=type(last_exc).__name__ if last_exc else None,
+        )
+    repository.insert_event(
+        job.id,
+        event_type="brief_card_build_started",
+        message="Brief card build started.",
+        metadata={**event_metadata, "save_mode": "local_brief_fallback"},
+    )
+    fallback = fallback_recipe_json_from_brief(brief_text, source_metadata)
+    repository.insert_event(
+        job.id,
+        event_type="gemini_recipe_json_fallback_used",
+        message="Gemini recipe JSON fallback used.",
+        metadata={
+            **event_metadata,
+            "save_mode": "local_brief_fallback",
+            "text_length": len(brief_text),
+        },
+    )
+    repository.insert_event(
+        job.id,
+        event_type="brief_card_build_completed",
+        message="Brief card build completed.",
+        metadata={
+            **event_metadata,
+            "save_mode": "local_brief_fallback",
+            "ingredients_count": len(fallback["ingredients"]),
+            "steps_count": len(fallback["steps"]),
+        },
+    )
+    return fallback, "local_brief_fallback"
 
 
 def recipe_json_to_caption_shape(parsed: dict) -> dict:
@@ -864,25 +1080,25 @@ def run_gemini_video_poc_analysis(
             message="Gemini recipe JSON started.",
             metadata=json_metadata,
         )
-        parsed = generate_recipe_json(
+        parsed, save_mode = convert_brief_to_recipe_json(
+            brief,
+            extract_result,
+            settings,
             client=client,
-            model=text_model,
-            brief=brief,
+            repository=repository,
+            job=job,
+            event_metadata=json_metadata,
         )
         parsed = recipe_json_to_caption_shape(parsed)
-        _validate_parsed_recipe(
-            parsed,
-            platform=platform,
-            stage="gemini_recipe_json",
-            model=text_model,
-            user_message="Gemini did not return a usable recipe.",
-        )
-        repository.insert_event(
-            job.id,
-            event_type="gemini_recipe_json_completed",
-            message="Gemini recipe JSON completed.",
-            metadata={**json_metadata, "json_keys_count": len(parsed.keys())},
-        )
+        if save_mode != "local_brief_fallback":
+            _validate_parsed_recipe(
+                parsed,
+                platform=platform,
+                stage="gemini_recipe_json",
+                model=text_model,
+                user_message="Gemini did not return a usable recipe.",
+            )
+        parsed["save_mode"] = save_mode
         result = _caption_result_to_recipe_result(parsed)
     except QueueJobFailure as exc:
         if exc.code == "gemini_video_brief_empty":
