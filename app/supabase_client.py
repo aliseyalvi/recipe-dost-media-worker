@@ -30,6 +30,19 @@ class MediaJobRepository:
             return None
         return MediaJobRecord.model_validate(response.data[0])
 
+    def get_oldest_queued_job(self) -> MediaJobRecord | None:
+        response = (
+            self._client.table("media_jobs")
+            .select(MEDIA_JOB_SELECT)
+            .eq("status", "queued")
+            .order("created_at", desc=False)
+            .limit(1)
+            .execute()
+        )
+        if not response.data:
+            return None
+        return MediaJobRecord.model_validate(response.data[0])
+
     def update_job(
         self,
         media_job_id: UUID,
@@ -145,6 +158,21 @@ class MediaJobRepository:
                 "metadata": metadata or {},
             }
         ).execute()
+
+    def add_event(
+        self,
+        media_job_id: UUID,
+        *,
+        event_type: str,
+        message: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.insert_event(
+            media_job_id,
+            event_type=event_type,
+            message=message,
+            metadata=metadata,
+        )
 
     def count_job_gemini_calls(
         self,

@@ -22,6 +22,8 @@ MockVideoProcessingMode = Literal["skip_video_download", "download_then_mock"]
 YouTubeResolver = Literal["ytdlp"]
 InstagramResolver = Literal["snapinsta"]
 FacebookResolver = Literal["snapsave"]
+WorkerExecutionMode = Literal["webhook", "queue"]
+MediaExtractOutputMode = Literal["temp_file", "memory_buffer"]
 
 
 class Settings(BaseSettings):
@@ -97,6 +99,11 @@ class Settings(BaseSettings):
     youtube_resolver: YouTubeResolver = "ytdlp"
     instagram_resolver: InstagramResolver = "snapinsta"
     facebook_resolver: FacebookResolver = "snapsave"
+    worker_execution_mode: WorkerExecutionMode = "webhook"
+    queue_poll_interval_seconds: int = 5
+    queue_empty_sleep_seconds: int = 5
+    enable_unified_ytdlp_stream_extractor: bool = False
+    media_extract_output_mode: MediaExtractOutputMode = "temp_file"
     snapinsta_api_url: str = "https://snapinsta.app"
     snapsave_api_url: str = "https://snapsave.app"
     tikwm_api_url: str = "https://www.tikwm.com/api/"
@@ -257,6 +264,18 @@ class Settings(BaseSettings):
     def fallback_unknown_facebook_resolver(cls, value: object) -> object:
         normalized = str(value).strip().lower()
         return normalized if normalized == "snapsave" else "snapsave"
+
+    @field_validator("worker_execution_mode", mode="before")
+    @classmethod
+    def fallback_unknown_worker_execution_mode(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return normalized if normalized in {"webhook", "queue"} else "webhook"
+
+    @field_validator("media_extract_output_mode", mode="before")
+    @classmethod
+    def fallback_unknown_media_extract_output_mode(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return normalized if normalized in {"temp_file", "memory_buffer"} else "temp_file"
 
 
 @lru_cache

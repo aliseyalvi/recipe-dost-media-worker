@@ -20,6 +20,7 @@
 - W-M15D0 adds `AI_ANALYSIS_MODE=mock_fixture` for quota-free TikTok development testing. TikWM resolution, duration guard, thumbnail upload, Supabase job updates, and recipe-card save stay real. Gemini text/video calls and Gemini quota guards are skipped. Expected mock events are `mock_ai_analysis_started` and `mock_ai_analysis_completed`; final job status should be `completed` progress `100` with `result_recipe_card_id`.
 - W-M15D1 saves resolver metadata after TikWM completes. Public `source_metadata` is app-visible and contains title/description/duration/thumbnail/media flags only. Private `media_job_private_metadata` stores the CDN URL and raw resolver metadata. Metadata write failures emit `source_metadata_update_failed` or `private_metadata_save_failed` and do not fail the recipe job.
 - W-M15D2 adds the mock-mode resolver matrix without Cobalt. TikTok keeps TikWM. YouTube uses yt-dlp metadata with no download. Instagram and Facebook use shallow experimental SnapInsta/SnapSave adapters behind disabled-by-default Render flags. Successful mock-mode resolver jobs save public/private metadata, upload thumbnails when available, save the mock fixture recipe, and complete without Gemini events.
+- W-M16Q-POC adds `WORKER_EXECUTION_MODE=queue`. In queue mode the FastAPI startup task polls the oldest `queued` row, claims one job as `resolving`, uses unified `yt-dlp` extraction to create either a temp file or memory buffer, saves public/private metadata, uploads a thumbnail when available, saves the mock fixture recipe, and deletes temp media before polling again. The `/process-job` webhook path remains unchanged outside queue mode.
 
 ## TikTok / TikWM Finding
 
@@ -49,6 +50,7 @@ TikWM debug was proven from Cloud Run. TikTok full jobs now use TikWM text-first
 - CDN URLs must exist only in `media_job_private_metadata`; public source metadata and events may contain only boolean CDN flags.
 - SnapInsta/SnapSave parsing is intentionally minimal: JSON first, then obvious OpenGraph/direct media links only. Unreliable pages should fail controlled with `instagram_resolver_failed` or `facebook_resolver_failed`.
 - The old "Automatic video analysis is currently available for YouTube" fallback is only for truly unsupported platforms and must not catch TikTok.
+- Queue mode never calls Gemini in this POC. Expected extractor failures should become terminal `failed` jobs with `video_duration_exceeded`, `media_size_exceeded`, or `unified_extractor_failed`, not `worker_error` or `background_worker_error`.
 
 ## Expected `/debug/tikwm` Shape
 
@@ -99,6 +101,7 @@ Full test plan:
 - TikTok text-first: expect `worker_started`, `tikwm_resolver_started`, `tikwm_resolver_completed`, `thumbnail_upload_started`, `thumbnail_uploaded` or `thumbnail_upload_failed`, `social_text_analysis_started`, `gemini_api_call_started`, `gemini_api_call_completed`, `social_text_analysis_completed`, `recipe_card_saved`, and `completed`; or a controlled failure.
 - TikTok mock fixture: with `AI_ANALYSIS_MODE=mock_fixture`, expect `worker_started`, `tikwm_resolver_started`, `tikwm_resolver_completed`, `thumbnail_upload_started`, `thumbnail_uploaded` or `thumbnail_upload_failed`, `mock_ai_analysis_started`, `mock_ai_analysis_completed`, `recipe_card_saved`, and `completed`; no `gemini_api_call_started` event should be emitted.
 - TikTok metadata persistence: expect `private_metadata_saved`, `source_metadata_update_started`, and `source_metadata_updated`; after thumbnail upload succeeds, `source_metadata_updated` may appear again with the uploaded thumbnail URL folded into public metadata.
+- Queue mode mock fixture: with `WORKER_EXECUTION_MODE=queue` and `ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true`, expect `queue_loop_started`, `queue_job_claimed`, `unified_extractor_started`, `unified_extractor_completed`, `private_metadata_saved`, `source_metadata_updated`, optional `thumbnail_uploaded`, `mock_ai_analysis_started`, `mock_ai_analysis_completed`, `recipe_card_saved`, `queue_job_completed`, and `temp_video_deleted` when a temp file was created. No Gemini events should be emitted.
 - YouTube mock fixture: with `AI_ANALYSIS_MODE=mock_fixture`, expect `platform_resolver_started`, `platform_resolver_completed`, metadata events, optional thumbnail upload, `mock_ai_analysis_started`, `mock_ai_analysis_completed`, `recipe_card_saved`, and `completed`; no `gemini_api_call_started`.
 - Instagram/Facebook mock fixture: with default flags, expect `instagram_resolver_disabled` or `facebook_resolver_disabled`; when enabled, expect completion only if SnapInsta/SnapSave returns parseable metadata/direct media.
 - TikTok with missing/thin title fails with `social_caption_missing` before stream download.

@@ -83,6 +83,11 @@ class HealthResponse(BaseModel):
     enable_cobalt_resolver: bool
     cobalt_configured: bool
     cobalt_enabled_platforms: list[str]
+    worker_execution_mode: str
+    queue_loop_enabled: bool
+    queue_poll_interval_seconds: int
+    enable_unified_ytdlp_stream_extractor: bool
+    media_extract_output_mode: str
 
 
 class MediaJobData(BaseModel):

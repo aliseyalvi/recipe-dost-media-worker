@@ -220,3 +220,26 @@ python3 -m compileall app
 grep -R "cdn_url.*source_metadata|source_metadata.*cdn_url|temporary_download_url" -n app docs || true
 # matched only this historical commands-log entry
 ```
+
+## W-M16Q-POC Validation
+
+```bash
+python3 -m compileall app
+# passed
+
+env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python -m compileall app
+# passed
+
+rg -n "cdn_download_url|cdn_url|source_url|stream_url" app/queue_worker.py app/social/stream_download.py
+# passed: queue events/public metadata use only CDN booleans; private metadata stores cdn_url
+
+WORKER_API_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test WORKER_EXECUTION_MODE=queue ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true MEDIA_EXTRACT_OUTPUT_MODE=temp_file .venv/bin/python - <<'PY'
+from app.config import Settings
+s = Settings()
+assert s.worker_execution_mode == "queue"
+assert s.enable_unified_ytdlp_stream_extractor is True
+assert s.media_extract_output_mode == "temp_file"
+print("settings smoke passed")
+PY
+# passed
+```

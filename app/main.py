@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import asyncio
 import json
 import logging
 from pydantic import BaseModel
@@ -15,6 +16,7 @@ from fastapi.responses import JSONResponse
 from app.ai.gemini_recipe import GeminiRecipeAnalyzer
 from app.config import Settings, get_settings
 from app.job_runner import JobNotFoundError, JobRunner, WorkerProcessingError
+from app.queue_worker import run_queue_loop
 from app.schemas import (
     ErrorDetail,
     ErrorResponse,
@@ -36,6 +38,7 @@ logger = logging.getLogger("recipe_dost.worker")
 
 PROCESSING_STATUSES = {"resolving", "downloading", "analyzing"}
 INITIAL_JOB_STATUS = "queued"
+queue_task: asyncio.Task[None] | None = None
 
 
 class JsonFormatter(logging.Formatter):
@@ -194,7 +197,45 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         enable_cobalt_resolver=settings.enable_cobalt_resolver,
         cobalt_configured=settings.cobalt_configured,
         cobalt_enabled_platforms=settings.cobalt_enabled_platforms,
+        worker_execution_mode=settings.worker_execution_mode,
+        queue_loop_enabled=settings.worker_execution_mode == "queue"
+        and queue_task is not None
+        and not queue_task.done(),
+        queue_poll_interval_seconds=settings.queue_poll_interval_seconds,
+        enable_unified_ytdlp_stream_extractor=(
+            settings.enable_unified_ytdlp_stream_extractor
+        ),
+        media_extract_output_mode=settings.media_extract_output_mode,
     )
+
+
+@app.get("/ping")
+def ping() -> dict[str, bool]:
+    return {"ok": True}
+
+
+@app.on_event("startup")
+async def start_queue_worker() -> None:
+    global queue_task
+    settings = get_settings()
+    if settings.worker_execution_mode != "queue":
+        return
+    if queue_task is not None and not queue_task.done():
+        return
+    queue_task = asyncio.create_task(run_queue_loop(build_job_runner))
+
+
+@app.on_event("shutdown")
+async def stop_queue_worker() -> None:
+    global queue_task
+    if queue_task is None:
+        return
+    queue_task.cancel()
+    try:
+        await queue_task
+    except asyncio.CancelledError:
+        pass
+    queue_task = None
 
 
 def build_job_runner(settings: Settings) -> JobRunner:
