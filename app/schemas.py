@@ -31,6 +31,8 @@ class HealthResponse(BaseModel):
     gemini_save_mode: str
     gemini_json_retry_enabled: bool
     gemini_json_fallback_enabled: bool
+    recipe_card_normalization_enabled: bool
+    allow_private_metadata_failure: bool
     enable_queue_wake_endpoint: bool
     youtube_ai_input_mode: str
     youtube_metadata_mode: str

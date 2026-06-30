@@ -59,9 +59,11 @@ class Settings(BaseSettings):
     gemini_file_upload_timeout_seconds: int = 120
     gemini_file_poll_interval_seconds: int = 5
     gemini_file_max_wait_seconds: int = 120
-    gemini_save_mode: str = "brief_json_with_local_fallback"
+    gemini_save_mode: str = "structured_json_with_brief_fallback"
     gemini_json_retry_enabled: bool = True
     gemini_json_fallback_enabled: bool = True
+    recipe_card_normalization_enabled: bool = True
+    allow_private_metadata_failure: bool = True
     enable_queue_wake_endpoint: bool = True
     youtube_ai_input_mode: YouTubeAIInputMode = "gemini_url"
     youtube_metadata_mode: YouTubeMetadataMode = "oembed"

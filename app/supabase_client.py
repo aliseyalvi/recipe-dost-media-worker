@@ -7,7 +7,6 @@ from uuid import UUID
 from supabase import Client, create_client
 
 from app.config import Settings
-from app.ai.gemini_recipe import PROMPT_VERSION
 from app.schemas import GeminiRecipeResult, MediaJobRecord
 
 MEDIA_JOB_SELECT = (
@@ -337,7 +336,7 @@ class MediaJobRepository:
                     "confidence": result.confidence,
                     "source_link": job.source_url,
                     "model_used": model,
-                    "prompt_version": PROMPT_VERSION,
+                    "prompt_version": "m18_recipe_video_v1",
                 }
             )
             .select("id")
