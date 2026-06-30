@@ -141,6 +141,9 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         gemini_save_mode=settings.gemini_save_mode,
         gemini_json_retry_enabled=settings.gemini_json_retry_enabled,
         gemini_json_fallback_enabled=settings.gemini_json_fallback_enabled,
+        enable_queue_wake_endpoint=settings.enable_queue_wake_endpoint,
+        youtube_ai_input_mode=settings.youtube_ai_input_mode,
+        youtube_metadata_mode=settings.youtube_metadata_mode,
         supported_platforms=["tiktok", "youtube", "instagram", "facebook"],
         youtube_resolver=settings.youtube_resolver,
         instagram_resolver=settings.instagram_resolver,
@@ -250,15 +253,38 @@ def ping() -> dict[str, bool]:
     return {"ok": True}
 
 
-@app.on_event("startup")
-async def start_queue_worker() -> None:
+def queue_loop_enabled(settings: Settings) -> bool:
+    return (
+        settings.worker_execution_mode == "queue"
+        and queue_task is not None
+        and not queue_task.done()
+    )
+
+
+def ensure_queue_worker_started(settings: Settings) -> None:
     global queue_task
-    settings = get_settings()
     if settings.worker_execution_mode != "queue":
         return
     if queue_task is not None and not queue_task.done():
         return
     queue_task = asyncio.create_task(run_queue_loop(build_job_runner))
+
+
+@app.get("/wake")
+async def wake(settings: Settings = Depends(get_settings)) -> dict[str, object]:
+    logger.info("queue_wake_received")
+    if settings.enable_queue_wake_endpoint:
+        ensure_queue_worker_started(settings)
+    return {
+        "ok": True,
+        "worker_execution_mode": settings.worker_execution_mode,
+        "queue_loop_enabled": queue_loop_enabled(settings),
+    }
+
+
+@app.on_event("startup")
+async def start_queue_worker() -> None:
+    ensure_queue_worker_started(get_settings())
 
 
 @app.on_event("shutdown")

@@ -26,6 +26,8 @@ InstagramResolver = Literal["snapinsta"]
 FacebookResolver = Literal["snapsave"]
 WorkerExecutionMode = Literal["webhook", "queue"]
 MediaExtractOutputMode = Literal["temp_file", "memory_buffer"]
+YouTubeAIInputMode = Literal["gemini_url", "ytdlp"]
+YouTubeMetadataMode = Literal["oembed"]
 
 
 class Settings(BaseSettings):
@@ -60,6 +62,9 @@ class Settings(BaseSettings):
     gemini_save_mode: str = "brief_json_with_local_fallback"
     gemini_json_retry_enabled: bool = True
     gemini_json_fallback_enabled: bool = True
+    enable_queue_wake_endpoint: bool = True
+    youtube_ai_input_mode: YouTubeAIInputMode = "gemini_url"
+    youtube_metadata_mode: YouTubeMetadataMode = "oembed"
     max_job_runtime_seconds: int = 240
     ai_analysis_mode: AIAnalysisMode = "gemini"
     real_ai_fallback_to_mock: bool = False
@@ -264,6 +269,18 @@ class Settings(BaseSettings):
             if normalized == "two_step_brief_then_json"
             else "two_step_brief_then_json"
         )
+
+    @field_validator("youtube_ai_input_mode", mode="before")
+    @classmethod
+    def fallback_unknown_youtube_ai_input_mode(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return normalized if normalized in {"gemini_url", "ytdlp"} else "gemini_url"
+
+    @field_validator("youtube_metadata_mode", mode="before")
+    @classmethod
+    def fallback_unknown_youtube_metadata_mode(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return normalized if normalized == "oembed" else "oembed"
 
     @field_validator("social_analysis_mode", mode="before")
     @classmethod

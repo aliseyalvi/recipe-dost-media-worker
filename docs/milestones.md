@@ -29,9 +29,10 @@
 | 25 | W-M16G-C1 Gemini Files API video analysis | Done | Queue Gemini POC uses the official google-genai Files API, waits for ACTIVE, analyzes the verified temp file, and saves the recipe card |
 | 26 | W-M16G-C2 Two-step Gemini video recipe pipeline | Done | Queue Gemini POC extracts a plain video recipe brief first, then converts that brief to strict recipe JSON |
 | 27 | W-M16G-C3 Robust Gemini JSON conversion with brief fallback | Done | Queue Gemini POC retries text JSON conversion and falls back to a local recipe card from the successful brief |
-| 28 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 29 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 30 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 28 | M17A Queue wake endpoint + YouTube Gemini URL | Done | `/wake` starts the queue loop without processing inline, and YouTube queue Gemini uses native URL input instead of yt-dlp |
+| 29 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 30 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 31 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
@@ -56,3 +57,4 @@ Deploy and rerun M14G-4R2 after W-M14R1:
 - W-M16G-C1 switches queue Gemini POC upload/read to the official `google-genai` Files API with `GEMINI_VIDEO_INPUT_MODE=file_api`, sanitized file upload/processing/analysis events, ACTIVE polling, specific Gemini/file error codes, and no CDN URL/source URL/cookie path/temp path/prompt/raw response/file reference in events or public metadata.
 - W-M16G-C2 changes queue Gemini POC from direct video-to-JSON to two steps: video file to plain recipe brief, then brief to strict JSON. Empty brief/JSON responses now fail with specific codes and safe diagnostics.
 - W-M16G-C3 makes brief-to-card robust: JSON conversion retries transient Gemini server failures, falls back from flash-lite to flash, and if conversion still fails builds a local recipe card from the successful brief so the job can complete.
+- M17A adds `GET /wake` for Render Free wakeups and routes YouTube queue Gemini jobs through oEmbed metadata plus native Gemini YouTube URL input, skipping yt-dlp downloads and preserving the existing TikTok/Instagram temp-file path.

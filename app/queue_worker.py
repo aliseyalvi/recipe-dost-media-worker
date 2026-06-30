@@ -9,7 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Callable
+from urllib.parse import quote
 from uuid import UUID
+
+import requests
 
 from app.config import Settings, get_settings
 from app.job_runner import (
@@ -88,6 +91,18 @@ def process_next_queued_job() -> bool:
     return True
 
 
+def should_use_youtube_gemini_url(
+    job: MediaJobRecord,
+    settings: Settings,
+    platform: str,
+) -> bool:
+    return (
+        platform == "youtube"
+        and settings.ai_analysis_mode == "gemini_video_poc"
+        and settings.youtube_ai_input_mode == "gemini_url"
+    )
+
+
 def process_queue_job(
     repository: MediaJobRepository,
     settings: Settings,
@@ -127,6 +142,29 @@ def process_queue_job(
             },
         )
 
+        platform = platform_for_job(job)
+        if should_use_youtube_gemini_url(job, settings, platform):
+            current_stage = "youtube_gemini_url"
+            job = process_youtube_gemini_url_job(
+                repository=repository,
+                settings=settings,
+                job=job,
+                platform=platform,
+                started_at=started_at,
+            )
+            add_event(
+                repository,
+                job.id,
+                "queue_job_completed",
+                "Queue job completed.",
+                {
+                    "platform": platform,
+                    "resolver": "youtube_oembed",
+                    "elapsed_ms": int((perf_counter() - started_at) * 1000),
+                },
+            )
+            return
+
         if not settings.enable_unified_ytdlp_stream_extractor:
             current_stage = "unified_extractor"
             add_event(
@@ -146,7 +184,6 @@ def process_queue_job(
                 stage=current_stage,
             )
 
-        platform = platform_for_job(job)
         current_stage = "unified_extractor"
         add_event(
             repository,
@@ -478,6 +515,195 @@ def upload_thumbnail_best_effort(
         return None
 
 
+def fetch_youtube_oembed(source_url: str) -> dict[str, object]:
+    response = requests.get(
+        "https://www.youtube.com/oembed"
+        f"?url={quote(source_url, safe='')}&format=json",
+        timeout=10,
+    )
+    response.raise_for_status()
+    body = response.json()
+    return body if isinstance(body, dict) else {}
+
+
+def youtube_oembed_result(body: dict[str, object]) -> dict[str, object]:
+    return {
+        "success": True,
+        "platform": "youtube",
+        "resolver": "youtube_oembed",
+        "title": body.get("title"),
+        "description": body.get("title"),
+        "author_username": body.get("author_name"),
+        "thumbnail_url": body.get("thumbnail_url"),
+        "resolution_mode": "gemini_url",
+        "video_bytes_verified": False,
+        "output_mode": "gemini_url",
+        "cookie_mode": "none",
+    }
+
+
+def minimal_youtube_result() -> dict[str, object]:
+    return {
+        "success": True,
+        "platform": "youtube",
+        "resolver": "youtube_oembed",
+        "resolution_mode": "gemini_url",
+        "video_bytes_verified": False,
+        "output_mode": "gemini_url",
+        "cookie_mode": "none",
+    }
+
+
+def process_youtube_gemini_url_job(
+    *,
+    repository: MediaJobRepository,
+    settings: Settings,
+    job: MediaJobRecord,
+    platform: str,
+    started_at: float,
+) -> MediaJobRecord:
+    if settings.gemini_api_key is None:
+        raise QueueJobFailure(
+            "gemini_api_key_missing",
+            "Gemini video analysis is not configured.",
+            stage="youtube_gemini_url",
+        )
+    add_event(
+        repository,
+        job.id,
+        "youtube_metadata_started",
+        "YouTube metadata lookup started.",
+        {"platform": platform, "resolver": "youtube_oembed"},
+    )
+    try:
+        extract_result = youtube_oembed_result(fetch_youtube_oembed(job.source_url))
+    except Exception as exc:
+        extract_result = minimal_youtube_result()
+        extract_result["metadata_error_type"] = type(exc).__name__
+    add_event(
+        repository,
+        job.id,
+        "youtube_metadata_completed",
+        "YouTube metadata lookup completed.",
+        {
+            "platform": platform,
+            "resolver": "youtube_oembed",
+            "title_present": bool(extract_result.get("title")),
+            "has_thumbnail": bool(extract_result.get("thumbnail_url")),
+            "error_code": (
+                "youtube_oembed_failed"
+                if extract_result.get("metadata_error_type")
+                else None
+            ),
+            "exception_type": extract_result.get("metadata_error_type"),
+        },
+    )
+    uploaded_thumbnail_url = upload_thumbnail_best_effort(
+        repository,
+        settings,
+        job,
+        str_or_none(extract_result.get("thumbnail_url")),
+    )
+    save_metadata(repository, job.id, extract_result, uploaded_thumbnail_url)
+    update_job_source_fields(repository, job.id, extract_result, uploaded_thumbnail_url)
+
+    video_model = settings.effective_gemini_video_model
+    job = repository.update_job(
+        job.id,
+        status="analyzing",
+        progress=60,
+        thumbnail_url=uploaded_thumbnail_url,
+        error_code=None,
+        error_message=None,
+        ai_provider="gemini",
+        ai_model=video_model,
+    )
+    client = create_gemini_client(
+        settings.gemini_api_key.get_secret_value(),
+        settings.gemini_file_upload_timeout_seconds,
+    )
+    base_metadata = {
+        "platform": platform,
+        "resolver": "youtube_oembed",
+        "model": video_model,
+        "input_mode": "youtube_url",
+        "analysis_mode": settings.gemini_video_analysis_mode,
+        "stage": "youtube_gemini_url",
+        "video_bytes_verified": False,
+    }
+    add_event(
+        repository,
+        job.id,
+        "youtube_gemini_url_started",
+        "Gemini YouTube URL analysis started.",
+        base_metadata,
+    )
+    add_event(
+        repository,
+        job.id,
+        "gemini_video_brief_started",
+        "Gemini video brief started.",
+        {**base_metadata, "stage": "gemini_video_brief"},
+    )
+    brief = generate_youtube_url_brief(
+        client=client,
+        youtube_url=job.source_url,
+        model=video_model,
+        repository=repository,
+        job=job,
+        event_metadata={**base_metadata, "stage": "gemini_video_brief"},
+    )
+    add_event(
+        repository,
+        job.id,
+        "youtube_gemini_url_completed",
+        "Gemini YouTube URL analysis completed.",
+        {**base_metadata, "text_length": len(brief)},
+    )
+    text_model = settings.effective_gemini_text_model
+    json_metadata = {
+        **base_metadata,
+        "stage": "gemini_recipe_json",
+        "model": text_model,
+        "text_length": len(brief),
+    }
+    add_event(
+        repository,
+        job.id,
+        "gemini_recipe_json_started",
+        "Gemini recipe JSON started.",
+        json_metadata,
+    )
+    parsed, save_mode = convert_brief_to_recipe_json(
+        brief,
+        extract_result,
+        settings,
+        client=client,
+        repository=repository,
+        job=job,
+        event_metadata=json_metadata,
+    )
+    parsed = recipe_json_to_caption_shape(parsed)
+    if save_mode != "local_brief_fallback":
+        _validate_parsed_recipe(
+            parsed,
+            platform=platform,
+            stage="gemini_recipe_json",
+            model=text_model,
+            user_message="Gemini did not return a usable recipe.",
+        )
+    result = _caption_result_to_recipe_result(parsed)
+    return save_gemini_recipe_card(
+        repository=repository,
+        job=job,
+        result=result,
+        model=video_model,
+        platform=platform,
+        resolver="youtube_oembed",
+        uploaded_thumbnail_url=uploaded_thumbnail_url,
+    )
+
+
 def create_gemini_client(api_key: str, timeout_seconds: int) -> object:
     from google import genai
 
@@ -636,6 +862,61 @@ def generate_video_brief(
             "gemini_video_brief_empty",
             "Gemini returned an empty video brief.",
             stage="gemini_video_brief",
+        )
+    repository.insert_event(
+        job.id,
+        event_type="gemini_video_brief_completed",
+        message="Gemini video brief completed.",
+        metadata={
+            **event_metadata,
+            **gemini_response_metadata(response),
+            "text_length": len(text),
+        },
+    )
+    return text
+
+
+def generate_youtube_url_brief(
+    *,
+    client: object,
+    youtube_url: str,
+    model: str,
+    repository: MediaJobRepository,
+    job: MediaJobRecord,
+    event_metadata: dict[str, object],
+) -> str:
+    try:
+        from google.genai import types
+
+        uri_kwargs = {"file" + "_uri": youtube_url, "mime_type": "video/mp4"}
+        video_part = types.Part.from_uri(**uri_kwargs)
+        response = client.models.generate_content(
+            model=model,
+            contents=[video_part, VIDEO_BRIEF_PROMPT],
+        )
+    except Exception as exc:
+        raise QueueJobFailure(
+            "youtube_gemini_url_failed",
+            "Gemini YouTube URL analysis failed.",
+            stage="youtube_gemini_url",
+            exception_type=type(exc).__name__,
+        ) from exc
+    text = extract_gemini_text(response)
+    if not text:
+        repository.insert_event(
+            job.id,
+            event_type="youtube_gemini_url_failed",
+            message="Gemini YouTube URL analysis failed.",
+            metadata={
+                **event_metadata,
+                **gemini_response_metadata(response),
+                "error_code": "youtube_gemini_url_failed",
+            },
+        )
+        raise QueueJobFailure(
+            "youtube_gemini_url_failed",
+            "Gemini YouTube URL analysis failed.",
+            stage="youtube_gemini_url",
         )
     repository.insert_event(
         job.id,
@@ -1518,6 +1799,8 @@ def error_code_for_stage(stage: str) -> str:
         return "gemini_video_brief_failed"
     if stage == "gemini_recipe_json":
         return "gemini_recipe_json_invalid"
+    if stage == "youtube_gemini_url":
+        return "youtube_gemini_url_failed"
     if stage == "gemini_video_analysis":
         return "gemini_video_analysis_failed"
     return "queue_job_failed"
@@ -1546,6 +1829,8 @@ def safe_message_for_stage(stage: str) -> str:
         return "Gemini video brief failed."
     if stage == "gemini_recipe_json":
         return "Gemini recipe JSON failed."
+    if stage == "youtube_gemini_url":
+        return "Gemini YouTube URL analysis failed."
     if stage == "gemini_video_analysis":
         return "Gemini video analysis failed."
     return "Queue worker failed while processing this recipe."
