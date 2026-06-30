@@ -141,6 +141,13 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         gemini_save_mode=settings.gemini_save_mode,
         gemini_json_retry_enabled=settings.gemini_json_retry_enabled,
         gemini_json_fallback_enabled=settings.gemini_json_fallback_enabled,
+        gemini_video_brief_max_output_tokens=(
+            settings.gemini_video_brief_max_output_tokens
+        ),
+        gemini_recipe_json_max_output_tokens=(
+            settings.gemini_recipe_json_max_output_tokens
+        ),
+        gemini_recipe_brief_max_chars=settings.gemini_recipe_brief_max_chars,
         recipe_card_normalization_enabled=settings.recipe_card_normalization_enabled,
         allow_private_metadata_failure=settings.allow_private_metadata_failure,
         enable_queue_wake_endpoint=settings.enable_queue_wake_endpoint,

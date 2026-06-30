@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     gemini_save_mode: str = "structured_json_with_brief_fallback"
     gemini_json_retry_enabled: bool = True
     gemini_json_fallback_enabled: bool = True
+    gemini_video_brief_max_output_tokens: int = 768
+    gemini_recipe_json_max_output_tokens: int = 1536
+    gemini_recipe_brief_max_chars: int = 4000
     recipe_card_normalization_enabled: bool = True
     allow_private_metadata_failure: bool = True
     enable_queue_wake_endpoint: bool = True

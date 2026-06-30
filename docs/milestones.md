@@ -60,3 +60,4 @@ Deploy and rerun M14G-4R2 after W-M14R1:
 - W-M16G-C3 makes brief-to-card robust: JSON conversion retries transient Gemini server failures, falls back from flash-lite to flash, and if conversion still fails builds a local recipe card from the successful brief so the job can complete.
 - M17A adds `GET /wake` for Render Free wakeups and routes YouTube queue Gemini jobs through oEmbed metadata plus native Gemini YouTube URL input, skipping yt-dlp downloads and preserving the existing TikTok/Instagram temp-file path.
 - M18 adds recipe-card normalization before Gemini queue inserts so TikTok, Instagram, and YouTube share one structured ingredient/step/grocery shape. Private metadata save failures are event-only by default and no longer block YouTube Gemini URL jobs.
+- Queue Gemini optimization caps video brief output, JSON output, and oversized brief text sent into JSON conversion to reduce token usage and latency while keeping the two-step/fallback flow.

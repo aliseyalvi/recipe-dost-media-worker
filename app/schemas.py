@@ -31,6 +31,9 @@ class HealthResponse(BaseModel):
     gemini_save_mode: str
     gemini_json_retry_enabled: bool
     gemini_json_fallback_enabled: bool
+    gemini_video_brief_max_output_tokens: int
+    gemini_recipe_json_max_output_tokens: int
+    gemini_recipe_brief_max_chars: int
     recipe_card_normalization_enabled: bool
     allow_private_metadata_failure: bool
     enable_queue_wake_endpoint: bool

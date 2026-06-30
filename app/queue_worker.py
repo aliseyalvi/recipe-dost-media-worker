@@ -37,9 +37,9 @@ from app.supabase_client import MediaJobRepository, create_repository
 
 logger = logging.getLogger("recipe_dost.worker")
 
-VIDEO_BRIEF_PROMPT = """Describe the recipe shown in this video as concise plain text.
-Include recipe title, visible ingredients, likely quantities if inferable, cooking steps,
-timing, cuisine/style, confidence, and uncertainties. Do not return JSON."""
+VIDEO_BRIEF_PROMPT = """Describe only the recipe facts shown in this video.
+Keep it concise: title, ingredients with quantities, ordered steps, timing,
+servings, cuisine/style, confidence, and uncertainties. No JSON."""
 
 RECIPE_JSON_PROMPT = """Convert this recipe brief into strict JSON only.
 Required keys: title, summary, ingredients, steps, prep_time_minutes, cook_time_minutes,
@@ -818,6 +818,16 @@ def extract_gemini_text(response: object) -> str:
     return "\n".join(chunks).strip()
 
 
+def truncate_brief_for_json(brief_text: str, max_chars: int) -> str:
+    text = brief_text.strip()
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    cutoff = text.rfind("\n", 0, max_chars)
+    if cutoff < max_chars // 2:
+        cutoff = max_chars
+    return text[:cutoff].rstrip()
+
+
 def gemini_response_metadata(response: object) -> dict[str, object]:
     candidates = getattr(response, "candidates", []) or []
     parts_count = 0
@@ -852,6 +862,13 @@ def generate_video_brief(
         response = client.models.generate_content(
             model=model,
             contents=[uploaded_file, VIDEO_BRIEF_PROMPT],
+            config={
+                "temperature": 0.2,
+                "max_output_tokens": max(
+                    128,
+                    get_settings().gemini_video_brief_max_output_tokens,
+                ),
+            },
         )
     except Exception as exc:
         raise QueueJobFailure(
@@ -904,6 +921,13 @@ def generate_youtube_url_brief(
         response = client.models.generate_content(
             model=model,
             contents=[video_part, VIDEO_BRIEF_PROMPT],
+            config={
+                "temperature": 0.2,
+                "max_output_tokens": max(
+                    128,
+                    get_settings().gemini_video_brief_max_output_tokens,
+                ),
+            },
         )
     except Exception as exc:
         raise QueueJobFailure(
@@ -942,7 +966,13 @@ def generate_youtube_url_brief(
     return text
 
 
-def generate_recipe_json(*, client: object, model: str, brief: str) -> dict:
+def generate_recipe_json(
+    *,
+    client: object,
+    model: str,
+    brief: str,
+    max_output_tokens: int,
+) -> dict:
     prompt = f"{RECIPE_JSON_PROMPT}{brief}"
     try:
         response = client.models.generate_content(
@@ -951,7 +981,7 @@ def generate_recipe_json(*, client: object, model: str, brief: str) -> dict:
             config={
                 "response_mime_type": "application/json",
                 "temperature": 0.1,
-                "max_output_tokens": 2048,
+                "max_output_tokens": max(512, max_output_tokens),
             },
         )
     except TypeError:
@@ -1061,6 +1091,10 @@ def convert_brief_to_recipe_json(
     job: MediaJobRecord,
     event_metadata: dict[str, object],
 ) -> tuple[dict, str]:
+    brief_for_json = truncate_brief_for_json(
+        brief_text,
+        settings.gemini_recipe_brief_max_chars,
+    )
     primary_model = settings.gemini_text_model or settings.effective_gemini_video_model
     models = [primary_model]
     if primary_model != "gemini-2.5-flash":
@@ -1072,7 +1106,12 @@ def convert_brief_to_recipe_json(
         for attempt in range(attempts):
             try:
                 parsed = normalize_recipe_json(
-                    generate_recipe_json(client=client, model=model_name, brief=brief_text)
+                    generate_recipe_json(
+                        client=client,
+                        model=model_name,
+                        brief=brief_for_json,
+                        max_output_tokens=settings.gemini_recipe_json_max_output_tokens,
+                    )
                 )
                 if not parsed["title"] or not parsed["steps"]:
                     raise ValueError("Recipe JSON missing usable title or steps.")

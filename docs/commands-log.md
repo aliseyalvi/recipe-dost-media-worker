@@ -354,3 +354,20 @@ python3 -m compileall app
 grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url\|COOKIES_B64\|cookies.txt\|file_uri\|uploaded_file.uri" -n app docs || true
 # matched intentional cookie file config/path strings, generated __pycache__, and historical commands-log entries only
 ```
+
+## Queue Gemini Token Optimization Validation
+
+```bash
+python3 -m compileall app
+# passed
+
+WORKER_API_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test .venv/bin/python - <<'PY'
+from app.config import Settings
+s = Settings(_env_file=None)
+assert s.gemini_video_brief_max_output_tokens == 768
+assert s.gemini_recipe_json_max_output_tokens == 1536
+assert s.gemini_recipe_brief_max_chars == 4000
+print("gemini token cap settings passed")
+PY
+# passed
+```

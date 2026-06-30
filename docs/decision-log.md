@@ -34,6 +34,7 @@ Keep this file terse: only durable architecture decisions, not full task history
 - W-M16G-C3 treats the successful Gemini video brief as sufficient to complete a queue job. Brief-to-JSON conversion uses text-only Gemini with short retries and a flash fallback for server errors; if conversion still fails, the worker builds a minimal local recipe card from the brief and completes the job.
 - M17A keeps queue mode as the primary worker flow but adds `GET /wake` so Render Free can be woken by HTTP without invoking `/process-job`. YouTube queue Gemini uses `YOUTUBE_AI_INPUT_MODE=gemini_url`: oEmbed for public metadata, then Gemini native YouTube URL input for the brief, followed by the same JSON/fallback recipe save path.
 - M18 normalizes all queue Gemini recipe cards into the existing `recipe_cards` insert shape immediately before save. The normalizer strips markdown, derives ingredients/steps/grocery from JSON or brief sections, keeps tags out of missing info, and uses prompt version `m18_recipe_video_v1`. Private metadata failures are non-fatal when `ALLOW_PRIVATE_METADATA_FAILURE=true`.
+- Queue Gemini token/performance optimization caps the video brief output, JSON output, and brief text passed to JSON conversion with `GEMINI_VIDEO_BRIEF_MAX_OUTPUT_TOKENS`, `GEMINI_RECIPE_JSON_MAX_OUTPUT_TOKENS`, and `GEMINI_RECIPE_BRIEF_MAX_CHARS`. Defaults are conservative and exposed on `/health`.
 
 ## Next Decision To Prove
 
