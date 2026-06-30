@@ -34,6 +34,15 @@ class HealthResponse(BaseModel):
     gemini_video_brief_max_output_tokens: int
     gemini_recipe_json_max_output_tokens: int
     gemini_recipe_brief_max_chars: int
+    gemini_max_output_tokens: int
+    gemini_video_brief_retry_enabled: bool
+    recipe_quality_gate_enabled: bool
+    recipe_repair_enabled: bool
+    recipe_min_ingredients: int
+    recipe_min_steps: int
+    recipe_min_brief_length: int
+    recipe_bilingual_output_enabled: bool
+    recipe_urdu_fallback_enabled: bool
     recipe_card_normalization_enabled: bool
     allow_private_metadata_failure: bool
     enable_queue_wake_endpoint: bool

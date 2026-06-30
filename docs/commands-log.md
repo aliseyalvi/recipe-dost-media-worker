@@ -371,3 +371,69 @@ print("gemini token cap settings passed")
 PY
 # passed
 ```
+
+## M20 Output Quality Hardening Validation
+
+```bash
+python3 -m compileall app
+# passed
+
+env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python -m compileall app
+# passed
+
+grep -R "cdn_url.*source_metadata|source_metadata.*cdn_url|temporary_download_url|COOKIES_B64|cookies.txt|file_uri|uploaded_file.uri" -n app docs || true
+# matched only this M20 commands-log validation entry
+
+WORKER_API_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test .venv/bin/python - <<'PY'
+from app.config import Settings
+s = Settings(_env_file=None)
+assert s.recipe_quality_gate_enabled is True
+assert s.recipe_repair_enabled is True
+assert s.recipe_min_ingredients == 2
+assert s.recipe_min_steps == 3
+assert s.recipe_min_brief_length == 500
+assert s.gemini_video_brief_retry_enabled is True
+assert s.gemini_max_output_tokens == 4096
+assert s.recipe_bilingual_output_enabled is True
+assert s.recipe_urdu_fallback_enabled is True
+print("m20 settings smoke passed")
+PY
+# passed
+
+WORKER_API_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test .venv/bin/python - <<'PY'
+from app.config import Settings
+from app.queue_worker import fallback_recipe_json_from_brief, normalize_recipe_card_payload, recipe_quality_passed, PROMPT_VERSION
+brief = """TITLE
+Mutton Karahi
+SUMMARY
+A stovetop mutton karahi with tomatoes and spices.
+INGREDIENTS
+- Mutton (bone-in): ~1 kg
+- Tomatoes: 4 medium
+- Ginger garlic paste: 2 tbsp
+STEPS
+1. Heat oil and add mutton.
+2. Add ginger garlic paste and cook until fragrant.
+3. Add tomatoes and spices, then simmer until tender.
+GROCERY_LIST
+- Mutton (bone-in): ~1 kg
+- Tomatoes: 4 medium
+CONFIDENCE
+medium
+MISSING_OR_UNCERTAIN_DETAILS
+Exact salt quantity is not shown.
+"""
+settings = Settings(_env_file=None)
+parsed = fallback_recipe_json_from_brief(brief, {"title": "Mutton Karahi", "platform": "tiktok"})
+result = normalize_recipe_card_payload(parsed, {"title": "Mutton Karahi"}, "tiktok", "gemini-2.5-flash-lite", PROMPT_VERSION)
+assert len(result.ingredients) >= 2
+assert len(result.steps) >= 3
+assert len(result.grocery_list) >= 1
+assert result.ingredients[0].name_en == "Mutton (bone-in)"
+assert result.ingredients[0].quantity == "~1 kg"
+assert "Recipe Facts:" not in result.short_summary_en
+assert recipe_quality_passed(result, settings)
+print("m20 parser quality smoke passed")
+PY
+# passed; local venv emitted urllib3 LibreSSL warning
+```

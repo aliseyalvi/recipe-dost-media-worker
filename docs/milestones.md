@@ -31,9 +31,10 @@
 | 27 | W-M16G-C3 Robust Gemini JSON conversion with brief fallback | Done | Queue Gemini POC retries text JSON conversion and falls back to a local recipe card from the successful brief |
 | 28 | M17A Queue wake endpoint + YouTube Gemini URL | Done | `/wake` starts the queue loop without processing inline, and YouTube queue Gemini uses native URL input instead of yt-dlp |
 | 29 | M18 Stabilize E2E recipe pipeline | Done | Queue Gemini cards normalize into one structured recipe shape and YouTube private metadata failures no longer stop jobs |
-| 30 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 31 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 32 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 30 | M20 Output quality hardening | Done | Quality gate, repair, section parser, grocery derivation, and Urdu fallback before saving recipe cards |
+| 31 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 32 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 33 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
@@ -61,3 +62,4 @@ Deploy and rerun M14G-4R2 after W-M14R1:
 - M17A adds `GET /wake` for Render Free wakeups and routes YouTube queue Gemini jobs through oEmbed metadata plus native Gemini YouTube URL input, skipping yt-dlp downloads and preserving the existing TikTok/Instagram temp-file path.
 - M18 adds recipe-card normalization before Gemini queue inserts so TikTok, Instagram, and YouTube share one structured ingredient/step/grocery shape. Private metadata save failures are event-only by default and no longer block YouTube Gemini URL jobs.
 - Queue Gemini optimization caps video brief output, JSON output, and oversized brief text sent into JSON conversion to reduce token usage and latency while keeping the two-step/fallback flow.
+- M20 hardens output quality before save: Gemini video briefs are detailed and retried when thin, local fallback parses sectioned briefs into structured ingredients/steps/grocery, weak cards can be repaired with one text-model call, and unrecoverable weak output fails with `recipe_quality_gate_failed`.

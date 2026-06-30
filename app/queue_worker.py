@@ -37,17 +37,70 @@ from app.supabase_client import MediaJobRepository, create_repository
 
 logger = logging.getLogger("recipe_dost.worker")
 
-VIDEO_BRIEF_PROMPT = """Describe only the recipe facts shown in this video.
-Keep it concise: title, ingredients with quantities, ordered steps, timing,
-servings, cuisine/style, confidence, and uncertainties. No JSON."""
+PROMPT_VERSION = "m20_recipe_video_v1"
+
+VIDEO_BRIEF_PROMPT = """Extract a detailed, sectioned recipe brief from this video.
+Use visible labels, narration, captions, and the inferred cooking sequence.
+Make a best-effort recipe extraction. Do not return a tiny summary.
+
+Use exactly these plain-text sections:
+TITLE
+SUMMARY
+INGREDIENTS
+STEPS
+GROCERY_LIST
+TIME_AND_SERVINGS
+CUISINE_STYLE
+CONFIDENCE
+MISSING_OR_UNCERTAIN_DETAILS"""
+
+VIDEO_BRIEF_RETRY_PROMPT = """Extract full recipe details from this video.
+The previous brief was too thin. Re-watch/reason from visible labels, narration,
+captions, ingredient shots, quantities, and cooking sequence.
+
+Return detailed plain text with these sections:
+TITLE
+SUMMARY
+INGREDIENTS
+STEPS
+GROCERY_LIST
+TIME_AND_SERVINGS
+CUISINE_STYLE
+CONFIDENCE
+MISSING_OR_UNCERTAIN_DETAILS"""
 
 RECIPE_JSON_PROMPT = """Convert this recipe brief into strict JSON only.
 Required keys: title, summary, ingredients, steps, prep_time_minutes, cook_time_minutes,
 servings, difficulty, cuisine, tags. Use null when unknown and arrays for ingredients,
-steps, and tags.
+steps, grocery_list, tags, missing_info, and uncertainties.
+
+Ingredients may be strings or objects with name, quantity, notes, name_en, name_ur,
+notes_en, and notes_ur. Steps may be strings or objects with instruction,
+instruction_en, instruction_ur, tip, and tip_ur.
+Write Urdu fields in Urdu script when possible. Do not invent unsupported details.
 
 Brief:
 """
+
+RECIPE_REPAIR_PROMPT = """Repair this recipe extraction into strict JSON only.
+Use only the supplied recipe brief and source title. Do not use video, URLs, or hidden data.
+
+Required keys:
+title, summary, ingredients, steps, grocery_list, prep_time_minutes,
+cook_time_minutes, servings, difficulty, cuisine, tags, missing_info, confidence.
+
+Ingredient objects must include:
+name, quantity, notes, name_en, name_ur, notes_en, notes_ur.
+
+Step objects must include:
+step_number, instruction, instruction_en, instruction_ur, tip, tip_en, tip_ur.
+
+Write Urdu fields in Urdu script when possible. Use null when unknown.
+Return JSON only."""
+
+URDU_TRANSLATION_PROMPT = """Translate only these final recipe fields into Urdu script.
+Return strict JSON only with keys ingredients, steps, grocery_list.
+Keep array lengths and order exactly the same. Do not add recipe details."""
 
 
 class QueueJobFailure(Exception):
@@ -662,6 +715,7 @@ def process_youtube_gemini_url_job(
         job=job,
         event_metadata={**base_metadata, "stage": "gemini_video_brief"},
     )
+    brief_used_fallback = not brief_has_recipe_content(brief, settings)
     add_event(
         repository,
         job.id,
@@ -692,26 +746,28 @@ def process_youtube_gemini_url_job(
         job=job,
         event_metadata=json_metadata,
     )
-    parsed = recipe_json_to_caption_shape(parsed)
-    if save_mode != "local_brief_fallback":
-        _validate_parsed_recipe(
-            parsed,
-            platform=platform,
-            stage="gemini_recipe_json",
-            model=text_model,
-            user_message="Gemini did not return a usable recipe.",
-        )
-    result = _caption_result_to_recipe_result(parsed)
+    parsed["brief"] = brief
+    parsed["save_mode"] = save_mode
+    result = normalize_recipe_card_payload(
+        parsed,
+        extract_result,
+        platform,
+        text_model,
+        PROMPT_VERSION,
+    )
     return save_gemini_recipe_card(
         repository=repository,
         job=job,
         result=result,
-        model=video_model,
+        model=text_model,
         platform=platform,
         resolver="youtube_oembed",
         uploaded_thumbnail_url=uploaded_thumbnail_url,
         source_metadata=extract_result,
-        used_fallback=save_mode == "local_brief_fallback",
+        used_fallback=save_mode == "local_brief_fallback" or brief_used_fallback,
+        brief_text=brief,
+        client=client,
+        settings=settings,
     )
 
 
@@ -828,6 +884,95 @@ def truncate_brief_for_json(brief_text: str, max_chars: int) -> str:
     return text[:cutoff].rstrip()
 
 
+def brief_has_recipe_content(brief_text: str, settings: Settings) -> bool:
+    text = clean_recipe_text(brief_text).lower()
+    if len(text) < max(1, settings.recipe_min_brief_length):
+        return False
+    sections = parse_brief_sections(brief_text)
+    ingredients = sections.get("ingredients") or []
+    steps = sections.get("steps") or []
+    has_ingredient_words = bool(
+        re.search(
+            r"\b(ingredient|ingredients|cup|tbsp|tsp|grams?|kg|g|ml|oil|salt|masala|"
+            r"onion|garlic|ginger|tomato|flour|rice|chicken|mutton|beef|egg)\b",
+            text,
+        )
+    )
+    has_step_words = bool(
+        re.search(
+            r"\b(add|mix|cook|fry|boil|bake|roast|simmer|stir|chop|slice|serve|"
+            r"heat|pour|knead|marinate|blend)\b",
+            text,
+        )
+    )
+    return (len(ingredients) >= 1 or has_ingredient_words) and (
+        len(steps) >= 2 or has_step_words
+    )
+
+
+def safe_quality_metadata(
+    *,
+    platform: str,
+    model: str,
+    result: GeminiRecipeResult | None = None,
+    text_length: int | None = None,
+    retry_count: int | None = None,
+    used_fallback: bool | None = None,
+    repair_used: bool | None = None,
+    quality_passed: bool | None = None,
+    error_code: str | None = None,
+    exception_type: str | None = None,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {"platform": platform, "model": model}
+    if result is not None:
+        metadata.update(recipe_quality_stats(result))
+    if text_length is not None:
+        metadata["text_length"] = text_length
+    if retry_count is not None:
+        metadata["retry_count"] = retry_count
+    if used_fallback is not None:
+        metadata["used_fallback"] = used_fallback
+    if repair_used is not None:
+        metadata["repair_used"] = repair_used
+    if quality_passed is not None:
+        metadata["quality_passed"] = quality_passed
+    if error_code is not None:
+        metadata["error_code"] = error_code
+    if exception_type is not None:
+        metadata["exception_type"] = exception_type
+    return metadata
+
+
+def recipe_quality_stats(result: GeminiRecipeResult) -> dict[str, object]:
+    return {
+        "ingredients_count": len(result.ingredients),
+        "steps_count": len(result.steps),
+        "grocery_count": len(result.grocery_list),
+        "summary_length": len(clean_recipe_text(result.short_summary_en)),
+        "urdu_fields_present": recipe_urdu_fields_present(result),
+    }
+
+
+def recipe_urdu_fields_present(result: GeminiRecipeResult) -> bool:
+    return any(
+        [
+            bool(clean_recipe_text(result.recipe_title_ur)),
+            bool(clean_recipe_text(result.short_summary_ur)),
+            any(clean_recipe_text(item.name_ur) for item in result.ingredients),
+            any(clean_recipe_text(step.instruction_ur) for step in result.steps),
+            any(clean_recipe_text(item.name_ur) for item in result.grocery_list),
+        ]
+    )
+
+
+def recipe_quality_passed(result: GeminiRecipeResult, settings: Settings) -> bool:
+    return (
+        len(result.ingredients) >= settings.recipe_min_ingredients
+        and len(result.steps) >= settings.recipe_min_steps
+        and len(result.grocery_list) >= 1
+    )
+
+
 def gemini_response_metadata(response: object) -> dict[str, object]:
     candidates = getattr(response, "candidates", []) or []
     parts_count = 0
@@ -858,6 +1003,7 @@ def generate_video_brief(
     job: MediaJobRecord,
     event_metadata: dict[str, object],
 ) -> str:
+    settings = get_settings()
     try:
         response = client.models.generate_content(
             model=model,
@@ -866,7 +1012,7 @@ def generate_video_brief(
                 "temperature": 0.2,
                 "max_output_tokens": max(
                     128,
-                    get_settings().gemini_video_brief_max_output_tokens,
+                    settings.gemini_max_output_tokens,
                 ),
             },
         )
@@ -901,6 +1047,54 @@ def generate_video_brief(
             "text_length": len(text),
         },
     )
+    retry_count = 0
+    while (
+        settings.gemini_video_brief_retry_enabled
+        and retry_count < max(0, settings.gemini_video_brief_max_retries)
+        and not brief_has_recipe_content(text, settings)
+    ):
+        retry_count += 1
+        repository.insert_event(
+            job.id,
+            event_type="gemini_video_brief_retry",
+            message="Gemini video brief retry started.",
+            metadata={
+                "platform": event_metadata.get("platform"),
+                "model": model,
+                "text_length": len(text),
+                "retry_count": retry_count,
+            },
+        )
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=[uploaded_file, VIDEO_BRIEF_RETRY_PROMPT],
+                config={
+                    "temperature": 0.2,
+                    "max_output_tokens": max(128, settings.gemini_max_output_tokens),
+                },
+            )
+            retry_text = extract_gemini_text(response)
+        except Exception as exc:
+            raise QueueJobFailure(
+                "gemini_video_brief_failed",
+                "Gemini video brief failed.",
+                stage="gemini_video_brief",
+                exception_type=type(exc).__name__,
+            ) from exc
+        if retry_text:
+            text = retry_text
+            repository.insert_event(
+                job.id,
+                event_type="gemini_video_brief_completed",
+                message="Gemini video brief completed.",
+                metadata={
+                    **event_metadata,
+                    **gemini_response_metadata(response),
+                    "text_length": len(text),
+                    "retry_count": retry_count,
+                },
+            )
     return text
 
 
@@ -913,6 +1107,7 @@ def generate_youtube_url_brief(
     job: MediaJobRecord,
     event_metadata: dict[str, object],
 ) -> str:
+    settings = get_settings()
     try:
         from google.genai import types
 
@@ -925,7 +1120,7 @@ def generate_youtube_url_brief(
                 "temperature": 0.2,
                 "max_output_tokens": max(
                     128,
-                    get_settings().gemini_video_brief_max_output_tokens,
+                    settings.gemini_max_output_tokens,
                 ),
             },
         )
@@ -963,6 +1158,54 @@ def generate_youtube_url_brief(
             "text_length": len(text),
         },
     )
+    retry_count = 0
+    while (
+        settings.gemini_video_brief_retry_enabled
+        and retry_count < max(0, settings.gemini_video_brief_max_retries)
+        and not brief_has_recipe_content(text, settings)
+    ):
+        retry_count += 1
+        repository.insert_event(
+            job.id,
+            event_type="gemini_video_brief_retry",
+            message="Gemini video brief retry started.",
+            metadata={
+                "platform": event_metadata.get("platform"),
+                "model": model,
+                "text_length": len(text),
+                "retry_count": retry_count,
+            },
+        )
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=[video_part, VIDEO_BRIEF_RETRY_PROMPT],
+                config={
+                    "temperature": 0.2,
+                    "max_output_tokens": max(128, settings.gemini_max_output_tokens),
+                },
+            )
+            retry_text = extract_gemini_text(response)
+        except Exception as exc:
+            raise QueueJobFailure(
+                "youtube_gemini_url_failed",
+                "Gemini YouTube URL analysis failed.",
+                stage="youtube_gemini_url",
+                exception_type=type(exc).__name__,
+            ) from exc
+        if retry_text:
+            text = retry_text
+            repository.insert_event(
+                job.id,
+                event_type="gemini_video_brief_completed",
+                message="Gemini video brief completed.",
+                metadata={
+                    **event_metadata,
+                    **gemini_response_metadata(response),
+                    "text_length": len(text),
+                    "retry_count": retry_count,
+                },
+            )
     return text
 
 
@@ -1021,34 +1264,29 @@ def normalize_recipe_json(parsed: dict) -> dict:
     ingredients = []
     for item in parsed.get("ingredients") or []:
         if isinstance(item, dict):
-            text = " ".join(
-                str(item.get(key) or "").strip()
-                for key in ("quantity", "name", "notes")
-                if item.get(key)
-            ).strip()
-            if text:
-                ingredients.append(text)
-        elif str(item).strip():
-            ingredients.append(str(item).strip())
+            ingredients.append(item)
+        elif clean_recipe_text(item):
+            ingredients.append(clean_recipe_text(item))
     steps = []
     for item in parsed.get("steps") or []:
         if isinstance(item, dict):
-            text = str(item.get("text") or "").strip()
-            if text:
-                steps.append(text)
-        elif str(item).strip():
-            steps.append(str(item).strip())
+            steps.append(item)
+        elif clean_recipe_text(item):
+            steps.append(clean_recipe_text(item))
     return {
         "title": str(parsed.get("title") or "AI Recipe from Video").strip(),
         "summary": str(parsed.get("summary") or "").strip(),
         "ingredients": ingredients,
         "steps": steps,
+        "grocery_list": parsed.get("grocery_list") or parsed.get("grocery") or [],
         "prep_time_minutes": parsed.get("prep_time_minutes"),
         "cook_time_minutes": parsed.get("cook_time_minutes"),
         "servings": parsed.get("servings"),
         "difficulty": parsed.get("difficulty"),
         "cuisine": parsed.get("cuisine"),
         "tags": parsed.get("tags") if isinstance(parsed.get("tags"), list) else [],
+        "missing_info": parsed.get("missing_info") or parsed.get("uncertainties") or [],
+        "confidence": parsed.get("confidence"),
     }
 
 
@@ -1067,16 +1305,35 @@ def fallback_recipe_json_from_brief(
     tags = ["ai-video-recipe"]
     if platform:
         tags.append(platform)
+    summary = " ".join(sections.get("summary") or [])
+    if not summary:
+        summary = f"AI extracted recipe details for {title}."
+    steps = sections.get("steps") or []
+    if not steps:
+        action_lines = [
+            line
+            for line in split_brief_lines(brief_text)
+            if re.search(
+                r"\b(add|mix|cook|fry|boil|bake|roast|simmer|stir|serve|heat)\b",
+                line,
+                flags=re.I,
+            )
+        ]
+        steps = action_lines[:8]
     return {
         "title": title or "AI Recipe from Video",
-        "summary": brief_text.strip(),
+        "summary": summary,
         "ingredients": sections.get("ingredients") or [],
-        "steps": sections.get("steps") or [brief_text.strip()],
+        "steps": steps,
+        "grocery_list": sections.get("grocery") or sections.get("ingredients") or [],
         "prep_time_minutes": None,
         "cook_time_minutes": None,
         "servings": None,
         "difficulty": None,
         "cuisine": None,
+        "missing_info": sections.get("missing") or [],
+        "confidence": (sections.get("confidence") or ["low"])[0],
+        "brief": brief_text,
         "tags": [*tags, *sections.get("tags", [])],
     }
 
@@ -1110,7 +1367,7 @@ def convert_brief_to_recipe_json(
                         client=client,
                         model=model_name,
                         brief=brief_for_json,
-                        max_output_tokens=settings.gemini_recipe_json_max_output_tokens,
+                        max_output_tokens=settings.gemini_max_output_tokens,
                     )
                 )
                 if not parsed["title"] or not parsed["steps"]:
@@ -1399,6 +1656,7 @@ def run_gemini_video_poc_analysis(
             job=job,
             event_metadata=brief_metadata,
         )
+        brief_used_fallback = not brief_has_recipe_content(brief, settings)
         text_model = settings.effective_gemini_text_model
         json_metadata = {
             **base_ai_metadata,
@@ -1421,17 +1679,15 @@ def run_gemini_video_poc_analysis(
             job=job,
             event_metadata=json_metadata,
         )
-        parsed = recipe_json_to_caption_shape(parsed)
-        if save_mode != "local_brief_fallback":
-            _validate_parsed_recipe(
-                parsed,
-                platform=platform,
-                stage="gemini_recipe_json",
-                model=text_model,
-                user_message="Gemini did not return a usable recipe.",
-            )
+        parsed["brief"] = brief
         parsed["save_mode"] = save_mode
-        result = _caption_result_to_recipe_result(parsed)
+        result = normalize_recipe_card_payload(
+            parsed,
+            extract_result,
+            platform,
+            text_model,
+            PROMPT_VERSION,
+        )
     except QueueJobFailure as exc:
         if exc.code == "gemini_video_brief_empty":
             raise
@@ -1574,12 +1830,15 @@ def run_gemini_video_poc_analysis(
         repository=repository,
         job=job,
         result=result,
-        model=model,
+        model=settings.effective_gemini_text_model,
         platform=platform,
         resolver=resolver,
         uploaded_thumbnail_url=uploaded_thumbnail_url,
         source_metadata=extract_result,
-        used_fallback=parsed.get("save_mode") == "local_brief_fallback",
+        used_fallback=parsed.get("save_mode") == "local_brief_fallback" or brief_used_fallback,
+        brief_text=brief,
+        client=client,
+        settings=settings,
     )
 
 
@@ -1589,6 +1848,7 @@ def clean_recipe_text(value: object) -> str:
     text = re.sub(r"`([^`]*)`", r"\1", text)
     text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.M)
     text = re.sub(r"^\s*[-*+]\s+", "", text, flags=re.M)
+    text = re.sub(r"^\s*\d+[\).\:-]\s*", "", text, flags=re.M)
     text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
     text = re.sub(r"\*([^*]+)\*", r"\1", text)
     return re.sub(r"\s+", " ", text).strip()
@@ -1606,28 +1866,52 @@ def parse_brief_sections(text: str) -> dict[str, list[str]]:
     sections: dict[str, list[str]] = {}
     current = "summary"
     for raw_line in str(text or "").splitlines():
-        line = clean_recipe_text(raw_line)
+        raw = str(raw_line or "").strip()
+        line = clean_recipe_text(raw)
         if not line:
             continue
-        heading = line.lower().rstrip(":")
-        if re.search(r"\b(visible )?ingredients?\b", heading):
+        heading = clean_recipe_text(raw).lower().rstrip(":")
+        if re.fullmatch(r"(title|recipe title)", heading):
+            current = "title"
+            continue
+        if re.fullmatch(r"(summary|recipe facts|overview)", heading):
+            current = "summary"
+            continue
+        if re.search(r"\b(visible )?ingredients?|quantities\b", heading):
             current = "ingredients"
             continue
-        if re.search(r"\b(steps?|method|instructions?)\b", heading):
+        if re.search(r"\b(steps?|method|instructions?|directions)\b", heading):
             current = "steps"
             continue
-        if re.search(r"\b(grocery|shopping)\b", heading):
+        if re.search(r"\b(grocery|shopping|grocery_list)\b", heading):
             current = "grocery"
             continue
-        if re.search(r"\b(timing|time)\b", heading):
+        if re.search(r"\b(timing|time|time_and_servings|servings)\b", heading):
             current = "timing"
             continue
-        if re.search(r"\b(cuisine|style)\b", heading):
+        if re.search(r"\b(cuisine|style|cuisine_style)\b", heading):
             current = "tags"
             continue
-        if re.search(r"\b(confidence|uncertain|uncertainties)\b", heading):
+        if re.search(r"\b(confidence)\b", heading):
+            current = "confidence"
+            continue
+        if re.search(r"\b(missing|uncertain|uncertainties|missing_or_uncertain_details)\b", heading):
             current = "missing"
             continue
+        inline_heading = re.match(r"^([A-Za-z_ ]{3,40}):\s+(.+)$", raw)
+        if inline_heading:
+            possible = clean_recipe_text(inline_heading.group(1)).lower()
+            rest = clean_recipe_text(inline_heading.group(2))
+            if re.search(r"\b(visible )?ingredients?|quantities\b", possible):
+                current = "ingredients"
+                if rest:
+                    sections.setdefault(current, []).append(rest)
+                continue
+            if re.search(r"\b(steps?|method|instructions?|directions)\b", possible):
+                current = "steps"
+                if rest:
+                    sections.setdefault(current, []).append(rest)
+                continue
         sections.setdefault(current, []).append(line)
     return sections
 
@@ -1636,6 +1920,120 @@ def item_text(value: object, *keys: str) -> str:
     if isinstance(value, dict):
         return clean_recipe_text(" ".join(str(value.get(key) or "") for key in keys))
     return clean_recipe_text(value)
+
+
+def parse_ingredient_item(value: object) -> RecipeIngredient | None:
+    if isinstance(value, dict):
+        name = clean_recipe_text(value.get("name_en") or value.get("name"))
+        quantity = clean_recipe_text(value.get("quantity"))
+        notes = clean_recipe_text(value.get("notes_en") or value.get("notes"))
+        name_ur = clean_recipe_text(value.get("name_ur"))
+        notes_ur = clean_recipe_text(value.get("notes_ur"))
+    else:
+        text = clean_recipe_text(value)
+        if not text:
+            return None
+        name = text
+        quantity = ""
+        notes = ""
+        name_ur = ""
+        notes_ur = ""
+        match = re.match(r"^([^:–—]{2,80})\s*[:–—]\s*(.+)$", text)
+        if match:
+            name = clean_recipe_text(match.group(1))
+            quantity = clean_recipe_text(match.group(2))
+    if not name and notes:
+        name = notes
+        notes = ""
+    if not name:
+        return None
+    return RecipeIngredient(
+        name_en=name,
+        name_ur=name_ur,
+        quantity=quantity,
+        notes_en=notes,
+        notes_ur=notes_ur,
+    )
+
+
+def parse_step_item(value: object, index: int) -> RecipeStep | None:
+    if isinstance(value, dict):
+        instruction = clean_recipe_text(
+            value.get("instruction_en")
+            or value.get("instruction")
+            or value.get("text")
+        )
+        instruction_ur = clean_recipe_text(value.get("instruction_ur"))
+        tip = clean_recipe_text(value.get("tip_en") or value.get("tip"))
+        tip_ur = clean_recipe_text(value.get("tip_ur"))
+        step_number = safe_int_or_none(value.get("step_number")) or index
+    else:
+        instruction = clean_recipe_text(value)
+        instruction_ur = ""
+        tip = ""
+        tip_ur = ""
+        step_number = index
+    if not instruction:
+        return None
+    return RecipeStep(
+        step_number=max(1, step_number),
+        instruction_en=instruction,
+        instruction_ur=instruction_ur,
+        tip_en=tip,
+        tip_ur=tip_ur,
+    )
+
+
+def parse_grocery_item(value: object) -> GroceryItem | None:
+    if isinstance(value, dict):
+        name = clean_recipe_text(value.get("name_en") or value.get("name"))
+        quantity = clean_recipe_text(value.get("quantity"))
+        name_ur = clean_recipe_text(value.get("name_ur"))
+    else:
+        ingredient = parse_ingredient_item(value)
+        if ingredient is None:
+            return None
+        name = ingredient.name_en
+        quantity = ingredient.quantity
+        name_ur = ingredient.name_ur
+    if not name:
+        return None
+    return GroceryItem(name_en=name, name_ur=name_ur, quantity=quantity)
+
+
+def split_inline_items(lines: list[str]) -> list[str]:
+    items: list[str] = []
+    for line in lines:
+        parts = re.split(r"\s*(?:;|\n)\s*", line)
+        if len(parts) == 1 and "," in line and len(line) < 240:
+            parts = re.split(r"\s*,\s*", line)
+        items.extend(clean_recipe_text(part) for part in parts if clean_recipe_text(part))
+    return items
+
+
+def expand_recipe_items(values: list[object]) -> list[object]:
+    expanded: list[object] = []
+    for item in values:
+        if isinstance(item, dict):
+            expanded.append(item)
+            continue
+        expanded.extend(split_inline_items([str(item)]))
+    return expanded
+
+
+def clean_summary_text(summary: object, title: str) -> str:
+    text = clean_recipe_text(summary)
+    text = re.sub(
+        r"^(recipe facts?|title|summary)\s*[:\-]\s*",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+    text = re.sub(r"\b(INGREDIENTS|STEPS|GROCERY_LIST|TIME_AND_SERVINGS)\b.*", "", text).strip()
+    if not text or text.lower() == title.lower():
+        return f"AI extracted recipe details for {title}."
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    return " ".join(parts[:2]).strip()
 
 
 def normalize_recipe_card_payload(
@@ -1672,35 +2070,63 @@ def normalize_recipe_card_payload(
     else:
         raw = raw_recipe
 
-    brief = clean_recipe_text(raw.get("summary") or raw.get("brief") or "")
-    sections = parse_brief_sections(raw.get("summary") or raw.get("brief") or brief)
-    title = clean_recipe_text(raw.get("title") or source_metadata.get("title") or "AI Recipe from Video")
-    summary = clean_recipe_text(raw.get("summary") or brief)
-    summary_parts = re.split(r"(?<=[.!?])\s+", summary)
-    summary = " ".join(summary_parts[:3]).strip()
+    brief_source = raw.get("brief") or raw.get("summary") or ""
+    sections = parse_brief_sections(brief_source)
+    section_title = " ".join(sections.get("title") or [])
+    title = clean_recipe_text(
+        raw.get("title") or section_title or source_metadata.get("title") or "AI Recipe from Video"
+    )
+    summary = clean_summary_text(raw.get("summary") or " ".join(sections.get("summary") or []), title)
 
     ingredients_source = raw.get("ingredients") or sections.get("ingredients") or []
-    ingredients = [
-        item_text(item, "quantity", "name", "name_en", "notes", "notes_en")
-        for item in ingredients_source
+    if isinstance(ingredients_source, list):
+        ingredient_values = ingredients_source
+    else:
+        ingredient_values = [ingredients_source]
+    ingredient_values = expand_recipe_items(ingredient_values)
+    recipe_ingredients = [
+        parsed
+        for parsed in (parse_ingredient_item(item) for item in ingredient_values)
+        if parsed is not None
     ]
-    ingredients = [item for item in ingredients if item]
 
     steps_source = raw.get("steps") or sections.get("steps") or []
-    steps = [item_text(item, "text", "instruction", "instruction_en") for item in steps_source]
-    steps = [step for step in steps if step]
-    if not steps and brief:
-        steps = [brief]
-
-    grocery_source = raw.get("grocery_list") or raw.get("grocery") or sections.get("grocery") or ingredients
-    grocery = [
-        item_text(item, "quantity", "name", "name_en", "notes", "notes_en")
-        for item in grocery_source
+    if isinstance(steps_source, list):
+        step_values = steps_source
+    else:
+        step_values = [steps_source]
+    recipe_steps = [
+        parsed
+        for parsed in (
+            parse_step_item(item, index + 1) for index, item in enumerate(step_values)
+        )
+        if parsed is not None
     ]
-    grocery = [item for item in grocery if item]
+
+    grocery_source = raw.get("grocery_list") or raw.get("grocery") or sections.get("grocery") or []
+    if isinstance(grocery_source, list):
+        grocery_values = grocery_source
+    else:
+        grocery_values = [grocery_source]
+    grocery_values = expand_recipe_items(grocery_values)
+    grocery_items = [
+        parsed
+        for parsed in (parse_grocery_item(item) for item in grocery_values)
+        if parsed is not None
+    ]
+    if not grocery_items:
+        grocery_items = [
+            GroceryItem(
+                name_en=item.name_en,
+                name_ur=item.name_ur,
+                quantity=item.quantity,
+            )
+            for item in recipe_ingredients
+        ]
 
     tags = raw.get("tags") if isinstance(raw.get("tags"), list) else []
     tags = [clean_recipe_text(tag).lower() for tag in tags if clean_recipe_text(tag)]
+    tags.extend(clean_recipe_text(tag).lower() for tag in sections.get("tags", []) if clean_recipe_text(tag))
     if "ai-video-recipe" not in tags:
         tags.append("ai-video-recipe")
     if platform and platform not in tags:
@@ -1719,35 +2145,11 @@ def normalize_recipe_card_payload(
         for item in (missing_raw if isinstance(missing_raw, list) else [missing_raw])
         if clean_recipe_text(item) and clean_recipe_text(item).lower() not in set(tags)
     ]
-
-    recipe_ingredients = [
-        RecipeIngredient(
-            name_en=item,
-            name_ur="",
-            quantity="",
-            notes_en="",
-            notes_ur="",
-        )
-        for item in ingredients
-    ]
-    recipe_steps = [
-        RecipeStep(
-            step_number=index + 1,
-            instruction_en=step,
-            instruction_ur="",
-            tip_en="",
-            tip_ur="",
-        )
-        for index, step in enumerate(steps)
-    ]
-    grocery_items = [
-        GroceryItem(name_en=item, name_ur="", quantity="") for item in grocery
-    ]
     return GeminiRecipeResult(
         recipe_title_en=title,
-        recipe_title_ur="",
+        recipe_title_ur=clean_recipe_text(raw.get("title_ur") or raw.get("recipe_title_ur")),
         short_summary_en=summary,
-        short_summary_ur="",
+        short_summary_ur=clean_recipe_text(raw.get("summary_ur") or raw.get("short_summary_ur")),
         confidence=confidence or "medium",
         prep_time_minutes=safe_int_or_none(raw.get("prep_time_minutes")),
         cook_time_minutes=safe_int_or_none(raw.get("cook_time_minutes")),
@@ -1767,6 +2169,268 @@ def normalize_recipe_card_payload(
     )
 
 
+def repair_recipe_card_with_gemini(
+    *,
+    client: object,
+    model: str,
+    brief_text: str,
+    source_metadata: dict[str, object],
+    settings: Settings,
+) -> dict:
+    source_title = clean_recipe_text(source_metadata.get("title"))
+    prompt = (
+        f"{RECIPE_REPAIR_PROMPT}\n\n"
+        f"Source title: {source_title or 'unknown'}\n\n"
+        f"Recipe brief:\n{truncate_brief_for_json(brief_text, settings.gemini_recipe_brief_max_chars)}"
+    )
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=[prompt],
+            config={
+                "response_mime_type": "application/json",
+                "temperature": 0.1,
+                "max_output_tokens": max(512, settings.gemini_max_output_tokens),
+            },
+        )
+    except TypeError:
+        response = client.models.generate_content(model=model, contents=[prompt])
+    text = extract_gemini_text(response)
+    if not text:
+        raise QueueJobFailure(
+            "gemini_recipe_json_empty",
+            "Gemini returned empty recipe JSON.",
+            stage="gemini_recipe_json",
+        )
+    parsed = _extract_json_object(text)
+    if not {"title", "summary", "ingredients", "steps"}.issubset(parsed):
+        raise ValueError("Repair JSON missing required keys.")
+    parsed["brief"] = brief_text
+    return normalize_recipe_json(parsed)
+
+
+def apply_urdu_translation(
+    result: GeminiRecipeResult,
+    parsed: dict,
+) -> GeminiRecipeResult:
+    ingredients_ur = parsed.get("ingredients") if isinstance(parsed.get("ingredients"), list) else []
+    steps_ur = parsed.get("steps") if isinstance(parsed.get("steps"), list) else []
+    grocery_ur = parsed.get("grocery_list") if isinstance(parsed.get("grocery_list"), list) else []
+    for index, item in enumerate(result.ingredients):
+        if index >= len(ingredients_ur) or not isinstance(ingredients_ur[index], dict):
+            continue
+        item.name_ur = clean_recipe_text(ingredients_ur[index].get("name_ur") or item.name_ur)
+        item.notes_ur = clean_recipe_text(ingredients_ur[index].get("notes_ur") or item.notes_ur)
+    for index, step in enumerate(result.steps):
+        if index >= len(steps_ur) or not isinstance(steps_ur[index], dict):
+            continue
+        step.instruction_ur = clean_recipe_text(
+            steps_ur[index].get("instruction_ur") or step.instruction_ur
+        )
+        step.tip_ur = clean_recipe_text(steps_ur[index].get("tip_ur") or step.tip_ur)
+    for index, item in enumerate(result.grocery_list):
+        if index >= len(grocery_ur) or not isinstance(grocery_ur[index], dict):
+            continue
+        item.name_ur = clean_recipe_text(grocery_ur[index].get("name_ur") or item.name_ur)
+    return result
+
+
+def maybe_translate_urdu_fields(
+    *,
+    client: object | None,
+    result: GeminiRecipeResult,
+    model: str,
+    settings: Settings,
+) -> GeminiRecipeResult:
+    if (
+        client is None
+        or not settings.recipe_bilingual_output_enabled
+        or not settings.recipe_urdu_fallback_enabled
+        or recipe_urdu_fields_present(result)
+    ):
+        return result
+    payload = {
+        "ingredients": [
+            {"name_en": item.name_en, "notes_en": item.notes_en}
+            for item in result.ingredients
+        ],
+        "steps": [
+            {"instruction_en": step.instruction_en, "tip_en": step.tip_en}
+            for step in result.steps
+        ],
+        "grocery_list": [
+            {"name_en": item.name_en}
+            for item in result.grocery_list
+        ],
+    }
+    prompt = f"{URDU_TRANSLATION_PROMPT}\n\nJSON:\n{json.dumps(payload, ensure_ascii=False)}"
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=[prompt],
+            config={
+                "response_mime_type": "application/json",
+                "temperature": 0.1,
+                "max_output_tokens": 2048,
+            },
+        )
+        parsed = _extract_json_object(extract_gemini_text(response))
+        return apply_urdu_translation(result, parsed)
+    except Exception:
+        return result
+
+
+def enforce_recipe_quality(
+    *,
+    repository: MediaJobRepository,
+    job: MediaJobRecord,
+    result: GeminiRecipeResult,
+    model: str,
+    platform: str,
+    source_metadata: dict[str, object],
+    brief_text: str | None,
+    used_fallback: bool,
+    client: object | None,
+    settings: Settings,
+) -> GeminiRecipeResult:
+    quality_passed = recipe_quality_passed(result, settings)
+    repository.insert_event(
+        job.id,
+        event_type="recipe_quality_gate_checked",
+        message="Recipe quality gate checked.",
+        metadata=safe_quality_metadata(
+            platform=platform,
+            model=model,
+            result=result,
+            text_length=len(brief_text or ""),
+            used_fallback=used_fallback,
+            repair_used=False,
+            quality_passed=quality_passed,
+        ),
+    )
+    repair_used = False
+    if (
+        settings.recipe_quality_gate_enabled
+        and not quality_passed
+        and settings.recipe_repair_enabled
+        and client is not None
+        and brief_text
+    ):
+        for attempt in range(max(0, settings.gemini_recipe_repair_max_retries)):
+            repository.insert_event(
+                job.id,
+                event_type="recipe_card_repair_started",
+                message="Recipe card repair started.",
+                metadata=safe_quality_metadata(
+                    platform=platform,
+                    model=model,
+                    result=result,
+                    text_length=len(brief_text),
+                    retry_count=attempt + 1,
+                    used_fallback=used_fallback,
+                    repair_used=True,
+                    quality_passed=False,
+                ),
+            )
+            try:
+                repaired = repair_recipe_card_with_gemini(
+                    client=client,
+                    model=model,
+                    brief_text=brief_text,
+                    source_metadata=source_metadata,
+                    settings=settings,
+                )
+                result = normalize_recipe_card_payload(
+                    repaired,
+                    source_metadata,
+                    platform,
+                    model,
+                    PROMPT_VERSION,
+                )
+                repair_used = True
+                quality_passed = recipe_quality_passed(result, settings)
+                repository.insert_event(
+                    job.id,
+                    event_type="recipe_card_repair_completed",
+                    message="Recipe card repair completed.",
+                    metadata=safe_quality_metadata(
+                        platform=platform,
+                        model=model,
+                        result=result,
+                        text_length=len(brief_text),
+                        retry_count=attempt + 1,
+                        used_fallback=used_fallback,
+                        repair_used=True,
+                        quality_passed=quality_passed,
+                    ),
+                )
+                break
+            except Exception as exc:
+                repository.insert_event(
+                    job.id,
+                    event_type="recipe_card_repair_failed",
+                    message="Recipe card repair failed.",
+                    metadata=safe_quality_metadata(
+                        platform=platform,
+                        model=model,
+                        result=result,
+                        text_length=len(brief_text),
+                        retry_count=attempt + 1,
+                        used_fallback=used_fallback,
+                        repair_used=True,
+                        quality_passed=False,
+                        error_code="recipe_card_repair_failed",
+                        exception_type=type(exc).__name__,
+                    ),
+                )
+    if settings.recipe_quality_gate_enabled and not recipe_quality_passed(result, settings):
+        if len(result.ingredients) >= 1 and len(result.steps) >= 1:
+            result.confidence = "low"
+        else:
+            repository.insert_event(
+                job.id,
+                event_type="recipe_quality_gate_failed",
+                message="Recipe quality gate failed.",
+                metadata=safe_quality_metadata(
+                    platform=platform,
+                    model=model,
+                    result=result,
+                    text_length=len(brief_text or ""),
+                    used_fallback=used_fallback,
+                    repair_used=repair_used,
+                    quality_passed=False,
+                    error_code="recipe_quality_gate_failed",
+                ),
+            )
+            raise QueueJobFailure(
+                "recipe_quality_gate_failed",
+                "Could not extract enough recipe details from this video.",
+                stage="recipe_quality_gate",
+            )
+    result = maybe_translate_urdu_fields(
+        client=client,
+        result=result,
+        model=model,
+        settings=settings,
+    )
+    if settings.recipe_bilingual_output_enabled and not recipe_urdu_fields_present(result):
+        repository.insert_event(
+            job.id,
+            event_type="recipe_urdu_missing",
+            message="Recipe Urdu fields remain missing.",
+            metadata=safe_quality_metadata(
+                platform=platform,
+                model=model,
+                result=result,
+                text_length=len(brief_text or ""),
+                used_fallback=used_fallback,
+                repair_used=repair_used,
+                quality_passed=recipe_quality_passed(result, settings),
+            ),
+        )
+    return result
+
+
 def save_gemini_recipe_card(
     *,
     repository: MediaJobRepository,
@@ -1778,7 +2442,11 @@ def save_gemini_recipe_card(
     uploaded_thumbnail_url: str | None,
     source_metadata: dict[str, object] | None = None,
     used_fallback: bool = False,
+    brief_text: str | None = None,
+    client: object | None = None,
+    settings: Settings | None = None,
 ) -> MediaJobRecord:
+    settings = settings or get_settings()
     job = repository.update_job(
         job.id,
         status="analyzing",
@@ -1796,35 +2464,51 @@ def save_gemini_recipe_card(
         metadata={"platform": platform, "resolver": resolver, "model": model, "stage": "recipe_card_saving"},
     )
     try:
-        if get_settings().recipe_card_normalization_enabled:
+        if settings.recipe_card_normalization_enabled:
             result = normalize_recipe_card_payload(
                 result,
                 source_metadata or {"platform": platform},
                 platform,
                 model,
-                "m18_recipe_video_v1",
+                PROMPT_VERSION,
             )
-            repository.insert_event(
-                job.id,
-                event_type="recipe_card_normalized",
-                message="Recipe card normalized.",
-                metadata={
-                    "platform": platform,
-                    "resolver": resolver,
-                    "model": model,
-                    "stage": "recipe_card_normalization",
-                    "ingredients_count": len(result.ingredients),
-                    "steps_count": len(result.steps),
-                    "grocery_count": len(result.grocery_list),
-                    "tags_count": len(result.missing_info_en),
-                    "used_fallback": used_fallback,
-                },
-            )
+        result = enforce_recipe_quality(
+            repository=repository,
+            job=job,
+            result=result,
+            model=model,
+            platform=platform,
+            source_metadata=source_metadata or {"platform": platform},
+            brief_text=brief_text,
+            used_fallback=used_fallback,
+            client=client,
+            settings=settings,
+        )
+        repository.insert_event(
+            job.id,
+            event_type="recipe_card_normalized",
+            message="Recipe card normalized.",
+            metadata={
+                **safe_quality_metadata(
+                    platform=platform,
+                    model=model,
+                    result=result,
+                    text_length=len(brief_text or ""),
+                    used_fallback=used_fallback,
+                    repair_used=False,
+                    quality_passed=recipe_quality_passed(result, settings),
+                ),
+                "resolver": resolver,
+            },
+        )
         recipe_card_id = repository.insert_recipe_card(
             job=job,
             result=result,
             model=model,
+            prompt_version=PROMPT_VERSION,
         )
+    except QueueJobFailure:
+        raise
     except Exception as exc:
         raise QueueJobFailure(
             "recipe_card_insert_failed",
@@ -2048,6 +2732,8 @@ def error_code_for_stage(stage: str) -> str:
         return "source_metadata_update_failed"
     if stage == "recipe_card_saving":
         return "recipe_card_insert_failed"
+    if stage == "recipe_quality_gate":
+        return "recipe_quality_gate_failed"
     if stage == "job_completion_update":
         return "job_completion_update_failed"
     if stage == "mock_fixture_analysis":
@@ -2072,6 +2758,8 @@ def error_code_for_stage(stage: str) -> str:
 def safe_message_for_stage(stage: str) -> str:
     if stage == "recipe_card_saving":
         return "Recipe card could not be saved."
+    if stage == "recipe_quality_gate":
+        return "Could not extract enough recipe details from this video."
     if stage == "job_completion_update":
         return "Recipe card was saved, but the job could not be marked completed."
     if stage in {"private_metadata_save", "source_metadata_update", "metadata_save"}:

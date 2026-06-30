@@ -268,6 +268,7 @@ class MediaJobRepository:
         job: MediaJobRecord,
         result: GeminiRecipeResult,
         model: str,
+        prompt_version: str = "m18_recipe_video_v1",
     ) -> UUID:
         if job.recipe_item_id is None:
             raise ValueError("Media job has no recipe item.")
@@ -336,7 +337,7 @@ class MediaJobRepository:
                     "confidence": result.confidence,
                     "source_link": job.source_url,
                     "model_used": model,
-                    "prompt_version": "m18_recipe_video_v1",
+                    "prompt_version": prompt_version,
                 }
             )
             .select("id")

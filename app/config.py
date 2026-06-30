@@ -65,6 +65,17 @@ class Settings(BaseSettings):
     gemini_video_brief_max_output_tokens: int = 768
     gemini_recipe_json_max_output_tokens: int = 1536
     gemini_recipe_brief_max_chars: int = 4000
+    gemini_max_output_tokens: int = 4096
+    gemini_video_brief_retry_enabled: bool = True
+    gemini_video_brief_max_retries: int = 1
+    gemini_recipe_repair_max_retries: int = 1
+    recipe_quality_gate_enabled: bool = True
+    recipe_repair_enabled: bool = True
+    recipe_min_ingredients: int = 2
+    recipe_min_steps: int = 3
+    recipe_min_brief_length: int = 500
+    recipe_bilingual_output_enabled: bool = True
+    recipe_urdu_fallback_enabled: bool = True
     recipe_card_normalization_enabled: bool = True
     allow_private_metadata_failure: bool = True
     enable_queue_wake_endpoint: bool = True

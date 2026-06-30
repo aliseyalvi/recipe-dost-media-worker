@@ -35,6 +35,7 @@ Keep this file terse: only durable architecture decisions, not full task history
 - M17A keeps queue mode as the primary worker flow but adds `GET /wake` so Render Free can be woken by HTTP without invoking `/process-job`. YouTube queue Gemini uses `YOUTUBE_AI_INPUT_MODE=gemini_url`: oEmbed for public metadata, then Gemini native YouTube URL input for the brief, followed by the same JSON/fallback recipe save path.
 - M18 normalizes all queue Gemini recipe cards into the existing `recipe_cards` insert shape immediately before save. The normalizer strips markdown, derives ingredients/steps/grocery from JSON or brief sections, keeps tags out of missing info, and uses prompt version `m18_recipe_video_v1`. Private metadata failures are non-fatal when `ALLOW_PRIVATE_METADATA_FAILURE=true`.
 - Queue Gemini token/performance optimization caps the video brief output, JSON output, and brief text passed to JSON conversion with `GEMINI_VIDEO_BRIEF_MAX_OUTPUT_TOKENS`, `GEMINI_RECIPE_JSON_MAX_OUTPUT_TOKENS`, and `GEMINI_RECIPE_BRIEF_MAX_CHARS`. Defaults are conservative and exposed on `/health`.
+- M20 uses `m20_recipe_video_v1` for queue Gemini recipe cards and enforces a save-time quality gate. Cards must normalize into useful ingredients, steps, and grocery items; weak cards are repaired from brief text only, can save as low confidence when minimally useful, or fail controlled with `recipe_quality_gate_failed`.
 
 ## Next Decision To Prove
 
