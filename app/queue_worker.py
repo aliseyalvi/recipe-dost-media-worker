@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import quote
 from uuid import UUID
 
@@ -37,7 +37,99 @@ from app.supabase_client import MediaJobRepository, create_repository
 
 logger = logging.getLogger("recipe_dost.worker")
 
-PROMPT_VERSION = "m20_recipe_video_v1"
+PROMPT_VERSION = "m20_gemini31_single_pass_v1"
+TWO_STEP_PROMPT_VERSION = "m20_recipe_video_v1"
+
+CANONICAL_RECIPE_PROMPT = """Perform exhaustive line-by-line recipe extraction.
+Do not summarize. Explicitly list every ingredient, including minor spices.
+Extract every cooking step in granular order. Use captions, labels, visible text,
+narration, and visual sequence. Return English and Urdu fields.
+
+Return strict JSON only with exactly these keys:
+title_en, title_ur, summary_en, summary_ur, ingredients, steps, grocery_list,
+time, servings, difficulty, cuisine_en, cuisine_ur, tags, missing_info, confidence.
+
+Use this shape:
+{
+  "title_en": "string",
+  "title_ur": "string",
+  "summary_en": "string",
+  "summary_ur": "string",
+  "ingredients": [{"name_en":"string","name_ur":"string","quantity":"string","notes_en":"string","notes_ur":"string"}],
+  "steps": [{"step_number":1,"instruction_en":"string","instruction_ur":"string","tip_en":"string","tip_ur":"string"}],
+  "grocery_list": [{"name_en":"string","name_ur":"string","quantity":"string"}],
+  "time": {"prep_minutes": null, "cook_minutes": null, "total_minutes": null},
+  "servings": null,
+  "difficulty": null,
+  "cuisine_en": "string",
+  "cuisine_ur": "string",
+  "tags": ["string"],
+  "missing_info": ["string"],
+  "confidence": "low"
+}
+
+If unknown, use null or empty arrays/strings. Do not omit keys.
+Do not include markdown."""
+
+CANONICAL_REPAIR_PROMPT = """Repair this invalid canonical recipe JSON.
+Use only the safe source title/platform, validation errors, and invalid JSON below.
+Do not use video, URLs, hidden data, or external facts. Return corrected strict
+canonical JSON only, with the same keys requested for extraction."""
+
+CANONICAL_RECIPE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "title_en": {"type": "string"},
+        "title_ur": {"type": "string"},
+        "summary_en": {"type": "string"},
+        "summary_ur": {"type": "string"},
+        "ingredients": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name_en": {"type": "string"},
+                    "name_ur": {"type": "string"},
+                    "quantity": {"type": "string"},
+                    "notes_en": {"type": "string"},
+                    "notes_ur": {"type": "string"},
+                },
+            },
+        },
+        "steps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "step_number": {"type": "integer"},
+                    "instruction_en": {"type": "string"},
+                    "instruction_ur": {"type": "string"},
+                    "tip_en": {"type": "string"},
+                    "tip_ur": {"type": "string"},
+                },
+            },
+        },
+        "grocery_list": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name_en": {"type": "string"},
+                    "name_ur": {"type": "string"},
+                    "quantity": {"type": "string"},
+                },
+            },
+        },
+        "time": {"type": "object"},
+        "servings": {},
+        "difficulty": {},
+        "cuisine_en": {"type": "string"},
+        "cuisine_ur": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "missing_info": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "string"},
+    },
+}
 
 VIDEO_BRIEF_PROMPT = """Extract a detailed, sectioned recipe brief from this video.
 Use visible labels, narration, captions, and the inferred cooking sequence.
@@ -693,6 +785,56 @@ def process_youtube_gemini_url_job(
         "stage": "youtube_gemini_url",
         "video_bytes_verified": False,
     }
+    if settings.gemini_extraction_mode == "single_pass_structured":
+        try:
+            from google.genai import types
+
+            uri_kwargs = {"file" + "_uri": job.source_url, "mime_type": "video/mp4"}
+            video_part = types.Part.from_uri(**uri_kwargs)
+            result, accepted_model, repair_used = run_single_pass_structured_extraction(
+                repository=repository,
+                job=job,
+                settings=settings,
+                client=client,
+                input_part=video_part,
+                input_mode="youtube_url",
+                source_metadata=extract_result,
+                platform=platform,
+            )
+        except QueueJobFailure:
+            raise
+        except Exception as exc:
+            raise QueueJobFailure(
+                "youtube_gemini_url_failed",
+                "Gemini YouTube URL analysis failed.",
+                stage="youtube_gemini_url",
+                exception_type=type(exc).__name__,
+            ) from exc
+        add_event(
+            repository,
+            job.id,
+            "youtube_gemini_url_completed",
+            "Gemini YouTube URL analysis completed.",
+            {
+                **base_metadata,
+                "model": accepted_model,
+                "extraction_mode": settings.gemini_extraction_mode,
+                "repair_used": repair_used,
+            },
+        )
+        return save_gemini_recipe_card(
+            repository=repository,
+            job=job,
+            result=result,
+            model=accepted_model,
+            platform=platform,
+            resolver="youtube_oembed",
+            uploaded_thumbnail_url=uploaded_thumbnail_url,
+            source_metadata=extract_result,
+            used_fallback=accepted_model != settings.gemini_primary_model,
+            client=client,
+            settings=settings,
+        )
     add_event(
         repository,
         job.id,
@@ -967,10 +1109,571 @@ def recipe_urdu_fields_present(result: GeminiRecipeResult) -> bool:
 
 def recipe_quality_passed(result: GeminiRecipeResult, settings: Settings) -> bool:
     return (
+        bool(clean_recipe_text(result.recipe_title_en))
+        and
         len(result.ingredients) >= settings.recipe_min_ingredients
         and len(result.steps) >= settings.recipe_min_steps
         and len(result.grocery_list) >= 1
+        and not summary_looks_raw(result.short_summary_en)
     )
+
+
+def summary_looks_raw(summary: object) -> bool:
+    text = clean_recipe_text(summary).lower()
+    return bool(
+        re.search(
+            r"\b(recipe facts|ingredients\s+steps|grocery_list|time_and_servings|"
+            r"missing_or_uncertain_details)\b",
+            text,
+        )
+    )
+
+
+def build_gemini_generation_config(
+    settings: Settings,
+    *,
+    structured_schema: bool,
+) -> dict[str, object]:
+    config: dict[str, object] = {
+        "response_mime_type": "application/json",
+        "temperature": 0.1,
+        "max_output_tokens": max(512, settings.gemini_max_output_tokens),
+    }
+    if structured_schema and settings.gemini_structured_output_enabled:
+        config["response_schema"] = CANONICAL_RECIPE_SCHEMA
+    if settings.gemini_thinking_level:
+        config["thinking_config"] = {"thinking_level": settings.gemini_thinking_level}
+    return config
+
+
+def generate_content_json(
+    *,
+    client: object,
+    model: str,
+    contents: list[object],
+    settings: Settings,
+    structured_schema: bool,
+) -> tuple[dict, object]:
+    attempts = [
+        build_gemini_generation_config(settings, structured_schema=structured_schema),
+        build_gemini_generation_config(settings, structured_schema=False),
+        {
+            "response_mime_type": "application/json",
+            "temperature": 0.1,
+            "max_output_tokens": max(512, settings.gemini_max_output_tokens),
+        },
+    ]
+    last_exc: Exception | None = None
+    for config in attempts:
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+            text = extract_gemini_text(response)
+            if not text:
+                raise QueueJobFailure(
+                    "gemini_recipe_json_empty",
+                    "Gemini returned empty recipe JSON.",
+                    stage="gemini_structured_extraction",
+                )
+            return _extract_json_object(text), response
+        except TypeError as exc:
+            last_exc = exc
+            continue
+        except Exception:
+            raise
+    if last_exc is not None:
+        response = client.models.generate_content(model=model, contents=contents)
+        text = extract_gemini_text(response)
+        if not text:
+            raise QueueJobFailure(
+                "gemini_recipe_json_empty",
+                "Gemini returned empty recipe JSON.",
+                stage="gemini_structured_extraction",
+            )
+        return _extract_json_object(text), response
+    raise RuntimeError("gemini_structured_generation_failed")
+
+
+def canonical_time_value(time_value: object, key: str) -> int | None:
+    if not isinstance(time_value, dict):
+        return None
+    aliases = {
+        "prep": ("prep_minutes", "prep_time_minutes"),
+        "cook": ("cook_minutes", "cook_time_minutes"),
+        "total": ("total_minutes", "time_minutes"),
+    }[key]
+    for alias in aliases:
+        value = safe_int_or_none(time_value.get(alias))
+        if value is not None:
+            return value
+    return None
+
+
+def validate_and_normalize_canonical_recipe(
+    canonical_recipe: dict,
+    source_metadata: dict[str, object],
+    settings: Settings,
+) -> tuple[GeminiRecipeResult, list[str]]:
+    errors: list[str] = []
+    platform = str(source_metadata.get("platform") or "")
+    title = clean_recipe_text(
+        canonical_recipe.get("title_en")
+        or canonical_recipe.get("title")
+        or source_metadata.get("title")
+    )
+    summary = clean_summary_text(
+        canonical_recipe.get("summary_en") or canonical_recipe.get("summary"),
+        title or "AI Recipe from Video",
+    )
+    ingredients_raw = canonical_recipe.get("ingredients")
+    if not isinstance(ingredients_raw, list):
+        ingredients_raw = []
+    ingredients = [
+        item
+        for item in (parse_ingredient_item(value) for value in ingredients_raw)
+        if item is not None
+    ]
+    steps_raw = canonical_recipe.get("steps")
+    if not isinstance(steps_raw, list):
+        steps_raw = []
+    steps = [
+        item
+        for item in (
+            parse_step_item(value, index + 1) for index, value in enumerate(steps_raw)
+        )
+        if item is not None
+    ]
+    steps = [
+        RecipeStep(
+            step_number=index + 1,
+            instruction_en=step.instruction_en,
+            instruction_ur=step.instruction_ur,
+            tip_en=step.tip_en,
+            tip_ur=step.tip_ur,
+        )
+        for index, step in enumerate(steps)
+    ]
+    grocery_raw = canonical_recipe.get("grocery_list")
+    if not isinstance(grocery_raw, list):
+        grocery_raw = []
+    grocery = [
+        item
+        for item in (parse_grocery_item(value) for value in grocery_raw)
+        if item is not None
+    ]
+    if not grocery:
+        grocery = [
+            GroceryItem(name_en=item.name_en, name_ur=item.name_ur, quantity=item.quantity)
+            for item in ingredients
+        ]
+    time_value = canonical_recipe.get("time")
+    difficulty = clean_recipe_text(canonical_recipe.get("difficulty")).lower()
+    if difficulty in {"null", "none", "unknown"}:
+        difficulty = "unknown"
+    if difficulty not in {"easy", "medium", "hard", "unknown"}:
+        difficulty = "unknown"
+    confidence = clean_recipe_text(canonical_recipe.get("confidence")).lower()
+    if confidence not in {"low", "medium", "high"}:
+        confidence = "low"
+    tags_raw = canonical_recipe.get("tags") if isinstance(canonical_recipe.get("tags"), list) else []
+    tags = [clean_recipe_text(tag).lower() for tag in tags_raw if clean_recipe_text(tag)]
+    missing_raw = (
+        canonical_recipe.get("missing_info")
+        if isinstance(canonical_recipe.get("missing_info"), list)
+        else []
+    )
+    missing = [
+        clean_recipe_text(item)
+        for item in missing_raw
+        if clean_recipe_text(item) and clean_recipe_text(item).lower() not in set(tags)
+    ]
+    if not title:
+        errors.append("title_missing")
+    if len(ingredients) < settings.recipe_min_ingredients:
+        errors.append("ingredients_too_few")
+    if len(steps) < settings.recipe_min_steps:
+        errors.append("steps_too_few")
+    if summary_looks_raw(summary):
+        errors.append("summary_raw_or_section_dump")
+    result = GeminiRecipeResult(
+        recipe_title_en=title or "AI Recipe from Video",
+        recipe_title_ur=clean_recipe_text(canonical_recipe.get("title_ur")),
+        short_summary_en=summary,
+        short_summary_ur=clean_recipe_text(canonical_recipe.get("summary_ur")),
+        confidence=confidence,
+        prep_time_minutes=canonical_time_value(time_value, "prep"),
+        cook_time_minutes=canonical_time_value(time_value, "cook"),
+        servings=(
+            str(canonical_recipe.get("servings"))
+            if canonical_recipe.get("servings") not in {None, ""}
+            else None
+        ),
+        difficulty=difficulty,
+        ingredients=ingredients,
+        steps=steps,
+        grocery_list=grocery,
+        missing_info_en=missing,
+        missing_info_ur=[],
+        storage_tip_en="",
+        storage_tip_ur="",
+        safety_note_en="",
+        safety_note_ur="",
+        source_assumptions_en=[],
+        source_assumptions_ur=[],
+    )
+    if not recipe_quality_passed(result, settings):
+        if "quality_gate_failed" not in errors:
+            errors.append("quality_gate_failed")
+    return result, errors
+
+
+def canonical_to_safe_json(canonical: dict | None) -> str:
+    if not canonical:
+        return "{}"
+    return json.dumps(canonical, ensure_ascii=False)[:12000]
+
+
+def technical_gemini_failure(exc: Exception) -> bool:
+    if isinstance(exc, QueueJobFailure):
+        return exc.code in {
+            "gemini_recipe_json_empty",
+            "gemini_structured_extraction_failed",
+        }
+    status = exception_status(exc)
+    if status in {400, 404, 429}:
+        return True
+    if status is not None and status >= 500:
+        return True
+    return type(exc).__name__ in {
+        "ServerError",
+        "InternalServerError",
+        "NotFound",
+        "BadRequest",
+        "ClientError",
+        "AttributeError",
+        "TypeError",
+    }
+
+
+def structured_event_metadata(
+    *,
+    platform: str,
+    model: str,
+    input_mode: str,
+    settings: Settings,
+    result: GeminiRecipeResult | None = None,
+    fallback_model: str | None = None,
+    retry_count: int | None = None,
+    quality_passed: bool | None = None,
+    validation_errors_count: int | None = None,
+    repair_used: bool | None = None,
+    error_code: str | None = None,
+    exception_type: str | None = None,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "platform": platform,
+        "model": model,
+        "input_mode": input_mode,
+        "extraction_mode": settings.gemini_extraction_mode,
+        "thinking_level": settings.gemini_thinking_level,
+    }
+    if fallback_model is not None:
+        metadata["fallback_model"] = fallback_model
+    if result is not None:
+        metadata.update(recipe_quality_stats(result))
+    if retry_count is not None:
+        metadata["retry_count"] = retry_count
+    if quality_passed is not None:
+        metadata["quality_passed"] = quality_passed
+    if validation_errors_count is not None:
+        metadata["validation_errors_count"] = validation_errors_count
+    if repair_used is not None:
+        metadata["repair_used"] = repair_used
+    if error_code is not None:
+        metadata["error_code"] = error_code
+    if exception_type is not None:
+        metadata["exception_type"] = exception_type
+    return metadata
+
+
+def build_structured_contents(input_part: object, prompt: str) -> list[object]:
+    return [input_part, prompt]
+
+
+def run_structured_extraction_call(
+    *,
+    client: object,
+    input_part: object,
+    model: str,
+    settings: Settings,
+) -> tuple[dict, object]:
+    return generate_content_json(
+        client=client,
+        model=model,
+        contents=build_structured_contents(input_part, CANONICAL_RECIPE_PROMPT),
+        settings=settings,
+        structured_schema=True,
+    )
+
+
+def run_structured_repair_call(
+    *,
+    client: object,
+    model: str,
+    source_metadata: dict[str, object],
+    platform: str,
+    validation_errors: list[str],
+    invalid_canonical: dict | None,
+    settings: Settings,
+) -> dict:
+    prompt = (
+        f"{CANONICAL_REPAIR_PROMPT}\n\n"
+        f"Platform: {platform}\n"
+        f"Source title: {clean_recipe_text(source_metadata.get('title')) or 'unknown'}\n"
+        f"Validation errors: {', '.join(validation_errors[:12])}\n\n"
+        f"Invalid JSON:\n{canonical_to_safe_json(invalid_canonical)}"
+    )
+    parsed, _response = generate_content_json(
+        client=client,
+        model=model,
+        contents=[prompt],
+        settings=settings,
+        structured_schema=True,
+    )
+    return parsed
+
+
+def run_single_pass_structured_extraction(
+    *,
+    repository: MediaJobRepository,
+    job: MediaJobRecord,
+    settings: Settings,
+    client: object,
+    input_part: object,
+    input_mode: str,
+    source_metadata: dict[str, object],
+    platform: str,
+) -> tuple[GeminiRecipeResult, str, bool]:
+    model = settings.gemini_primary_model
+    repository.insert_event(
+        job.id,
+        event_type="gemini_structured_extraction_started",
+        message="Gemini structured extraction started.",
+        metadata=structured_event_metadata(
+            platform=platform,
+            model=model,
+            input_mode=input_mode,
+            settings=settings,
+        ),
+    )
+    canonical: dict | None = None
+    try:
+        canonical, _response = run_structured_extraction_call(
+            client=client,
+            input_part=input_part,
+            model=model,
+            settings=settings,
+        )
+    except Exception as exc:
+        if not technical_gemini_failure(exc):
+            repository.insert_event(
+                job.id,
+                event_type="gemini_structured_extraction_failed",
+                message="Gemini structured extraction failed.",
+                metadata=structured_event_metadata(
+                    platform=platform,
+                    model=model,
+                    input_mode=input_mode,
+                    settings=settings,
+                    error_code="gemini_structured_extraction_failed",
+                    exception_type=type(exc).__name__,
+                ),
+            )
+            raise QueueJobFailure(
+                "gemini_structured_extraction_failed",
+                "Gemini structured recipe extraction failed.",
+                stage="gemini_structured_extraction",
+                exception_type=type(exc).__name__,
+            ) from exc
+        fallback_model = settings.gemini_fallback_model
+        repository.insert_event(
+            job.id,
+            event_type="gemini_structured_extraction_fallback_model_used",
+            message="Gemini structured extraction retrying with fallback model.",
+            metadata=structured_event_metadata(
+                platform=platform,
+                model=model,
+                fallback_model=fallback_model,
+                input_mode=input_mode,
+                settings=settings,
+                retry_count=1,
+                exception_type=type(exc).__name__,
+            ),
+        )
+        model = fallback_model
+        try:
+            canonical, _response = run_structured_extraction_call(
+                client=client,
+                input_part=input_part,
+                model=model,
+                settings=settings,
+            )
+        except Exception as fallback_exc:
+            repository.insert_event(
+                job.id,
+                event_type="gemini_structured_extraction_failed",
+                message="Gemini structured extraction failed.",
+                metadata=structured_event_metadata(
+                    platform=platform,
+                    model=model,
+                    input_mode=input_mode,
+                    settings=settings,
+                    error_code="gemini_structured_extraction_failed",
+                    exception_type=type(fallback_exc).__name__,
+                ),
+            )
+            raise QueueJobFailure(
+                "gemini_structured_extraction_failed",
+                "Gemini structured recipe extraction failed.",
+                stage="gemini_structured_extraction",
+                exception_type=type(fallback_exc).__name__,
+            ) from fallback_exc
+    result, errors = validate_and_normalize_canonical_recipe(
+        canonical,
+        source_metadata,
+        settings,
+    )
+    quality_passed = not errors and recipe_quality_passed(result, settings)
+    repair_used = False
+    if settings.recipe_quality_gate_enabled and not quality_passed:
+        if not settings.recipe_repair_enabled:
+            return result, model, repair_used
+        repair_model = settings.effective_gemini_repair_model
+        repository.insert_event(
+            job.id,
+            event_type="recipe_card_repair_started",
+            message="Recipe card repair started.",
+            metadata=structured_event_metadata(
+                platform=platform,
+                model=repair_model,
+                input_mode=input_mode,
+                settings=settings,
+                result=result,
+                validation_errors_count=len(errors),
+                repair_used=True,
+                quality_passed=False,
+            ),
+        )
+        try:
+            repaired = run_structured_repair_call(
+                client=client,
+                model=repair_model,
+                source_metadata=source_metadata,
+                platform=platform,
+                validation_errors=errors,
+                invalid_canonical=canonical,
+                settings=settings,
+            )
+            repaired_result, repaired_errors = validate_and_normalize_canonical_recipe(
+                repaired,
+                source_metadata,
+                settings,
+            )
+            repair_used = True
+            result = repaired_result
+            model = repair_model
+            errors = repaired_errors
+            quality_passed = not errors and recipe_quality_passed(result, settings)
+            repository.insert_event(
+                job.id,
+                event_type="recipe_card_repair_completed",
+                message="Recipe card repair completed.",
+                metadata=structured_event_metadata(
+                    platform=platform,
+                    model=repair_model,
+                    input_mode=input_mode,
+                    settings=settings,
+                    result=result,
+                    validation_errors_count=len(errors),
+                    repair_used=True,
+                    quality_passed=quality_passed,
+                ),
+            )
+        except Exception as exc:
+            repository.insert_event(
+                job.id,
+                event_type="recipe_card_repair_failed",
+                message="Recipe card repair failed.",
+                metadata=structured_event_metadata(
+                    platform=platform,
+                    model=repair_model,
+                    input_mode=input_mode,
+                    settings=settings,
+                    result=result,
+                    validation_errors_count=len(errors),
+                    repair_used=True,
+                    quality_passed=False,
+                    error_code="recipe_card_repair_failed",
+                    exception_type=type(exc).__name__,
+                ),
+            )
+    final_passed = recipe_quality_passed(result, settings) and not errors
+    repository.insert_event(
+        job.id,
+        event_type="recipe_quality_gate_checked",
+        message="Recipe quality gate checked.",
+        metadata=structured_event_metadata(
+            platform=platform,
+            model=model,
+            input_mode=input_mode,
+            settings=settings,
+            result=result,
+            validation_errors_count=len(errors),
+            repair_used=repair_used,
+            quality_passed=final_passed,
+        ),
+    )
+    if settings.recipe_quality_gate_enabled and not final_passed:
+        repository.insert_event(
+            job.id,
+            event_type="recipe_quality_gate_failed",
+            message="Recipe quality gate failed.",
+            metadata=structured_event_metadata(
+                platform=platform,
+                model=model,
+                input_mode=input_mode,
+                settings=settings,
+                result=result,
+                validation_errors_count=len(errors),
+                repair_used=repair_used,
+                quality_passed=False,
+                error_code="recipe_quality_gate_failed",
+            ),
+        )
+        raise QueueJobFailure(
+            "recipe_quality_gate_failed",
+            "Could not extract enough recipe details from this video.",
+            stage="recipe_quality_gate",
+        )
+    repository.insert_event(
+        job.id,
+        event_type="gemini_structured_extraction_completed",
+        message="Gemini structured extraction completed.",
+        metadata=structured_event_metadata(
+            platform=platform,
+            model=model,
+            input_mode=input_mode,
+            settings=settings,
+            result=result,
+            validation_errors_count=len(errors),
+            repair_used=repair_used,
+            quality_passed=final_passed,
+        ),
+    )
+    return result, model, repair_used
 
 
 def gemini_response_metadata(response: object) -> dict[str, object]:
@@ -1449,6 +2152,13 @@ def convert_brief_to_recipe_json(
             stage="gemini_recipe_json",
             exception_type=type(last_exc).__name__ if last_exc else None,
         )
+    if not settings.local_brief_parser_enabled:
+        raise QueueJobFailure(
+            "gemini_recipe_json_invalid",
+            "Gemini returned an invalid recipe response.",
+            stage="gemini_recipe_json",
+            exception_type=type(last_exc).__name__ if last_exc else None,
+        )
     repository.insert_event(
         job.id,
         event_type="brief_card_build_started",
@@ -1637,6 +2347,49 @@ def run_gemini_video_poc_analysis(
                 "file_state": "ACTIVE",
             },
         )
+        if settings.gemini_extraction_mode == "single_pass_structured":
+            result, accepted_model, repair_used = run_single_pass_structured_extraction(
+                repository=repository,
+                job=job,
+                settings=settings,
+                client=client,
+                input_part=uploaded_file,
+                input_mode=settings.gemini_video_input_mode,
+                source_metadata=extract_result,
+                platform=platform,
+            )
+            parsed = {"save_mode": "single_pass_structured"}
+            repository.insert_event(
+                job.id,
+                event_type="gemini_video_analysis_completed",
+                message="Gemini video analysis completed.",
+                metadata=safe_ai_event_metadata(
+                    platform=platform,
+                    resolver=resolver,
+                    model=accepted_model,
+                    duration_seconds=duration_seconds,
+                    size_bytes=size_bytes,
+                    video_bytes_verified=True,
+                    stage="gemini_video_analysis",
+                    analysis_mode=settings.gemini_extraction_mode,
+                    input_mode=settings.gemini_video_input_mode,
+                    mime_type=mime_type,
+                )
+                | {"repair_used": repair_used},
+            )
+            return save_gemini_recipe_card(
+                repository=repository,
+                job=job,
+                result=result,
+                model=accepted_model,
+                platform=platform,
+                resolver=resolver,
+                uploaded_thumbnail_url=uploaded_thumbnail_url,
+                source_metadata=extract_result,
+                used_fallback=accepted_model != settings.gemini_primary_model,
+                client=client,
+                settings=settings,
+            )
         brief_metadata = {
             **base_ai_metadata,
             "stage": "gemini_video_brief",

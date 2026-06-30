@@ -25,6 +25,12 @@ class HealthResponse(BaseModel):
     ai_analysis_mode: str
     gemini_video_input_mode: str
     gemini_video_analysis_mode: str
+    gemini_extraction_mode: str
+    gemini_primary_model: str
+    gemini_fallback_model: str
+    gemini_thinking_level: str
+    gemini_structured_output_enabled: bool
+    local_brief_parser_enabled: bool
     gemini_file_upload_timeout_seconds: int
     gemini_file_poll_interval_seconds: int
     gemini_file_max_wait_seconds: int

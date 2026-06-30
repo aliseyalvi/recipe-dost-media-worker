@@ -18,6 +18,7 @@ MediaPipelineMode = Literal["youtube_direct", "social_stream"]
 GeminiSocialUploadMode = Literal["files_api", "inline"]
 GeminiVideoInputMode = Literal["file_api"]
 GeminiVideoAnalysisMode = Literal["two_step_brief_then_json"]
+GeminiExtractionMode = Literal["single_pass_structured", "two_step_brief_then_json"]
 SocialAnalysisMode = Literal["text_first", "video_first", "video_only"]
 AIAnalysisMode = Literal["gemini", "mock_fixture", "gemini_video_poc"]
 MockVideoProcessingMode = Literal["skip_video_download", "download_then_mock"]
@@ -40,6 +41,13 @@ class Settings(BaseSettings):
     supabase_service_role_key: SecretStr
     gemini_api_key: Optional[SecretStr] = None
     gemini_model: str = "gemini-3.5-flash"
+    gemini_extraction_mode: GeminiExtractionMode = "single_pass_structured"
+    gemini_primary_model: str = "gemini-3.1-flash-lite"
+    gemini_repair_model: Optional[str] = None
+    gemini_fallback_model: str = "gemini-2.5-flash"
+    gemini_thinking_level: str = "high"
+    gemini_structured_output_enabled: bool = True
+    local_brief_parser_enabled: bool = False
     gemini_video_model: Optional[str] = None
     gemini_text_model: Optional[str] = None
     gemini_video_fallback_models: Annotated[list[str], NoDecode] = Field(
@@ -65,7 +73,7 @@ class Settings(BaseSettings):
     gemini_video_brief_max_output_tokens: int = 768
     gemini_recipe_json_max_output_tokens: int = 1536
     gemini_recipe_brief_max_chars: int = 4000
-    gemini_max_output_tokens: int = 4096
+    gemini_max_output_tokens: int = 12000
     gemini_video_brief_retry_enabled: bool = True
     gemini_video_brief_max_retries: int = 1
     gemini_recipe_repair_max_retries: int = 1
@@ -189,11 +197,15 @@ class Settings(BaseSettings):
 
     @property
     def effective_gemini_video_model(self) -> str:
-        return self.gemini_video_model or "gemini-2.5-flash"
+        return self.gemini_video_model or self.gemini_primary_model
 
     @property
     def effective_gemini_text_model(self) -> str:
-        return self.gemini_text_model or "gemini-2.5-flash-lite"
+        return self.gemini_text_model or self.gemini_primary_model
+
+    @property
+    def effective_gemini_repair_model(self) -> str:
+        return self.gemini_repair_model or self.gemini_primary_model
 
     @property
     def gemini_configured(self) -> bool:
@@ -269,6 +281,16 @@ class Settings(BaseSettings):
     def fallback_unknown_gemini_social_upload_mode(cls, value: object) -> object:
         normalized = str(value).strip().lower()
         return normalized if normalized in {"files_api", "inline"} else "files_api"
+
+    @field_validator("gemini_extraction_mode", mode="before")
+    @classmethod
+    def fallback_unknown_gemini_extraction_mode(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        return (
+            normalized
+            if normalized in {"single_pass_structured", "two_step_brief_then_json"}
+            else "single_pass_structured"
+        )
 
     @field_validator("gemini_video_input_mode", mode="before")
     @classmethod

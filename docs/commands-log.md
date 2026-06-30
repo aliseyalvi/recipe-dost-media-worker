@@ -437,3 +437,56 @@ print("m20 parser quality smoke passed")
 PY
 # passed; local venv emitted urllib3 LibreSSL warning
 ```
+
+## M20 Gemini 3.1 Single-Pass Validation
+
+```bash
+python3 -m compileall app
+# passed
+
+env PYTHONPYCACHEPREFIX=/private/tmp/recipe-dost-pycache .venv/bin/python -m compileall app
+# passed
+
+grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url\|COOKIES_B64\|cookies.txt\|file_uri\|uploaded_file.uri" -n app docs || true
+# matched intentional cookie path config, generated pycache, and historical commands-log validation text only
+
+WORKER_API_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test .venv/bin/python - <<'PY'
+from app.config import Settings
+from app.queue_worker import validate_and_normalize_canonical_recipe, recipe_quality_passed
+s = Settings(_env_file=None)
+assert s.gemini_extraction_mode == "single_pass_structured"
+assert s.gemini_primary_model == "gemini-3.1-flash-lite"
+assert s.effective_gemini_video_model == "gemini-3.1-flash-lite"
+assert s.effective_gemini_text_model == "gemini-3.1-flash-lite"
+assert s.gemini_fallback_model == "gemini-2.5-flash"
+assert s.gemini_thinking_level == "high"
+assert s.gemini_max_output_tokens == 12000
+canonical = {
+  "title_en": "Mutton Karahi", "title_ur": "مٹن کڑاہی",
+  "summary_en": "A stovetop mutton karahi with tomatoes and spices.",
+  "summary_ur": "ٹماٹر اور مصالحوں کے ساتھ مٹن کڑاہی۔",
+  "ingredients": [
+    {"name_en": "Mutton (bone-in)", "name_ur": "مٹن", "quantity": "~1 kg", "notes_en": "", "notes_ur": ""},
+    {"name_en": "Tomatoes", "name_ur": "ٹماٹر", "quantity": "4 medium", "notes_en": "", "notes_ur": ""}
+  ],
+  "steps": [
+    {"step_number": 1, "instruction_en": "Heat oil and add mutton.", "instruction_ur": "تیل گرم کر کے مٹن ڈالیں۔", "tip_en": "", "tip_ur": ""},
+    {"step_number": 2, "instruction_en": "Add ginger garlic paste and cook until fragrant.", "instruction_ur": "ادرک لہسن پیسٹ ڈال کر بھونیں۔", "tip_en": "", "tip_ur": ""},
+    {"step_number": 3, "instruction_en": "Add tomatoes and spices, then simmer until tender.", "instruction_ur": "ٹماٹر اور مصالحے ڈال کر گلنے تک پکائیں۔", "tip_en": "", "tip_ur": ""}
+  ],
+  "grocery_list": [],
+  "time": {"prep_minutes": None, "cook_minutes": None, "total_minutes": None},
+  "servings": None, "difficulty": "medium", "cuisine_en": "Pakistani", "cuisine_ur": "پاکستانی",
+  "tags": ["karahi"], "missing_info": ["Exact salt quantity is not shown."], "confidence": "high"
+}
+result, errors = validate_and_normalize_canonical_recipe(canonical, {"platform": "tiktok", "title": "Mutton Karahi"}, s)
+assert not errors
+assert recipe_quality_passed(result, s)
+assert len(result.grocery_list) == len(result.ingredients)
+assert result.ingredients[0].name_ur
+assert result.steps[0].instruction_ur
+assert result.source_assumptions_en == []
+print("single-pass canonical smoke passed")
+PY
+# passed; local venv emitted urllib3 LibreSSL warning
+```
