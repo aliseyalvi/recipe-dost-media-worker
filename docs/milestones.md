@@ -33,14 +33,16 @@
 | 29 | M18 Stabilize E2E recipe pipeline | Done | Queue Gemini cards normalize into one structured recipe shape and YouTube private metadata failures no longer stop jobs |
 | 30 | M20 Gemini 3.1 single-pass structured extraction | Done | Gemini 3.1 structured JSON extraction with quality gate, repair, fallback model, grocery derivation, and Urdu fields |
 | 31 | M20.5 Worker repo cleanup before production cutover | Done | Queue mode documented as production flow, legacy webhook path de-emphasized, and `feature/queue-ytdlp-poc` marked ready to merge to `main` |
-| 32 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 33 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 34 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 32 | M21.7A Worker metadata preview endpoint | Done | Protected `/metadata-preview` returns lightweight title/thumbnail/duration metadata without Gemini or video downloads |
+| 33 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 34 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 35 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
 Merge `feature/queue-ytdlp-poc` to `main`, deploy the production worker from `main`, then validate TikTok, Instagram, and YouTube before suspending the old webhook Render service.
 
+- `/metadata-preview` is available for app-side saved-link previews before AI generation. It requires the worker secret via `X-Worker-Secret` or `Authorization: Bearer`, uses oEmbed/yt-dlp/OpenGraph metadata only, does not call Gemini, and does not download videos.
 - `WORKER_EXECUTION_MODE=queue` is the primary production mode; FastAPI startup and `GET /wake` keep one serialized queue loop active.
 - `/process-job` is retained for legacy/manual/debug kicks only and is not the primary production flow.
 - create-media-job creates `queued` jobs; the queue loop claims the oldest job as `resolving`.
@@ -67,3 +69,4 @@ Merge `feature/queue-ytdlp-poc` to `main`, deploy the production worker from `ma
 - Queue Gemini optimization caps video brief output, JSON output, and oversized brief text sent into JSON conversion to reduce token usage and latency while keeping the two-step/fallback flow.
 - M20 replaces the default queue Gemini brief-to-JSON flow with `GEMINI_EXTRACTION_MODE=single_pass_structured`: Gemini 3.1 Flash Lite extracts canonical recipe JSON directly from YouTube URL or uploaded temp video file, repair uses invalid JSON/errors only, and unrecoverable weak output fails with `recipe_quality_gate_failed`. The old two-step mode remains available only through `GEMINI_EXTRACTION_MODE=two_step_brief_then_json`.
 - M20.5 confirms `feature/queue-ytdlp-poc` is ready to merge to `main`; after merge, production should run from `main`, and the old webhook Render service should be suspended only after the main service validates TikTok, Instagram, and YouTube.
+- M21.7A adds a worker-powered metadata preview route for saved recipe links. The route is protected by the existing worker secret, returns only safe app metadata, flags over-limit durations without failing, exposes metadata-preview support on `/health`, and leaves the queue/Gemini analysis pipeline unchanged.

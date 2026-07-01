@@ -131,6 +131,8 @@ class HealthResponse(BaseModel):
     enable_metadata_only_mock_fallback: bool
     enable_og_metadata_fallback: bool
     allow_mock_completion_without_video: bool
+    metadata_preview_enabled: bool
+    supported_metadata_platforms: list[str]
 
 
 class MediaJobData(BaseModel):

@@ -504,3 +504,62 @@ grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_
 # matched intentional literal cookie path/config strings, ignored generated pycache,
 # and historical commands-log entries only; no committed secret values found
 ```
+
+## M21.7A Metadata Preview Validation
+
+```bash
+python -m compileall app
+# zsh: command not found: python
+
+python3 -m compileall app
+# passed
+
+WORKER_API_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test .venv/bin/python - <<'PY'
+from unittest.mock import Mock, patch
+from fastapi.testclient import TestClient
+
+from app.config import get_settings
+from app.main import app
+
+get_settings.cache_clear()
+
+class FakeResponse:
+    def raise_for_status(self):
+        return None
+    def json(self):
+        return {
+            'title': 'Chicken & Rice #dinner #easy #quick #food',
+            'thumbnail_url': 'https://i.ytimg.com/vi/abc123/hqdefault.jpg',
+            'author_name': 'Recipe Dost Test',
+        }
+
+with patch('app.metadata_preview.requests.get', Mock(return_value=FakeResponse())):
+    client = TestClient(app)
+    unauthorized = client.post('/metadata-preview', json={'url': 'https://www.youtube.com/watch?v=abc123abc12'})
+    assert unauthorized.status_code == 401, unauthorized.text
+    response = client.post(
+        '/metadata-preview',
+        headers={'Authorization': 'Bearer test'},
+        json={'url': 'https://www.youtube.com/watch?v=abc123abc12', 'platform': None},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['platform'] == 'youtube'
+    assert body['resolver'] == 'youtube_oembed'
+    assert body['title'].startswith('Chicken & Rice')
+    assert body['thumbnail_url'].startswith('https://i.ytimg.com/')
+    assert body['metadata_status'] == 'completed'
+    assert 'cdn' not in body
+    health = client.get('/health')
+    assert health.status_code == 200, health.text
+    health_body = health.json()
+    assert health_body['metadata_preview_enabled'] is True
+    assert 'youtube' in health_body['supported_metadata_platforms']
+print('metadata preview route smoke passed')
+PY
+# passed; local venv emitted urllib3 LibreSSL warning
+
+grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url\|COOKIES_B64\|cookies.txt\|file_uri\|uploaded_file.uri" -n app docs README.md || true
+# matched existing cookie path literals, generated pycache binaries, README cookie docs,
+# and historical commands-log validation text only; no metadata-preview CDN/video URL return path found
+```

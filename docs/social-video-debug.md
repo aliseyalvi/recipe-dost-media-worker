@@ -66,6 +66,7 @@ TikWM debug was proven from Cloud Run. TikTok full jobs now use TikWM text-first
 - Queue Gemini token controls now keep video briefs concise, cap brief and JSON output tokens, and truncate oversized briefs before the text JSON call. The `/health` response reports the active caps for Render verification.
 - M20 single-pass mode emits `gemini_structured_extraction_started/completed/failed` and uses `gemini_structured_extraction_fallback_model_used` only for technical primary-model failures. Weak canonical JSON can emit `recipe_card_repair_started/completed/failed` and terminal `recipe_quality_gate_failed`; repair uses safe source title/platform, validation errors, and invalid JSON only, never video again.
 - M20.5 production checks: `WORKER_EXECUTION_MODE=queue` is the primary flow; `YOUTUBE_AI_INPUT_MODE=gemini_url` keeps YouTube off yt-dlp; TikTok/Instagram require verified temp files before Gemini Files API; `GEMINI_EXTRACTION_MODE=single_pass_structured`, `GEMINI_PRIMARY_MODEL=gemini-3.1-flash-lite`, and `LOCAL_BRIEF_PARSER_ENABLED=false` are the documented defaults.
+- M21.7A metadata preview checks: `POST /metadata-preview` is worker-secret protected, returns safe metadata only, uses YouTube oEmbed first, uses yt-dlp only with `download=False`, falls back to OpenGraph for social/other pages, and should never emit or return direct video/CDN URLs, cookie data, temp paths, prompts, raw responses, file references, or bytes.
 
 ## Expected `/debug/tikwm` Shape
 
@@ -111,6 +112,15 @@ curl -X POST http://localhost:8080/debug/social-resolve \
   -d '{"url":"https://www.instagram.com/reel/example/","resolver":"auto","test_stream":true}'
 ```
 
+Metadata preview without Gemini or video download:
+
+```bash
+curl -X POST http://localhost:8080/metadata-preview \
+  -H "Content-Type: application/json" \
+  -H "X-Worker-Secret: replace-with-your-worker-secret" \
+  -d '{"url":"https://www.youtube.com/watch?v=00000000000","platform":"youtube"}'
+```
+
 Full test plan:
 
 - TikTok text-first: expect `worker_started`, `tikwm_resolver_started`, `tikwm_resolver_completed`, `thumbnail_upload_started`, `thumbnail_uploaded` or `thumbnail_upload_failed`, `social_text_analysis_started`, `gemini_api_call_started`, `gemini_api_call_completed`, `social_text_analysis_completed`, `recipe_card_saved`, and `completed`; or a controlled failure.
@@ -123,6 +133,7 @@ Full test plan:
 - YouTube queue Gemini URL: expect `queue_job_claimed`, `youtube_metadata_started`, `youtube_metadata_completed`, optional `thumbnail_uploaded`, `private_metadata_saved`, `source_metadata_updated`, `gemini_structured_extraction_started`, `gemini_structured_extraction_completed`, `youtube_gemini_url_completed`, `recipe_card_saved`, and `queue_job_completed`; failures should use `youtube_gemini_url_failed`, not yt-dlp errors.
 - Queue Gemini token caps: verify `/health` includes `gemini_video_brief_max_output_tokens`, `gemini_recipe_json_max_output_tokens`, and `gemini_recipe_brief_max_chars`; default brief/JSON events still report sanitized `text_length` only.
 - M20 single-pass health: verify `/health` includes `gemini_extraction_mode`, `gemini_primary_model`, `gemini_fallback_model`, `gemini_thinking_level`, `gemini_max_output_tokens`, `gemini_structured_output_enabled`, `local_brief_parser_enabled`, `recipe_quality_gate_enabled`, and `recipe_repair_enabled`. New TikTok/Instagram/YouTube recipe cards should have at least 2 ingredients, 3 steps, and 1 grocery item when recipe content is available; unrecoverable weak output should fail with `recipe_quality_gate_failed`.
+- M21.7A metadata preview: verify `/health` includes `metadata_preview_enabled`, `max_video_duration_seconds`, and `supported_metadata_platforms`; YouTube preview returns title/thumbnail through oEmbed; TikTok/Instagram/Facebook preview returns yt-dlp metadata when available or safe OpenGraph partial metadata; over-limit duration sets `is_too_long=true` but still returns metadata.
 - YouTube mock fixture: with `AI_ANALYSIS_MODE=mock_fixture`, expect `platform_resolver_started`, `platform_resolver_completed`, metadata events, optional thumbnail upload, `mock_ai_analysis_started`, `mock_ai_analysis_completed`, `recipe_card_saved`, and `completed`; no `gemini_api_call_started`.
 - Instagram/Facebook mock fixture: with default flags, expect `instagram_resolver_disabled` or `facebook_resolver_disabled`; when enabled, expect completion only if SnapInsta/SnapSave returns parseable metadata/direct media.
 - TikTok with missing/thin title fails with `social_caption_missing` before stream download.

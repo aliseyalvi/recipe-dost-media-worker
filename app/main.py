@@ -16,6 +16,11 @@ from fastapi.responses import JSONResponse
 from app.ai.gemini_recipe import GeminiRecipeAnalyzer
 from app.config import Settings, get_settings
 from app.job_runner import JobNotFoundError, JobRunner, WorkerProcessingError
+from app.metadata_preview import (
+    MetadataPreviewError,
+    SUPPORTED_METADATA_PLATFORMS,
+    fetch_metadata_preview,
+)
 from app.queue_worker import run_queue_loop
 from app.schemas import (
     ErrorDetail,
@@ -84,10 +89,22 @@ def require_worker_secret(
         Optional[str],
         Header(alias="X-Worker-Secret"),
     ] = None,
+    authorization: Annotated[
+        Optional[str],
+        Header(alias="Authorization"),
+    ] = None,
     settings: Settings = Depends(get_settings),
 ) -> None:
     expected = settings.worker_api_secret.get_secret_value()
-    if x_worker_secret is None or not hmac.compare_digest(x_worker_secret, expected):
+    bearer = None
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer" and token:
+            bearer = token.strip()
+    if not (
+        (x_worker_secret is not None and hmac.compare_digest(x_worker_secret, expected))
+        or (bearer is not None and hmac.compare_digest(bearer, expected))
+    ):
         raise UnauthorizedWorkerError
 
 
@@ -253,6 +270,8 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         enable_metadata_only_mock_fallback=settings.enable_metadata_only_mock_fallback,
         enable_og_metadata_fallback=settings.enable_og_metadata_fallback,
         allow_mock_completion_without_video=settings.allow_mock_completion_without_video,
+        metadata_preview_enabled=True,
+        supported_metadata_platforms=SUPPORTED_METADATA_PLATFORMS,
     )
 
 
@@ -425,6 +444,47 @@ class DebugSocialResolveRequest(BaseModel):
 class DebugTikWMRequest(BaseModel):
     url: str
     test_stream: bool = False
+
+
+class MetadataPreviewRequest(BaseModel):
+    url: str
+    platform: Optional[str] = None
+
+
+@app.post(
+    "/metadata-preview",
+    response_model=None,
+    responses={
+        401: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+        502: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
+    },
+)
+def metadata_preview_endpoint(
+    request: MetadataPreviewRequest,
+    _authorized: None = Depends(require_worker_secret),
+    settings: Settings = Depends(get_settings),
+) -> Union[dict[str, object], JSONResponse]:
+    try:
+        preview = fetch_metadata_preview(
+            url=request.url,
+            platform=request.platform,
+            settings=settings,
+        )
+        return preview.as_dict()
+    except MetadataPreviewError as exc:
+        return error_response(exc.code, exc.message, exc.status_code)
+    except Exception as exc:
+        logger.warning(
+            "metadata_preview_failed",
+            extra={"exception_type": type(exc).__name__},
+        )
+        return error_response(
+            "metadata_preview_failed",
+            "Metadata preview could not be fetched.",
+            502,
+        )
 
 
 @app.post("/debug/social-resolve")

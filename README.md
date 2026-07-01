@@ -167,6 +167,35 @@ curl -X POST http://localhost:8080/debug/tikwm \
   -d '{"url":"https://www.tiktok.com/@example/video/0000000000000000000","test_stream":true}'
 ```
 
+Metadata preview for a saved recipe link before AI generation:
+
+```bash
+curl -X POST http://localhost:8080/metadata-preview \
+  -H "Content-Type: application/json" \
+  -H "X-Worker-Secret: replace-with-your-worker-secret" \
+  -d '{"url":"https://www.youtube.com/watch?v=00000000000","platform":"youtube"}'
+```
+
+`/metadata-preview` also accepts `Authorization: Bearer <WORKER_API_SECRET>`. It returns safe metadata only:
+
+```json
+{
+  "platform": "youtube",
+  "resolver": "youtube_oembed",
+  "title": "Recipe title",
+  "description": "Recipe title",
+  "thumbnail_url": "https://...",
+  "author_username": "creator",
+  "duration_seconds": null,
+  "tags": [],
+  "metadata_status": "completed",
+  "is_too_long": false,
+  "max_duration_seconds": 90
+}
+```
+
+This endpoint does not call Gemini, does not create media jobs, does not download videos, and must not return temporary video/CDN URLs or secret data. YouTube uses oEmbed first; TikTok, Instagram, and Facebook use yt-dlp metadata-only extraction when available, then safe OpenGraph fallback. Other URLs use OpenGraph only.
+
 ## Production Queue
 
 `WORKER_EXECUTION_MODE=queue` is the primary production mode. FastAPI starts one in-process queue loop on startup; `GET /wake` safely starts it again if Render Free has idled the service. The queue loop claims the oldest `queued` job and must finish each job as `completed` or `failed`.
@@ -178,6 +207,7 @@ curl -X POST http://localhost:8080/debug/tikwm \
 - Temporary stream URLs are never stored or returned.
 - Raw video is not stored. Gemini prompts, raw responses, source URLs, stream URLs, recipe ingredients, and recipe steps must not be logged or written to events.
 - Detailed worker stages are tracked with `media_job_events` and `progress`; `media_jobs.status` stays one of `queued`, `resolving`, `downloading`, `analyzing`, `completed`, or `failed`.
+- `/health` reports `metadata_preview_enabled`, `max_video_duration_seconds`, and `supported_metadata_platforms` for app/backend verification.
 
 See [docs/worker-context.md](docs/worker-context.md) for the compact current context.
 See [docs/render-deploy.md](docs/render-deploy.md) for Render setup notes.
