@@ -115,3 +115,9 @@ Update:
 ## Secrets
 
 Never commit `.env`, `cloudrun.env.yaml`, cookies, service-role keys, Gemini keys, or worker secrets.
+
+# Agent Execution Rules & Context Mapping
+
+## Environment Ground Rules
+- **OS Platform:** macOS / Darwin (Architecture tracking)
+- **Context Constraints:** The codebase contains **NO** active semantic or AST graph explorers. Do not attempt tools/scripts to map dependencies.

@@ -11,3 +11,9 @@ cookies.txt
 *-cookies.txt
 app/cookies/*.txt
 app/cookies/
+
+# Graphify & AST CodeGraph exclusions
+graphify-out/
+.code-review-graph/
+.mcp.json
+

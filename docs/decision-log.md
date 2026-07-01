@@ -42,3 +42,9 @@ Keep this file terse: only durable architecture decisions, not full task history
 ## Next Decision To Prove
 
 M14G-4R2 remains blocked until the main-branch Render deployment proves queue-mode TikTok, Instagram, and YouTube jobs reach `completed` or controlled `failed`. Metadata preview and queue analysis must continue to avoid public temporary resolver/CDN URLs, Gemini file references, cookies, prompts, raw responses, temp paths, and media bytes.
+
+## [2026-07-01] Architectural Decision: Graph Indexer Removal
+
+- **Context:** Automated AST graph generators (Graphify/CodeGraph) were causing infinite self-correction loops due to macOS sandbox permission conflicts (`Errno 1`). This was expanding the active context window with 40k+ line JSON data logs, exhausting session limits inside a single task block.
+- **Decision:** Completely uninstalled Graphify, wiped `graphify-out/` and `.code-review-graph/`, and removed the MCP server configuration.
+- **Consequence:** Project context tracking is now 100% shifted back to lightweight, cost-free, explicit markdown files (`agents.md`, `todo.md`, `decision_log.md`). Codex must rely purely on target file blocks provided directly in user prompts.
