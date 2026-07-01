@@ -3,48 +3,47 @@
 Repo:
 recipe-dost-media-worker
 
-Current task:
-W-M14R1C — Replace failing TikTok text-first Gemini helper with a simple synchronous Gemini REST call.
+Current milestone:
+M20.5 — worker repo cleanup before production cutover.
+
+Current branch:
+feature/queue-ytdlp-poc
+
+Cutover intent:
+- Merge `feature/queue-ytdlp-poc` into `main`.
+- Deploy the production Render worker from `main` after merge.
+- Suspend the old webhook Render service only after main validates TikTok, Instagram, and YouTube.
 
 Current architecture:
 - Python FastAPI worker.
-- /process-job returns HTTP 202 quickly.
-- FastAPI BackgroundTasks processes the job.
-- App creates media_jobs in Supabase.
-- Supabase create-media-job is currently in MEDIA_PROCESSOR_MODE=manual, so Cloud Run is bypassed.
-- Local worker is manually triggered with curl.
-- Later this same worker will be deployed to Render.
+- Primary production mode is `WORKER_EXECUTION_MODE=queue`.
+- FastAPI startup starts one queue loop when queue mode is enabled.
+- `GET /wake` safely starts/keeps the queue loop active for Render Free.
+- `GET /ping` and `GET /health` remain probe endpoints.
+- `POST /process-job` is legacy/manual/debug only.
+- Queue loop claims the oldest `queued` job and processes one job at a time.
 
-Current working parts:
-- media_jobs initial status is queued.
-- Worker now accepts queued jobs.
-- TikTok routes to TikWM.
-- TikWM resolver works.
-- Thumbnail upload works.
-- Worker reaches social_text_analysis_started.
+Current working paths:
+- YouTube uses Gemini native URL input when `YOUTUBE_AI_INPUT_MODE=gemini_url`; it must not use yt-dlp in that mode.
+- TikTok and Instagram use unified extraction to create a verified temp file, then Gemini Files API.
+- Gemini 3.1 Flash-Lite single-pass structured extraction is the default path.
+- Local deep parser fallback is disabled by default.
 
-Current failing part:
-- After social_text_analysis_started, worker fails with:
-  worker_error
-  background_worker_error
-  RuntimeError
-  WorkerProcessingError
-- No gemini_api_call_started event appears.
-- So failure is before or at the current Gemini helper call.
-
-Required fix:
-- Do not broadly refactor.
-- Do not touch app repo.
-- Do not change DB schema.
-- Do not re-enable video Gemini.
-- Do not store raw video.
-- Do not store CDN URLs.
-- Replace TikTok text-first Gemini helper call with a direct synchronous REST call to Gemini generateContent using requests.post(timeout=45).
+Required production settings:
+- `WORKER_EXECUTION_MODE=queue`
+- `AI_ANALYSIS_MODE=gemini_video_poc`
+- `GEMINI_EXTRACTION_MODE=single_pass_structured`
+- `GEMINI_PRIMARY_MODEL=gemini-3.1-flash-lite`
+- `YOUTUBE_AI_INPUT_MODE=gemini_url`
+- `ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true`
+- `MEDIA_EXTRACT_OUTPUT_MODE=temp_file`
+- `LOCAL_BRIEF_PARSER_ENABLED=false`
+- `STORE_RAW_MEDIA=false`
 
 Status lifecycle:
-queued → resolving → analyzing → completed/failed
+queued -> resolving -> downloading/analyzing -> completed/failed
 
-Allowed media_jobs.status:
+Allowed `media_jobs.status` values:
 - queued
 - resolving
 - downloading
@@ -52,31 +51,18 @@ Allowed media_jobs.status:
 - completed
 - failed
 
-Important files:
-- app/main.py
-- app/job_runner.py
-- app/config.py
-- app/supabase_client.py
-- requirements.txt
-- docs/milestones.md
-- docs/decision-log.md
-- docs/social-video-debug.md
-- docs/commands-log.md
+Do not expose or store:
+- source URLs in logs/events
+- CDN or stream URLs in public metadata/events
+- cookies or cookie paths
+- temp paths
+- Gemini prompts or raw responses
+- Gemini file references
+- video bytes
+- ingredients or steps in logs/events
 
 Validation:
+
+```bash
 python -m compileall app
-
-Manual test:
-curl -s -X POST "http://127.0.0.1:8080/process-job" \
-  -H "Content-Type: application/json" \
-  -H "X-Worker-Secret: $WORKER_API_SECRET" \
-  -d '{"job_id":"PASTE_QUEUED_JOB_ID"}' | jq
-
-Success:
-- completed 100 with result_recipe_card_id
-or
-- failed 100 with controlled error like insufficient_recipe_details or gemini_api_error
-
-Not acceptable:
-- generic worker_error/background_worker_error without root cause
-- stuck analyzing
+```

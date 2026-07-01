@@ -32,21 +32,24 @@
 | 28 | M17A Queue wake endpoint + YouTube Gemini URL | Done | `/wake` starts the queue loop without processing inline, and YouTube queue Gemini uses native URL input instead of yt-dlp |
 | 29 | M18 Stabilize E2E recipe pipeline | Done | Queue Gemini cards normalize into one structured recipe shape and YouTube private metadata failures no longer stop jobs |
 | 30 | M20 Gemini 3.1 single-pass structured extraction | Done | Gemini 3.1 structured JSON extraction with quality gate, repair, fallback model, grocery derivation, and Urdu fields |
-| 31 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 32 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 33 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 31 | M20.5 Worker repo cleanup before production cutover | Done | Queue mode documented as production flow, legacy webhook path de-emphasized, and `feature/queue-ytdlp-poc` marked ready to merge to `main` |
+| 32 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 33 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 34 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Deploy and rerun M14G-4R2 after W-M14R1:
+Merge `feature/queue-ytdlp-poc` to `main`, deploy the production worker from `main`, then validate TikTok, Instagram, and YouTube before suspending the old webhook Render service.
 
-- Render Free Web Service should return `202` from `/process-job` quickly while the FastAPI background task updates Supabase to `completed` or `failed`.
-- create-media-job manual mode creates `queued` jobs; `/process-job` accepts `queued` and the worker acquires them as `resolving`.
-- Queued TikTok jobs must route by `media_jobs.platform` to TikWM text-first, not the old YouTube-only unsupported branch.
-- TikTok media job with usable title/caption should complete through `tikwm_resolver_completed`, thumbnail upload, `social_text_analysis_started`, `social_text_analysis_completed`, `recipe_card_saved`, and `completed`, or fail with `social_caption_missing`, `insufficient_recipe_details`, `gemini_text_timeout`, or `video_duration_exceeded`.
-- Instagram should fail with `instagram_resolver_disabled` until `ENABLE_RENDER_INSTAGRAM_RESOLVER=true` after validation.
+- `WORKER_EXECUTION_MODE=queue` is the primary production mode; FastAPI startup and `GET /wake` keep one serialized queue loop active.
+- `/process-job` is retained for legacy/manual/debug kicks only and is not the primary production flow.
+- create-media-job creates `queued` jobs; the queue loop claims the oldest job as `resolving`.
+- Queued TikTok and Instagram jobs must route by `media_jobs.platform` into the unified extractor/temp-file Gemini path, not the old YouTube-only unsupported branch.
+- Gemini 3.1 Flash-Lite single-pass structured extraction is the default documented AI path.
+- YouTube queue jobs use Gemini native URL input when `YOUTUBE_AI_INPUT_MODE=gemini_url`, not yt-dlp.
+- TikTok and Instagram queue jobs use verified temp-file extraction plus Gemini Files API.
+- Local deep parser fallback stays disabled by default with `LOCAL_BRIEF_PARSER_ENABLED=false`.
 - Facebook should fail with `facebook_resolver_disabled` until `ENABLE_RENDER_FACEBOOK_RESOLVER=true` after validation.
-- YouTube must continue using the unchanged native path.
 - No job should remain stuck at `analyzing` progress `50` or `60`; Gemini hangs should become controlled failed jobs.
 - Known videos longer than `MAX_VIDEO_DURATION_SECONDS` should fail with `video_duration_exceeded` before stream or Gemini events.
 - For quota-free app/backend testing, set `AI_ANALYSIS_MODE=mock_fixture`; TikTok still resolves through TikWM and uploads the real thumbnail, then emits `mock_ai_analysis_started`/`mock_ai_analysis_completed` and saves `app/fixtures/mock_recipe_card.json` without Gemini quota usage.
@@ -63,3 +66,4 @@ Deploy and rerun M14G-4R2 after W-M14R1:
 - M18 adds recipe-card normalization before Gemini queue inserts so TikTok, Instagram, and YouTube share one structured ingredient/step/grocery shape. Private metadata save failures are event-only by default and no longer block YouTube Gemini URL jobs.
 - Queue Gemini optimization caps video brief output, JSON output, and oversized brief text sent into JSON conversion to reduce token usage and latency while keeping the two-step/fallback flow.
 - M20 replaces the default queue Gemini brief-to-JSON flow with `GEMINI_EXTRACTION_MODE=single_pass_structured`: Gemini 3.1 Flash Lite extracts canonical recipe JSON directly from YouTube URL or uploaded temp video file, repair uses invalid JSON/errors only, and unrecoverable weak output fails with `recipe_quality_gate_failed`. The old two-step mode remains available only through `GEMINI_EXTRACTION_MODE=two_step_brief_then_json`.
+- M20.5 confirms `feature/queue-ytdlp-poc` is ready to merge to `main`; after merge, production should run from `main`, and the old webhook Render service should be suspended only after the main service validates TikTok, Instagram, and YouTube.

@@ -490,3 +490,17 @@ print("single-pass canonical smoke passed")
 PY
 # passed; local venv emitted urllib3 LibreSSL warning
 ```
+
+## M20.5 Worker Repo Cleanup Validation
+
+```bash
+python -m compileall app
+# zsh: command not found: python
+
+python3 -m compileall app
+# passed
+
+grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url\|COOKIES_B64\|cookies.txt\|file_uri\|uploaded_file.uri" -n app docs README.md || true
+# matched intentional literal cookie path/config strings, ignored generated pycache,
+# and historical commands-log entries only; no committed secret values found
+```

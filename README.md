@@ -1,13 +1,14 @@
 # Recipe Dost Media Worker
 
-FastAPI worker for Recipe Dost media jobs. The same repo supports the original Cloud Run deployment and the W-M14R1 Render Free Web Service POC.
+FastAPI worker for Recipe Dost media jobs. The production cutover path is the serialized queue worker on Render/main.
 
 ## Scope
 
-- YouTube path is working: public URL -> Gemini observation -> recipe normalization -> `recipe_cards`.
-- Render POC path is under active testing: `/process-job` returns quickly and runs jobs with FastAPI BackgroundTasks.
-- TikTok uses TikWM metadata plus Gemini text-first caption/title analysis.
-- Instagram/Facebook are disabled by default on Render until their resolver paths are validated.
+- Queue mode is the primary production flow: startup and `GET /wake` keep one serialized queue loop active.
+- `/process-job` remains available only for legacy/manual/debug job kicks.
+- YouTube uses Gemini native URL input when `YOUTUBE_AI_INPUT_MODE=gemini_url`; it does not use yt-dlp in that mode.
+- TikTok and Instagram use the unified extractor to create a verified temp file, then Gemini Files API analysis.
+- Gemini 3.1 Flash-Lite single-pass structured extraction is the default recipe path.
 - Raw video is never written to disk, uploaded to Supabase/Drive, exposed as a download, or logged.
 - Secrets, cookies, source URLs, stream URLs, Gemini prompts/raw responses, ingredients, and steps must not appear in logs or job events.
 
@@ -26,12 +27,18 @@ Set real server-only values in `.env`: `WORKER_API_SECRET`, `SUPABASE_URL`, `SUP
 
 ```env
 APP_ENV=development
-RUNTIME_PLATFORM=cloud_run_compatible
-WORKER_MODE=skeleton
-MEDIA_PIPELINE_MODE=youtube_direct
+RUNTIME_PLATFORM=render
+WORKER_MODE=social_video
+MEDIA_PIPELINE_MODE=social_stream
+WORKER_EXECUTION_MODE=queue
+ENABLE_QUEUE_WAKE_ENDPOINT=true
 
-GEMINI_VIDEO_MODEL=gemini-2.5-flash
-GEMINI_TEXT_MODEL=gemini-2.5-flash
+AI_ANALYSIS_MODE=gemini_video_poc
+GEMINI_EXTRACTION_MODE=single_pass_structured
+GEMINI_PRIMARY_MODEL=gemini-3.1-flash-lite
+GEMINI_FALLBACK_MODEL=gemini-2.5-flash
+GEMINI_THINKING_LEVEL=high
+LOCAL_BRIEF_PARSER_ENABLED=false
 GEMINI_MAX_RETRIES=1
 GEMINI_MAX_CALLS_PER_JOB=2
 GEMINI_DAILY_DEV_CALL_LIMIT=5
@@ -49,8 +56,11 @@ SOCIAL_TEXT_GEMINI_TIMEOUT_SECONDS=45
 ENABLE_GEMINI_REPAIR_CALL=false
 ENABLE_GEMINI_FALLBACKS=false
 
-ENABLE_SOCIAL_VIDEO=false
-ENABLE_YT_DLP=false
+YOUTUBE_AI_INPUT_MODE=gemini_url
+ENABLE_SOCIAL_VIDEO=true
+ENABLE_YT_DLP=true
+ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true
+MEDIA_EXTRACT_OUTPUT_MODE=temp_file
 MAX_VIDEO_DURATION_SECONDS=90
 MAX_MEMORY_BUFFER_MB=35
 MAX_VIDEO_HEIGHT=720
@@ -74,22 +84,27 @@ COBALT_VIDEO_QUALITY=720
 COBALT_ENABLED_PLATFORMS=instagram,facebook
 ```
 
-Use `WORKER_MODE=youtube_direct` for the stable YouTube pipeline.
-
-Use this for Render TikTok text-first testing:
+Production queue cutover should run from `main` after `feature/queue-ytdlp-poc` is merged:
 
 ```env
 RUNTIME_PLATFORM=render
 WORKER_MODE=social_video
 MEDIA_PIPELINE_MODE=social_stream
+WORKER_EXECUTION_MODE=queue
+AI_ANALYSIS_MODE=gemini_video_poc
+GEMINI_EXTRACTION_MODE=single_pass_structured
+GEMINI_PRIMARY_MODEL=gemini-3.1-flash-lite
+YOUTUBE_AI_INPUT_MODE=gemini_url
+ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true
+MEDIA_EXTRACT_OUTPUT_MODE=temp_file
 ENABLE_SOCIAL_VIDEO=true
-ENABLE_TIKWM_RESOLVER=true
-ENABLE_COBALT_RESOLVER=false
-ENABLE_RENDER_INSTAGRAM_RESOLVER=false
+ENABLE_RENDER_INSTAGRAM_RESOLVER=true
 ENABLE_RENDER_FACEBOOK_RESOLVER=false
 ```
 
-For social testing, `SOCIAL_ANALYSIS_MODE=text_first` and `ENABLE_SOCIAL_VIDEO_GEMINI=false` are the development defaults. TikTok/TikWM jobs with a usable title/caption use one Gemini text call and skip stream download, video upload, and video observation. Instagram/Facebook return controlled disabled failures until `ENABLE_RENDER_INSTAGRAM_RESOLVER=true` or `ENABLE_RENDER_FACEBOOK_RESOLVER=true` after validation.
+For production, Gemini 3.1 single-pass structured extraction is the default. The old two-step brief-to-JSON path remains available only by setting `GEMINI_EXTRACTION_MODE=two_step_brief_then_json`. The local deep parser is disabled by default with `LOCAL_BRIEF_PARSER_ENABLED=false`.
+
+Suspend the old webhook Render service only after the main-branch service validates TikTok, Instagram, and YouTube end to end.
 
 Optional platform cookies:
 
@@ -106,7 +121,13 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 curl http://localhost:8080/health
 ```
 
-Process a job:
+Wake the queue worker:
+
+```bash
+curl http://localhost:8080/wake
+```
+
+Legacy/manual/debug process-job kick:
 
 ```bash
 curl -X POST http://localhost:8080/process-job \
@@ -146,16 +167,15 @@ curl -X POST http://localhost:8080/debug/tikwm \
   -d '{"url":"https://www.tiktok.com/@example/video/0000000000000000000","test_stream":true}'
 ```
 
-## Render POC
+## Production Queue
 
-W-M14R1 uses FastAPI BackgroundTasks on Render Free. This is a POC, not a durable production queue. The app continues polling `media_jobs` and `media_job_events`; the worker must finish every background task as `completed` or `failed`.
+`WORKER_EXECUTION_MODE=queue` is the primary production mode. FastAPI starts one in-process queue loop on startup; `GET /wake` safely starts it again if Render Free has idled the service. The queue loop claims the oldest `queued` job and must finish each job as `completed` or `failed`.
 
-- TikWM is third-party, not an official TikTok API.
-- YouTube uses the existing native path.
-- TikTok uses TikWM and Gemini text-first analysis.
-- Instagram and Facebook are disabled until validated.
+- YouTube uses oEmbed metadata plus Gemini native URL input when `YOUTUBE_AI_INPUT_MODE=gemini_url`.
+- TikTok and Instagram use verified temp-file extraction plus Gemini Files API.
+- Gemini 3.1 Flash-Lite single-pass structured extraction is the documented default.
 - Cobalt is not used for TikTok or YouTube.
-- TikWM/Cobalt temporary stream URLs are never stored or returned.
+- Temporary stream URLs are never stored or returned.
 - Raw video is not stored. Gemini prompts, raw responses, source URLs, stream URLs, recipe ingredients, and recipe steps must not be logged or written to events.
 - Detailed worker stages are tracked with `media_job_events` and `progress`; `media_jobs.status` stays one of `queued`, `resolving`, `downloading`, `analyzing`, `completed`, or `failed`.
 

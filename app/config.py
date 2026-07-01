@@ -156,7 +156,7 @@ class Settings(BaseSettings):
     youtube_resolver: YouTubeResolver = "ytdlp"
     instagram_resolver: InstagramResolver = "snapinsta"
     facebook_resolver: FacebookResolver = "snapsave"
-    worker_execution_mode: WorkerExecutionMode = "webhook"
+    worker_execution_mode: WorkerExecutionMode = "queue"
     queue_poll_interval_seconds: int = 5
     queue_empty_sleep_seconds: int = 5
     enable_unified_ytdlp_stream_extractor: bool = False
@@ -372,7 +372,7 @@ class Settings(BaseSettings):
     @classmethod
     def fallback_unknown_worker_execution_mode(cls, value: object) -> object:
         normalized = str(value).strip().lower()
-        return normalized if normalized in {"webhook", "queue"} else "webhook"
+        return normalized if normalized in {"webhook", "queue"} else "queue"
 
     @field_validator("media_extract_output_mode", mode="before")
     @classmethod
