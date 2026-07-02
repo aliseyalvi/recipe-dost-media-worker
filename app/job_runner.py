@@ -2246,11 +2246,21 @@ class JobRunner:
         *,
         info: SocialVideoInfo | None = None,
     ) -> str | None:
-        self._repository.insert_event(job.id, event_type="thumbnail_upload_started", message="Thumbnail upload started.", metadata={"thumbnail_uploaded": False})
+        thumbnail_source = (
+            info.thumbnail_source if info and info.thumbnail_source else "platform_thumbnail"
+        )
+        event_metadata = {
+            "platform": job.platform,
+            "thumbnail_source": thumbnail_source,
+            "thumbnail_selected": bool(thumbnail_url),
+        }
+        if info is not None and info.duration_seconds is not None:
+            event_metadata["duration_seconds"] = info.duration_seconds
+        self._repository.insert_event(job.id, event_type="thumbnail_upload_started", message="Thumbnail upload started.", metadata=event_metadata)
         try:
             public_url = upload_source_thumbnail(thumbnail_url, user_id=job.user_id, media_job_id=job.id, repository=self._repository, settings=settings)
             if public_url:
-                self._repository.insert_event(job.id, event_type="thumbnail_uploaded", message="Thumbnail uploaded.", metadata={"thumbnail_uploaded": True})
+                self._repository.insert_event(job.id, event_type="thumbnail_uploaded", message="Thumbnail uploaded.", metadata={**event_metadata, "thumbnail_selected": True})
                 self._update_recipe_thumbnail_best_effort(job, public_url)
                 if info is not None:
                     self._save_source_metadata_best_effort(
@@ -2262,8 +2272,8 @@ class JobRunner:
                         ),
                     )
             return public_url
-        except Exception as exc:
-            self._repository.insert_event(job.id, event_type="thumbnail_upload_failed", message="Thumbnail upload failed.", metadata={"thumbnail_uploaded": False, "error_code": "thumbnail_upload_failed", "exception_type": type(exc).__name__})
+        except Exception:
+            self._repository.insert_event(job.id, event_type="thumbnail_upload_failed", message="Thumbnail upload failed.", metadata={**event_metadata, "thumbnail_selected": False})
             return None
 
     def _update_social_metadata_best_effort(self, job: MediaJobRecord, info: SocialVideoInfo) -> None:
@@ -2407,7 +2417,11 @@ class JobRunner:
             media_job_id,
             event_type="thumbnail_resolved",
             message="YouTube thumbnail resolved.",
-            metadata={"platform": "youtube"},
+            metadata={
+                "platform": "youtube",
+                "thumbnail_source": "platform_thumbnail",
+                "thumbnail_selected": True,
+            },
         )
 
         if self._analyzer is None:
@@ -2942,6 +2956,8 @@ def _social_metadata(info: SocialVideoInfo) -> dict[str, object]:
         "duration_known": info.duration_seconds is not None,
         "duration_seconds": info.duration_seconds,
         "has_thumbnail": bool(info.thumbnail_url),
+        "thumbnail_source": info.thumbnail_source or "platform_thumbnail",
+        "thumbnail_selected": bool(info.thumbnail_selected),
         "ext": info.ext,
         "mime_type": info.mime_type,
         "has_stream_headers": bool(info.stream_headers),
@@ -2965,6 +2981,8 @@ def build_public_source_metadata(
         "author_username": info.uploader or "",
         "duration_seconds": info.duration_seconds,
         "thumbnail_source_present": bool(info.thumbnail_url),
+        "thumbnail_source": info.thumbnail_source or "platform_thumbnail",
+        "thumbnail_selected": bool(info.thumbnail_selected),
         "uploaded_thumbnail_url": uploaded_thumbnail_url,
         "media": {
             "has_cdn_url": has_stream,
@@ -2992,6 +3010,8 @@ def social_metadata_event_metadata(info: SocialVideoInfo) -> dict[str, object]:
         "description_present": bool(description),
         "duration_seconds": info.duration_seconds,
         "has_thumbnail": bool(info.thumbnail_url),
+        "thumbnail_source": info.thumbnail_source or "platform_thumbnail",
+        "thumbnail_selected": bool(info.thumbnail_selected),
         "has_cdn_url": bool(info.stream_url),
         "mime_type": info.mime_type,
         "size_bytes": info.filesize_approx,

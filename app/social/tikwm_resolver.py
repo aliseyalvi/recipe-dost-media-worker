@@ -8,6 +8,7 @@ import requests
 
 from app.config import Settings
 from app.social.models import SocialResolverError, SocialVideoInfo
+from app.social.thumbnail_selection import platform_thumbnail
 
 TIKTOK_HOSTS = {
     "tiktok.com",
@@ -119,13 +120,14 @@ def resolve_with_tikwm(
             },
         )
 
+    thumbnail = platform_thumbnail(data.get("cover"))
     return SocialVideoInfo(
         platform="tiktok",
         resolver="tikwm",
         title=safe_str(data.get("title")),
         video_id=safe_str(data.get("id")),
         duration_seconds=safe_float(data.get("duration")),
-        thumbnail_url=safe_http_url(data.get("cover")),
+        thumbnail_url=thumbnail.url,
         webpage_url=source_url,
         stream_url=stream_url,
         stream_headers={
@@ -142,6 +144,8 @@ def resolve_with_tikwm(
         filesize_approx=filesize,
         raw_metadata=data,
         description=safe_str(data.get("title")),
+        thumbnail_source=thumbnail.source,
+        thumbnail_selected=thumbnail.selected,
     )
 
 

@@ -13,6 +13,7 @@ import requests
 from app.config import Settings
 from app.social.models import SocialResolverError, SocialVideoInfo
 from app.social.platforms import detect_social_platform
+from app.social.thumbnail_selection import select_ytdlp_thumbnail
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -89,6 +90,7 @@ def resolve_youtube_metadata(
         )
 
     selected_format = select_optional_direct_video_format(info, settings)
+    thumbnail = select_ytdlp_thumbnail(info)
     stream_url = safe_http_url(selected_format.get("url")) if selected_format else ""
     filesize = safe_int(
         (selected_format or {}).get("filesize")
@@ -102,7 +104,7 @@ def resolve_youtube_metadata(
         title=safe_str(info.get("title")),
         video_id=safe_str(info.get("id")),
         duration_seconds=safe_float(info.get("duration")),
-        thumbnail_url=safe_http_url(info.get("thumbnail")),
+        thumbnail_url=thumbnail.url,
         webpage_url=safe_http_url(info.get("webpage_url")),
         stream_url=stream_url or "",
         stream_headers=platform_headers("youtube"),
@@ -116,6 +118,8 @@ def resolve_youtube_metadata(
         description=safe_str(info.get("description")),
         width=safe_int((selected_format or {}).get("width") or info.get("width")),
         height=safe_int((selected_format or {}).get("height") or info.get("height")),
+        thumbnail_source=thumbnail.source,
+        thumbnail_selected=thumbnail.selected,
     )
 
 
@@ -321,13 +325,14 @@ def build_social_video_info(
         or info.get("filesize")
         or info.get("filesize_approx")
     )
+    thumbnail = select_ytdlp_thumbnail(info)
     return SocialVideoInfo(
         platform=detect_social_platform(str(info.get("webpage_url") or url)),
         resolver="yt-dlp",
         title=safe_str(info.get("title")),
         video_id=safe_str(info.get("id")),
         duration_seconds=duration,
-        thumbnail_url=safe_http_url(info.get("thumbnail")),
+        thumbnail_url=thumbnail.url,
         webpage_url=safe_http_url(info.get("webpage_url")),
         stream_url=stream_url,
         stream_headers=stream_headers,
@@ -337,6 +342,8 @@ def build_social_video_info(
         filename=safe_str(selected_format.get("filename") or info.get("filename")),
         uploader=safe_str(info.get("uploader")),
         filesize_approx=filesize,
+        thumbnail_source=thumbnail.source,
+        thumbnail_selected=thumbnail.selected,
     )
 
 
@@ -539,12 +546,14 @@ def sanitized_ytdlp_metadata(
     info: dict[str, Any],
     selected_format: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    thumbnail = select_ytdlp_thumbnail(info)
     return {
         "id": safe_str(info.get("id")),
         "title": safe_str(info.get("title")),
         "description_present": bool(safe_str(info.get("description"))),
         "duration": safe_float(info.get("duration")),
-        "thumbnail_present": bool(safe_http_url(info.get("thumbnail"))),
+        "thumbnail_present": thumbnail.selected,
+        "thumbnail_source": thumbnail.source,
         "uploader": safe_str(info.get("uploader") or info.get("channel")),
         "extractor": safe_str(info.get("extractor")),
         "ext": safe_str((selected_format or {}).get("ext") or info.get("ext")),

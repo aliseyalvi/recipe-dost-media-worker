@@ -32,7 +32,11 @@ from app.schemas import (
     RecipeStep,
 )
 from app.social.stream_download import extract_social_video
-from app.social.thumbnail_upload import upload_source_thumbnail
+from app.social.thumbnail_selection import platform_thumbnail
+from app.social.thumbnail_upload import (
+    sample_video_frame_thumbnail,
+    upload_source_thumbnail,
+)
 from app.supabase_client import MediaJobRepository, create_repository
 
 logger = logging.getLogger("recipe_dost.worker")
@@ -395,7 +399,20 @@ def process_queue_job(
             settings,
             job,
             str_or_none(extract_result.get("thumbnail_url")),
+            str_or_none(extract_result.get("thumbnail_source")),
+            safe_int_or_none(extract_result.get("duration_seconds")),
         )
+        if uploaded_thumbnail_url is None and not extract_result.get("thumbnail_url"):
+            uploaded_thumbnail_url = sample_thumbnail_best_effort(
+                repository,
+                settings,
+                job,
+                str_or_none(extract_result.get("temp_file_path")),
+                safe_int_or_none(extract_result.get("duration_seconds")),
+            )
+            if uploaded_thumbnail_url:
+                extract_result["thumbnail_source"] = "sampled_frame"
+                extract_result["thumbnail_selected"] = True
         current_stage = "metadata_save"
         save_metadata(repository, job.id, extract_result, uploaded_thumbnail_url)
         update_job_source_fields(repository, job.id, extract_result, uploaded_thumbnail_url)
@@ -591,6 +608,8 @@ def public_source_metadata(
         "author_username": result.get("author_username"),
         "duration_seconds": result.get("duration_seconds"),
         "thumbnail_source_present": bool(result.get("thumbnail_url")),
+        "thumbnail_source": result.get("thumbnail_source") or "fallback",
+        "thumbnail_selected": bool(result.get("thumbnail_selected")),
         "uploaded_thumbnail_url": uploaded_thumbnail_url,
         "resolution_mode": resolution_mode,
         "media": {
@@ -639,8 +658,24 @@ def upload_thumbnail_best_effort(
     settings: Settings,
     job: MediaJobRecord,
     thumbnail_url: str | None,
+    thumbnail_source: str | None = None,
+    duration_seconds: int | None = None,
 ) -> str | None:
+    event_metadata = {
+        "platform": job.platform,
+        "thumbnail_source": thumbnail_source or "fallback",
+        "thumbnail_selected": bool(thumbnail_url),
+    }
+    if duration_seconds is not None:
+        event_metadata["duration_seconds"] = duration_seconds
     if not thumbnail_url:
+        add_event_safely(
+            repository,
+            job.id,
+            "thumbnail_selection_skipped",
+            "No source thumbnail selected.",
+            {**event_metadata, "thumbnail_selected": False},
+        )
         return None
     try:
         public_url = upload_source_thumbnail(
@@ -656,7 +691,7 @@ def upload_thumbnail_best_effort(
                 job.id,
                 "thumbnail_uploaded",
                 "Thumbnail uploaded.",
-                {"thumbnail_uploaded": True},
+                {**event_metadata, "thumbnail_source": thumbnail_source or "platform_thumbnail", "thumbnail_selected": True},
             )
             if job.recipe_item_id is not None:
                 repository.update_recipe_thumbnail(
@@ -666,7 +701,57 @@ def upload_thumbnail_best_effort(
                 )
         return public_url
     except Exception:
+        add_event_safely(
+            repository,
+            job.id,
+            "thumbnail_upload_failed",
+            "Thumbnail upload failed.",
+            {**event_metadata, "thumbnail_source": thumbnail_source or "platform_thumbnail", "thumbnail_selected": False},
+        )
         return None
+
+
+def sample_thumbnail_best_effort(
+    repository: MediaJobRepository,
+    settings: Settings,
+    job: MediaJobRecord,
+    temp_file_path: str | None,
+    duration_seconds: int | None,
+) -> str | None:
+    event_metadata: dict[str, object] = {
+        "platform": job.platform,
+        "thumbnail_source": "sampled_frame",
+        "thumbnail_selected": False,
+    }
+    if duration_seconds is not None:
+        event_metadata["duration_seconds"] = duration_seconds
+    try:
+        public_url = sample_video_frame_thumbnail(
+            temp_file_path,
+            duration_seconds=duration_seconds,
+            user_id=job.user_id,
+            media_job_id=job.id,
+            repository=repository,
+            settings=settings,
+        )
+    except Exception:
+        return None
+    if not public_url:
+        return None
+    add_event(
+        repository,
+        job.id,
+        "thumbnail_uploaded",
+        "Sampled frame thumbnail uploaded.",
+        {**event_metadata, "thumbnail_selected": True},
+    )
+    if job.recipe_item_id is not None:
+        repository.update_recipe_thumbnail(
+            recipe_item_id=job.recipe_item_id,
+            user_id=job.user_id,
+            thumbnail_url=public_url,
+        )
+    return public_url
 
 
 def fetch_youtube_oembed(source_url: str) -> dict[str, object]:
@@ -681,6 +766,7 @@ def fetch_youtube_oembed(source_url: str) -> dict[str, object]:
 
 
 def youtube_oembed_result(body: dict[str, object]) -> dict[str, object]:
+    thumbnail = platform_thumbnail(body.get("thumbnail_url"))
     return {
         "success": True,
         "platform": "youtube",
@@ -688,7 +774,9 @@ def youtube_oembed_result(body: dict[str, object]) -> dict[str, object]:
         "title": body.get("title"),
         "description": body.get("title"),
         "author_username": body.get("author_name"),
-        "thumbnail_url": body.get("thumbnail_url"),
+        "thumbnail_url": thumbnail.url,
+        "thumbnail_source": thumbnail.source,
+        "thumbnail_selected": thumbnail.selected,
         "resolution_mode": "gemini_url",
         "video_bytes_verified": False,
         "output_mode": "gemini_url",
@@ -702,6 +790,8 @@ def minimal_youtube_result() -> dict[str, object]:
         "platform": "youtube",
         "resolver": "youtube_oembed",
         "resolution_mode": "gemini_url",
+        "thumbnail_source": "fallback",
+        "thumbnail_selected": False,
         "video_bytes_verified": False,
         "output_mode": "gemini_url",
         "cookie_mode": "none",
@@ -757,6 +847,8 @@ def process_youtube_gemini_url_job(
         settings,
         job,
         str_or_none(extract_result.get("thumbnail_url")),
+        str_or_none(extract_result.get("thumbnail_source")),
+        safe_int_or_none(extract_result.get("duration_seconds")),
     )
     save_metadata(repository, job.id, extract_result, uploaded_thumbnail_url)
     update_job_source_fields(repository, job.id, extract_result, uploaded_thumbnail_url)
@@ -3301,6 +3393,8 @@ def safe_extract_event_metadata(
         "description_present": bool(result.get("description")),
         "duration_seconds": result.get("duration_seconds"),
         "has_thumbnail": bool(result.get("thumbnail_url")),
+        "thumbnail_source": result.get("thumbnail_source") or "fallback",
+        "thumbnail_selected": bool(result.get("thumbnail_selected")),
         "has_cdn_url": bool(result.get("cdn_download_url")),
         "mime_type": result.get("mime_type"),
         "size_bytes": result.get("size_bytes"),

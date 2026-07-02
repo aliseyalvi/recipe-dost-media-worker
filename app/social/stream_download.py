@@ -14,6 +14,7 @@ import requests
 
 from app.config import Settings
 from app.social.models import SocialResolverError, SocialVideoInfo
+from app.social.thumbnail_selection import platform_thumbnail, select_ytdlp_thumbnail
 from app.social.yt_dlp_resolver import (
     platform_headers,
     safe_float,
@@ -392,6 +393,8 @@ def extractor_failure(
         "description": None,
         "author_username": None,
         "thumbnail_url": None,
+        "thumbnail_source": "fallback",
+        "thumbnail_selected": False,
         "duration_seconds": None,
         "cdn_download_url": None,
         "video_buffer": None,
@@ -439,6 +442,7 @@ def extractor_result(
         or info.get("filesize_approx")
     )
     has_local_media = bool(temp_file_path or video_buffer)
+    thumbnail = select_ytdlp_thumbnail(info)
     return {
         "success": success,
         "platform": platform,
@@ -446,7 +450,9 @@ def extractor_result(
         "title": safe_str(info.get("title")),
         "description": safe_str(info.get("description")),
         "author_username": safe_str(info.get("uploader") or info.get("channel")),
-        "thumbnail_url": safe_http_url(info.get("thumbnail")),
+        "thumbnail_url": thumbnail.url,
+        "thumbnail_source": thumbnail.source,
+        "thumbnail_selected": thumbnail.selected,
         "duration_seconds": safe_duration_seconds(info.get("duration")),
         "cdn_download_url": cdn_url,
         "video_buffer": video_buffer,
@@ -487,7 +493,10 @@ def extract_opengraph_metadata(
     tags = parse_open_graph_tags(response.text[:512 * 1024])
     title = tags.get("og:title") or tags.get("twitter:title")
     description = tags.get("og:description") or tags.get("twitter:description")
-    image = safe_http_url(tags.get("og:image")) or safe_http_url(tags.get("twitter:image"))
+    image = (
+        platform_thumbnail(tags.get("og:image")).url
+        or platform_thumbnail(tags.get("twitter:image")).url
+    )
     if not title and not image:
         return metadata_fallback_failure(platform)
     return {
@@ -498,6 +507,8 @@ def extract_opengraph_metadata(
         "description": description,
         "author_username": None,
         "thumbnail_url": image,
+        "thumbnail_source": "platform_thumbnail" if image else "fallback",
+        "thumbnail_selected": bool(image),
         "duration_seconds": None,
         "cdn_download_url": None,
         "video_buffer": None,

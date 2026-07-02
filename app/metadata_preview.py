@@ -14,16 +14,17 @@ from app.social.stream_download import (
     extract_opengraph_metadata,
     get_platform_cookie_file,
 )
-from app.social.yt_dlp_resolver import platform_headers, safe_float, safe_http_url
+from app.social.thumbnail_selection import (
+    platform_thumbnail,
+    safe_image_url as select_safe_image_url,
+    select_ytdlp_thumbnail,
+)
+from app.social.yt_dlp_resolver import platform_headers, safe_float
 
 SUPPORTED_METADATA_PLATFORMS = ["youtube", "instagram", "tiktok", "facebook", "other"]
 SOCIAL_YTDLP_PLATFORMS = {"instagram", "tiktok", "facebook"}
 URL_PATTERN = re.compile(r"https?://", re.IGNORECASE)
 HASHTAG_PATTERN = re.compile(r"(?:^|\s)#[\w.-]+")
-VIDEO_PATH_PATTERN = re.compile(
-    r"\.(?:mp4|mov|webm|m4v|m3u8)(?:$|[?#])",
-    re.IGNORECASE,
-)
 
 
 class MetadataPreviewError(Exception):
@@ -120,7 +121,7 @@ def fetch_youtube_preview(url: str, settings: Settings) -> MetadataPreview:
                 source={
                     "title": body.get("title"),
                     "description": body.get("title"),
-                    "thumbnail_url": body.get("thumbnail_url"),
+                    "thumbnail_url": platform_thumbnail(body.get("thumbnail_url")).url,
                     "author_username": body.get("author_name"),
                 },
                 settings=settings,
@@ -196,13 +197,14 @@ def fetch_ytdlp_preview(
             "Metadata could not be fetched.",
             502,
         )
+    thumbnail = select_ytdlp_thumbnail(info)
     return preview_from_mapping(
         platform=platform,
         resolver=resolver,
         source={
             "title": info.get("title"),
             "description": info.get("description"),
-            "thumbnail_url": info.get("thumbnail"),
+            "thumbnail_url": thumbnail.url,
             "author_username": (
                 info.get("uploader_id")
                 or info.get("uploader")
@@ -329,14 +331,7 @@ def safe_duration_seconds(value: Any) -> int | None:
 
 
 def safe_image_url(value: Any) -> str | None:
-    url = safe_http_url(value)
-    if not url:
-        return None
-    parsed = urlparse(url)
-    path = parsed.path.lower()
-    if VIDEO_PATH_PATTERN.search(path) or "m3u8" in url.lower():
-        return None
-    return url
+    return select_safe_image_url(value)
 
 
 def tags_from_ytdlp(info: dict[str, Any]) -> list[str]:

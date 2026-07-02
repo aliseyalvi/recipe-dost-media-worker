@@ -563,3 +563,61 @@ grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_
 # matched existing cookie path literals, generated pycache binaries, README cookie docs,
 # and historical commands-log validation text only; no metadata-preview CDN/video URL return path found
 ```
+
+## M21.9B Thumbnail Selection Validation
+
+```bash
+python -m compileall app
+# zsh: command not found: python
+
+python3 -m compileall app
+# passed
+
+WORKER_API_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test .venv/bin/python - <<'PY'
+from unittest.mock import Mock, patch
+from fastapi.testclient import TestClient
+
+from app.config import get_settings
+from app.main import app
+from app.social.thumbnail_selection import safe_image_url, select_ytdlp_thumbnail
+from app.social.thumbnail_upload import frame_score
+
+best = select_ytdlp_thumbnail({
+    'thumbnail': 'https://cdn.example.com/avatar_150x150.jpg',
+    'thumbnails': [
+        {'url': 'https://cdn.example.com/avatar_150x150.jpg', 'width': 150, 'height': 150, 'id': 'avatar'},
+        {'url': 'https://cdn.example.com/frame_small.jpg', 'width': 320, 'height': 180},
+        {'url': 'https://cdn.example.com/frame_large.jpg', 'width': 1280, 'height': 720},
+    ],
+})
+assert best.url == 'https://cdn.example.com/frame_large.jpg'
+assert best.source == 'ytdlp_thumbnails_array'
+assert best.selected is True
+assert select_ytdlp_thumbnail({'thumbnail': 'https://cdn.example.com/food.webp'}).source == 'ytdlp_thumbnail'
+assert safe_image_url('https://cdn.example.com/video.mp4') is None
+assert frame_score(bytes([0, 0, 0]) * (160 * 90)) == 0
+
+get_settings.cache_clear()
+class FakeResponse:
+    def raise_for_status(self):
+        return None
+    def json(self):
+        return {'title': 'Chicken & Rice', 'thumbnail_url': 'https://i.ytimg.com/vi/abc123/hqdefault.jpg'}
+
+with patch('app.metadata_preview.requests.get', Mock(return_value=FakeResponse())):
+    client = TestClient(app)
+    response = client.post(
+        '/metadata-preview',
+        headers={'Authorization': 'Bearer test'},
+        json={'url': 'https://www.youtube.com/watch?v=abc123abc12', 'platform': None},
+    )
+    assert response.status_code == 200
+    assert response.json()['thumbnail_url'].startswith('https://i.ytimg.com/')
+print('thumbnail selection smoke passed')
+PY
+# passed; local venv emitted urllib3 LibreSSL warning
+
+grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_url\|COOKIES_B64\|cookies.txt\|file_uri\|uploaded_file.uri" -n app docs README.md || true
+# matched existing cookie path literals, generated pycache binaries, README cookie docs,
+# and historical commands-log validation text only; no new thumbnail leak pattern found
+```

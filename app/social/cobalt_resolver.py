@@ -7,6 +7,7 @@ import requests
 
 from app.config import Settings
 from app.social.models import SocialResolverError, SocialVideoInfo
+from app.social.thumbnail_selection import platform_thumbnail
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -108,13 +109,14 @@ def resolve_with_cobalt(
             )
         filename = safe_str(payload.get("filename"))
         ext = "mp4" if filename and filename.lower().endswith(".mp4") else None
+        thumbnail = platform_thumbnail(payload.get("thumbnail"))
         return SocialVideoInfo(
             platform=platform,
             resolver="cobalt",
             title=filename,
             video_id=None,
             duration_seconds=None,
-            thumbnail_url=safe_http_url(payload.get("thumbnail")),
+            thumbnail_url=thumbnail.url,
             webpage_url=source_url,
             stream_url=stream_url,
             stream_headers={
@@ -127,6 +129,8 @@ def resolve_with_cobalt(
             filename=filename,
             uploader=None,
             filesize_approx=None,
+            thumbnail_source=thumbnail.source,
+            thumbnail_selected=thumbnail.selected,
         )
     if status == "picker":
         raise SocialResolverError(

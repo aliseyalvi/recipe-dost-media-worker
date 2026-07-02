@@ -8,6 +8,7 @@ import requests
 
 from app.config import Settings
 from app.social.models import SocialResolverError, SocialVideoInfo
+from app.social.thumbnail_selection import platform_thumbnail
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -92,13 +93,14 @@ def _resolve_with_form_adapter(
             {"platform": platform, "resolver": resolver},
         )
 
+    thumbnail = platform_thumbnail(payload.get("thumbnail_url"))
     return SocialVideoInfo(
         platform=platform,
         resolver=resolver,
         title=safe_str(payload.get("title")),
         video_id=None,
         duration_seconds=None,
-        thumbnail_url=safe_http_url(payload.get("thumbnail_url")),
+        thumbnail_url=thumbnail.url,
         webpage_url=source_url,
         stream_url=str(payload["media_url"]),
         stream_headers={"User-Agent": USER_AGENT},
@@ -118,6 +120,8 @@ def _resolve_with_form_adapter(
         description=safe_str(payload.get("description") or payload.get("title")),
         width=safe_int(payload.get("width")),
         height=safe_int(payload.get("height")),
+        thumbnail_source=thumbnail.source,
+        thumbnail_selected=thumbnail.selected,
     )
 
 

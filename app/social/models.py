@@ -38,3 +38,5 @@ class SocialVideoInfo:
     description: str | None = None
     width: int | None = None
     height: int | None = None
+    thumbnail_source: str | None = None
+    thumbnail_selected: bool | None = None
