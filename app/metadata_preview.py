@@ -17,6 +17,7 @@ from app.social.stream_download import (
 from app.social.thumbnail_selection import (
     platform_thumbnail,
     safe_image_url as select_safe_image_url,
+    select_youtube_oembed_thumbnail,
     select_ytdlp_thumbnail,
 )
 from app.social.yt_dlp_resolver import platform_headers, safe_float
@@ -115,15 +116,6 @@ def normalize_platform(platform: str | None, url: str) -> str:
     return "other"
 
 
-def youtube_deterministic_thumbnail(url: str):
-    video_id = extract_youtube_video_id(url)
-    return platform_thumbnail(
-        f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg" if video_id else None,
-        source="youtube_deterministic",
-        provider="youtube",
-    )
-
-
 def extract_youtube_video_id(url: str) -> str | None:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
@@ -156,17 +148,17 @@ def fetch_youtube_preview(url: str, settings: Settings) -> MetadataPreview:
         response.raise_for_status()
         body = response.json()
         if isinstance(body, dict):
+            thumbnail = select_youtube_oembed_thumbnail(
+                video_id=extract_youtube_video_id(url),
+                oembed_url=body.get("thumbnail_url"),
+            )
             preview = preview_from_mapping(
                 platform="youtube",
                 resolver="youtube_oembed",
                 source={
                     "title": body.get("title"),
                     "description": body.get("title"),
-                    "thumbnail": platform_thumbnail(
-                        body.get("thumbnail_url"),
-                        source="youtube_oembed",
-                        provider="youtube",
-                    ),
+                    "thumbnail": thumbnail,
                     "author_username": body.get("author_name"),
                 },
                 settings=settings,
@@ -178,7 +170,10 @@ def fetch_youtube_preview(url: str, settings: Settings) -> MetadataPreview:
     try:
         return fetch_ytdlp_preview(url, "youtube", settings, resolver="youtube_ytdlp")
     except MetadataPreviewError:
-        deterministic = youtube_deterministic_thumbnail(url)
+        deterministic = select_youtube_oembed_thumbnail(
+            video_id=extract_youtube_video_id(url),
+            oembed_url=None,
+        )
         if deterministic.url:
             return preview_from_mapping(
                 platform="youtube",
@@ -303,6 +298,7 @@ def fetch_opengraph_preview(
 
 
 def failed_preview(platform: str, resolver: str, settings: Settings) -> MetadataPreview:
+    thumbnail_strategy = "platform_first_v3" if platform == "youtube" else "platform_first_v2"
     return MetadataPreview(
         platform=platform,
         resolver=resolver,
@@ -317,7 +313,7 @@ def failed_preview(platform: str, resolver: str, settings: Settings) -> Metadata
         max_duration_seconds=settings.max_video_duration_seconds,
         thumbnail_source="placeholder",
         thumbnail_provider=platform,
-        thumbnail_strategy="platform_first_v2",
+        thumbnail_strategy=thumbnail_strategy,
         thumbnail_candidate_count=0,
         thumbnail_selected=False,
     )

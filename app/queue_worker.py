@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 from uuid import UUID
 
 import requests
@@ -34,7 +34,7 @@ from app.schemas import (
 from app.social.stream_download import extract_social_video
 from app.social.thumbnail_selection import (
     early_frame_thumbnail_selected,
-    platform_thumbnail,
+    select_youtube_oembed_thumbnail,
     should_update_thumbnail,
 )
 from app.social.thumbnail_upload import (
@@ -608,6 +608,11 @@ def public_source_metadata(
     resolution_mode = str(result.get("resolution_mode") or (
         "local_file_ready" if has_local_media else "metadata_only"
     ))
+    default_thumbnail_strategy = (
+        "platform_first_v3"
+        if result.get("platform") == "youtube"
+        else "platform_first_v2"
+    )
     return {
         "platform": result.get("platform"),
         "resolver": result.get("resolver") or "ytdlp_stream",
@@ -618,7 +623,7 @@ def public_source_metadata(
         "thumbnail_source_present": bool(result.get("thumbnail_url")),
         "thumbnail_source": result.get("thumbnail_source") or "placeholder",
         "thumbnail_provider": result.get("thumbnail_provider") or result.get("platform"),
-        "thumbnail_strategy": result.get("thumbnail_strategy") or "platform_first_v2",
+        "thumbnail_strategy": result.get("thumbnail_strategy") or default_thumbnail_strategy,
         "thumbnail_candidate_count": result.get("thumbnail_candidate_count") or 0,
         "thumbnail_selected": bool(result.get("thumbnail_selected")),
         "uploaded_thumbnail_url": uploaded_thumbnail_url,
@@ -672,11 +677,12 @@ def upload_thumbnail_best_effort(
     thumbnail_source: str | None = None,
     duration_seconds: int | None = None,
 ) -> str | None:
+    thumbnail_strategy = "platform_first_v3" if job.platform == "youtube" else "platform_first_v2"
     event_metadata = {
         "platform": job.platform,
         "thumbnail_source": thumbnail_source or "placeholder",
         "thumbnail_provider": job.platform,
-        "thumbnail_strategy": "platform_first_v2",
+        "thumbnail_strategy": thumbnail_strategy,
         "candidate_count": 1 if thumbnail_url else 0,
         "thumbnail_selected": bool(thumbnail_url),
     }
@@ -734,11 +740,12 @@ def sample_thumbnail_best_effort(
     temp_file_path: str | None,
     duration_seconds: int | None,
 ) -> str | None:
+    thumbnail_strategy = "platform_first_v3" if job.platform == "youtube" else "platform_first_v2"
     event_metadata: dict[str, object] = {
         "platform": job.platform,
         "thumbnail_source": "early_frame_fallback",
         "thumbnail_provider": job.platform,
-        "thumbnail_strategy": "platform_first_v2",
+        "thumbnail_strategy": thumbnail_strategy,
         "candidate_count": 4,
         "thumbnail_selected": False,
     }
@@ -825,11 +832,10 @@ def fetch_youtube_oembed(source_url: str) -> dict[str, object]:
     return body if isinstance(body, dict) else {}
 
 
-def youtube_oembed_result(body: dict[str, object]) -> dict[str, object]:
-    thumbnail = platform_thumbnail(
-        body.get("thumbnail_url"),
-        source="youtube_oembed",
-        provider="youtube",
+def youtube_oembed_result(body: dict[str, object], source_url: str) -> dict[str, object]:
+    thumbnail = select_youtube_oembed_thumbnail(
+        video_id=extract_youtube_video_id(source_url),
+        oembed_url=body.get("thumbnail_url"),
     )
     return {
         "success": True,
@@ -843,6 +849,8 @@ def youtube_oembed_result(body: dict[str, object]) -> dict[str, object]:
         "thumbnail_provider": thumbnail.provider,
         "thumbnail_strategy": thumbnail.strategy,
         "thumbnail_candidate_count": thumbnail.candidate_count,
+        "thumbnail_candidate_kind": thumbnail.candidate_kind,
+        "thumbnail_validation_status": thumbnail.validation_status,
         "thumbnail_selected": thumbnail.selected,
         "resolution_mode": "gemini_url",
         "video_bytes_verified": False,
@@ -859,13 +867,53 @@ def minimal_youtube_result() -> dict[str, object]:
         "resolution_mode": "gemini_url",
         "thumbnail_source": "placeholder",
         "thumbnail_provider": "youtube",
-        "thumbnail_strategy": "platform_first_v2",
+        "thumbnail_strategy": "platform_first_v3",
         "thumbnail_candidate_count": 0,
+        "thumbnail_candidate_kind": None,
+        "thumbnail_validation_status": "not_checked",
         "thumbnail_selected": False,
         "video_bytes_verified": False,
         "output_mode": "gemini_url",
         "cookie_mode": "none",
     }
+
+
+def youtube_thumbnail_event_metadata(result: dict[str, object]) -> dict[str, object]:
+    return {
+        "event": "thumbnail_selected",
+        "platform": "youtube",
+        "thumbnail_source": result.get("thumbnail_source") or "placeholder",
+        "thumbnail_strategy": result.get("thumbnail_strategy") or "platform_first_v3",
+        "candidate_kind": result.get("thumbnail_candidate_kind"),
+        "candidate_count": result.get("thumbnail_candidate_count") or 0,
+        "validation_status": result.get("thumbnail_validation_status") or "not_checked",
+        "thumbnail_selected": bool(result.get("thumbnail_selected")),
+    }
+
+
+def extract_youtube_video_id(source_url: str) -> str | None:
+    try:
+        parsed = urlparse(source_url)
+    except ValueError:
+        return None
+    host = (parsed.hostname or "").lower()
+    if host == "youtu.be":
+        candidate = parsed.path.strip("/").split("/", 1)[0]
+        return candidate if is_youtube_video_id(candidate) else None
+    query_id = parse_qs(parsed.query).get("v", [None])[0]
+    if is_youtube_video_id(query_id):
+        return query_id
+    parts = [part for part in parsed.path.split("/") if part]
+    for marker in ("shorts", "embed"):
+        if marker in parts:
+            index = parts.index(marker)
+            if index + 1 < len(parts) and is_youtube_video_id(parts[index + 1]):
+                return parts[index + 1]
+    return None
+
+
+def is_youtube_video_id(value: object) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z0-9_-]{11}", value))
 
 
 def process_youtube_gemini_url_job(
@@ -890,7 +938,10 @@ def process_youtube_gemini_url_job(
         {"platform": platform, "resolver": "youtube_oembed"},
     )
     try:
-        extract_result = youtube_oembed_result(fetch_youtube_oembed(job.source_url))
+        extract_result = youtube_oembed_result(
+            fetch_youtube_oembed(job.source_url),
+            job.source_url,
+        )
     except Exception as exc:
         extract_result = minimal_youtube_result()
         extract_result["metadata_error_type"] = type(exc).__name__
@@ -911,6 +962,13 @@ def process_youtube_gemini_url_job(
             ),
             "exception_type": extract_result.get("metadata_error_type"),
         },
+    )
+    add_event(
+        repository,
+        job.id,
+        "youtube_thumbnail_selected",
+        "YouTube thumbnail selected.",
+        youtube_thumbnail_event_metadata(extract_result),
     )
     uploaded_thumbnail_url = upload_thumbnail_best_effort(
         repository,
@@ -3456,6 +3514,11 @@ def safe_extract_event_metadata(
     *,
     error_code: str | None = None,
 ) -> dict[str, object]:
+    default_thumbnail_strategy = (
+        "platform_first_v3"
+        if result.get("platform") == "youtube"
+        else "platform_first_v2"
+    )
     metadata = {
         "platform": result.get("platform"),
         "resolver": result.get("resolver") or "ytdlp_stream",
@@ -3465,7 +3528,7 @@ def safe_extract_event_metadata(
         "has_thumbnail": bool(result.get("thumbnail_url")),
         "thumbnail_source": result.get("thumbnail_source") or "placeholder",
         "thumbnail_provider": result.get("thumbnail_provider") or result.get("platform"),
-        "thumbnail_strategy": result.get("thumbnail_strategy") or "platform_first_v2",
+        "thumbnail_strategy": result.get("thumbnail_strategy") or default_thumbnail_strategy,
         "candidate_count": result.get("thumbnail_candidate_count") or 0,
         "thumbnail_selected": bool(result.get("thumbnail_selected")),
         "has_cdn_url": bool(result.get("cdn_download_url")),

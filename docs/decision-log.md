@@ -40,6 +40,7 @@ Keep this file terse: only durable architecture decisions, not full task history
 - M21.7A adds protected `POST /metadata-preview` for app saved-link previews before AI generation. It accepts `X-Worker-Secret` or `Authorization: Bearer`, fetches lightweight YouTube oEmbed, yt-dlp metadata-only, or OpenGraph metadata, never calls Gemini, never downloads video bytes, and returns only title/description/image thumbnail/author/duration/tags plus over-limit flags.
 - M21.9B keeps thumbnails metadata-first. Platform/oEmbed thumbnails are preferred, yt-dlp `thumbnail` is used when valid, `thumbnails[]` is scored by size when needed, avatar/tiny candidates are avoided, and thumbnail events expose only `platform`, `thumbnail_source`, `thumbnail_selected`, and optional `duration_seconds`. Frame sampling is an optional fallback only when no metadata thumbnail exists and `ffmpeg` is available.
 - M21.9B.1B added platform_first_v2 thumbnail strategy and no-downgrade protection so full AI jobs do not replace platform thumbnails with sampled frames.
+- M21.9B.2 fixed YouTube Shorts thumbnail selection by treating hq1/hq2/hq3 oEmbed thumbnails as low-priority frame variants and validating deterministic YouTube thumbnail candidates first.
 
 ## Next Decision To Prove
 

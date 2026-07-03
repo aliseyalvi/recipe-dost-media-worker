@@ -682,3 +682,10 @@ print('platform_first_v2 thumbnail smoke passed')
 PY
 # passed; local venv emitted urllib3 LibreSSL warning
 ```
+
+## M21.9B.2 YouTube Shorts thumbnail variant fix
+
+```bash
+python3 -m compileall app
+# passed
+```
