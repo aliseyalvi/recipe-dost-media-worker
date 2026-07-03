@@ -32,7 +32,11 @@ from app.schemas import (
     RecipeStep,
 )
 from app.social.stream_download import extract_social_video
-from app.social.thumbnail_selection import platform_thumbnail
+from app.social.thumbnail_selection import (
+    early_frame_thumbnail_selected,
+    platform_thumbnail,
+    should_update_thumbnail,
+)
 from app.social.thumbnail_upload import (
     sample_video_frame_thumbnail,
     upload_source_thumbnail,
@@ -411,7 +415,11 @@ def process_queue_job(
                 safe_int_or_none(extract_result.get("duration_seconds")),
             )
             if uploaded_thumbnail_url:
-                extract_result["thumbnail_source"] = "sampled_frame"
+                frame_thumbnail = early_frame_thumbnail_selected(platform)
+                extract_result["thumbnail_source"] = frame_thumbnail.source
+                extract_result["thumbnail_provider"] = frame_thumbnail.provider
+                extract_result["thumbnail_strategy"] = frame_thumbnail.strategy
+                extract_result["thumbnail_candidate_count"] = frame_thumbnail.candidate_count
                 extract_result["thumbnail_selected"] = True
         current_stage = "metadata_save"
         save_metadata(repository, job.id, extract_result, uploaded_thumbnail_url)
@@ -608,7 +616,10 @@ def public_source_metadata(
         "author_username": result.get("author_username"),
         "duration_seconds": result.get("duration_seconds"),
         "thumbnail_source_present": bool(result.get("thumbnail_url")),
-        "thumbnail_source": result.get("thumbnail_source") or "fallback",
+        "thumbnail_source": result.get("thumbnail_source") or "placeholder",
+        "thumbnail_provider": result.get("thumbnail_provider") or result.get("platform"),
+        "thumbnail_strategy": result.get("thumbnail_strategy") or "platform_first_v2",
+        "thumbnail_candidate_count": result.get("thumbnail_candidate_count") or 0,
         "thumbnail_selected": bool(result.get("thumbnail_selected")),
         "uploaded_thumbnail_url": uploaded_thumbnail_url,
         "resolution_mode": resolution_mode,
@@ -663,7 +674,10 @@ def upload_thumbnail_best_effort(
 ) -> str | None:
     event_metadata = {
         "platform": job.platform,
-        "thumbnail_source": thumbnail_source or "fallback",
+        "thumbnail_source": thumbnail_source or "placeholder",
+        "thumbnail_provider": job.platform,
+        "thumbnail_strategy": "platform_first_v2",
+        "candidate_count": 1 if thumbnail_url else 0,
         "thumbnail_selected": bool(thumbnail_url),
     }
     if duration_seconds is not None:
@@ -691,13 +705,15 @@ def upload_thumbnail_best_effort(
                 job.id,
                 "thumbnail_uploaded",
                 "Thumbnail uploaded.",
-                {**event_metadata, "thumbnail_source": thumbnail_source or "platform_thumbnail", "thumbnail_selected": True},
+                {**event_metadata, "thumbnail_selected": True},
             )
             if job.recipe_item_id is not None:
-                repository.update_recipe_thumbnail(
-                    recipe_item_id=job.recipe_item_id,
-                    user_id=job.user_id,
-                    thumbnail_url=public_url,
+                update_recipe_thumbnail_no_downgrade(
+                    repository,
+                    job,
+                    public_url,
+                    thumbnail_source or "placeholder",
+                    event_metadata,
                 )
         return public_url
     except Exception:
@@ -706,7 +722,7 @@ def upload_thumbnail_best_effort(
             job.id,
             "thumbnail_upload_failed",
             "Thumbnail upload failed.",
-            {**event_metadata, "thumbnail_source": thumbnail_source or "platform_thumbnail", "thumbnail_selected": False},
+            {**event_metadata, "thumbnail_selected": False},
         )
         return None
 
@@ -720,7 +736,10 @@ def sample_thumbnail_best_effort(
 ) -> str | None:
     event_metadata: dict[str, object] = {
         "platform": job.platform,
-        "thumbnail_source": "sampled_frame",
+        "thumbnail_source": "early_frame_fallback",
+        "thumbnail_provider": job.platform,
+        "thumbnail_strategy": "platform_first_v2",
+        "candidate_count": 4,
         "thumbnail_selected": False,
     }
     if duration_seconds is not None:
@@ -746,12 +765,53 @@ def sample_thumbnail_best_effort(
         {**event_metadata, "thumbnail_selected": True},
     )
     if job.recipe_item_id is not None:
-        repository.update_recipe_thumbnail(
-            recipe_item_id=job.recipe_item_id,
-            user_id=job.user_id,
-            thumbnail_url=public_url,
+        update_recipe_thumbnail_no_downgrade(
+            repository,
+            job,
+            public_url,
+            "early_frame_fallback",
+            event_metadata,
         )
     return public_url
+
+
+def update_recipe_thumbnail_no_downgrade(
+    repository: MediaJobRepository,
+    job: MediaJobRecord,
+    thumbnail_url: str,
+    thumbnail_source: str,
+    base_metadata: dict[str, object],
+) -> bool:
+    if job.recipe_item_id is None:
+        return False
+    existing_url = repository.get_recipe_thumbnail(
+        recipe_item_id=job.recipe_item_id,
+        user_id=job.user_id,
+    )
+    will_update = should_update_thumbnail(
+        existing_url=existing_url,
+        existing_source=None,
+        new_source=thumbnail_source,
+    )
+    add_event_safely(
+        repository,
+        job.id,
+        "thumbnail_selected",
+        "Thumbnail update decision made.",
+        {
+            **base_metadata,
+            "used_existing_thumbnail": bool(existing_url and not will_update),
+            "will_update_recipe_item_thumbnail": will_update,
+        },
+    )
+    if not will_update:
+        return False
+    repository.update_recipe_thumbnail(
+        recipe_item_id=job.recipe_item_id,
+        user_id=job.user_id,
+        thumbnail_url=thumbnail_url,
+    )
+    return True
 
 
 def fetch_youtube_oembed(source_url: str) -> dict[str, object]:
@@ -766,7 +826,11 @@ def fetch_youtube_oembed(source_url: str) -> dict[str, object]:
 
 
 def youtube_oembed_result(body: dict[str, object]) -> dict[str, object]:
-    thumbnail = platform_thumbnail(body.get("thumbnail_url"))
+    thumbnail = platform_thumbnail(
+        body.get("thumbnail_url"),
+        source="youtube_oembed",
+        provider="youtube",
+    )
     return {
         "success": True,
         "platform": "youtube",
@@ -776,6 +840,9 @@ def youtube_oembed_result(body: dict[str, object]) -> dict[str, object]:
         "author_username": body.get("author_name"),
         "thumbnail_url": thumbnail.url,
         "thumbnail_source": thumbnail.source,
+        "thumbnail_provider": thumbnail.provider,
+        "thumbnail_strategy": thumbnail.strategy,
+        "thumbnail_candidate_count": thumbnail.candidate_count,
         "thumbnail_selected": thumbnail.selected,
         "resolution_mode": "gemini_url",
         "video_bytes_verified": False,
@@ -790,7 +857,10 @@ def minimal_youtube_result() -> dict[str, object]:
         "platform": "youtube",
         "resolver": "youtube_oembed",
         "resolution_mode": "gemini_url",
-        "thumbnail_source": "fallback",
+        "thumbnail_source": "placeholder",
+        "thumbnail_provider": "youtube",
+        "thumbnail_strategy": "platform_first_v2",
+        "thumbnail_candidate_count": 0,
         "thumbnail_selected": False,
         "video_bytes_verified": False,
         "output_mode": "gemini_url",
@@ -3393,7 +3463,10 @@ def safe_extract_event_metadata(
         "description_present": bool(result.get("description")),
         "duration_seconds": result.get("duration_seconds"),
         "has_thumbnail": bool(result.get("thumbnail_url")),
-        "thumbnail_source": result.get("thumbnail_source") or "fallback",
+        "thumbnail_source": result.get("thumbnail_source") or "placeholder",
+        "thumbnail_provider": result.get("thumbnail_provider") or result.get("platform"),
+        "thumbnail_strategy": result.get("thumbnail_strategy") or "platform_first_v2",
+        "candidate_count": result.get("thumbnail_candidate_count") or 0,
         "thumbnail_selected": bool(result.get("thumbnail_selected")),
         "has_cdn_url": bool(result.get("cdn_download_url")),
         "mime_type": result.get("mime_type"),

@@ -90,7 +90,7 @@ def resolve_youtube_metadata(
         )
 
     selected_format = select_optional_direct_video_format(info, settings)
-    thumbnail = select_ytdlp_thumbnail(info)
+    thumbnail = select_ytdlp_thumbnail(info, "youtube")
     stream_url = safe_http_url(selected_format.get("url")) if selected_format else ""
     filesize = safe_int(
         (selected_format or {}).get("filesize")
@@ -119,6 +119,9 @@ def resolve_youtube_metadata(
         width=safe_int((selected_format or {}).get("width") or info.get("width")),
         height=safe_int((selected_format or {}).get("height") or info.get("height")),
         thumbnail_source=thumbnail.source,
+        thumbnail_provider=thumbnail.provider,
+        thumbnail_strategy=thumbnail.strategy,
+        thumbnail_candidate_count=thumbnail.candidate_count,
         thumbnail_selected=thumbnail.selected,
     )
 
@@ -325,7 +328,7 @@ def build_social_video_info(
         or info.get("filesize")
         or info.get("filesize_approx")
     )
-    thumbnail = select_ytdlp_thumbnail(info)
+    thumbnail = select_ytdlp_thumbnail(info, detect_social_platform(str(info.get("webpage_url") or url)))
     return SocialVideoInfo(
         platform=detect_social_platform(str(info.get("webpage_url") or url)),
         resolver="yt-dlp",
@@ -343,6 +346,9 @@ def build_social_video_info(
         uploader=safe_str(info.get("uploader")),
         filesize_approx=filesize,
         thumbnail_source=thumbnail.source,
+        thumbnail_provider=thumbnail.provider,
+        thumbnail_strategy=thumbnail.strategy,
+        thumbnail_candidate_count=thumbnail.candidate_count,
         thumbnail_selected=thumbnail.selected,
     )
 
@@ -546,7 +552,7 @@ def sanitized_ytdlp_metadata(
     info: dict[str, Any],
     selected_format: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    thumbnail = select_ytdlp_thumbnail(info)
+    thumbnail = select_ytdlp_thumbnail(info, safe_str(info.get("extractor")) or "platform")
     return {
         "id": safe_str(info.get("id")),
         "title": safe_str(info.get("title")),

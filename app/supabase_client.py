@@ -248,6 +248,25 @@ class MediaJobRepository:
             .execute()
         )
 
+    def get_recipe_thumbnail(
+        self,
+        *,
+        recipe_item_id: UUID,
+        user_id: UUID,
+    ) -> str | None:
+        response = (
+            self._client.table("recipe_items")
+            .select("thumbnail_url")
+            .eq("id", str(recipe_item_id))
+            .eq("user_id", str(user_id))
+            .limit(1)
+            .execute()
+        )
+        if not response.data:
+            return None
+        value = response.data[0].get("thumbnail_url")
+        return value if isinstance(value, str) and value.strip() else None
+
     def upload_public_object(
         self,
         bucket: str,

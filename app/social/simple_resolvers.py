@@ -93,7 +93,11 @@ def _resolve_with_form_adapter(
             {"platform": platform, "resolver": resolver},
         )
 
-    thumbnail = platform_thumbnail(payload.get("thumbnail_url"))
+    thumbnail = platform_thumbnail(
+        payload.get("thumbnail_url"),
+        source="existing_platform_thumbnail",
+        provider=platform,
+    )
     return SocialVideoInfo(
         platform=platform,
         resolver=resolver,
@@ -121,6 +125,9 @@ def _resolve_with_form_adapter(
         width=safe_int(payload.get("width")),
         height=safe_int(payload.get("height")),
         thumbnail_source=thumbnail.source,
+        thumbnail_provider=thumbnail.provider,
+        thumbnail_strategy=thumbnail.strategy,
+        thumbnail_candidate_count=thumbnail.candidate_count,
         thumbnail_selected=thumbnail.selected,
     )
 

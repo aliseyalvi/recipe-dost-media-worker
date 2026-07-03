@@ -120,7 +120,11 @@ def resolve_with_tikwm(
             },
         )
 
-    thumbnail = platform_thumbnail(data.get("cover"))
+    thumbnail = platform_thumbnail(
+        data.get("cover"),
+        source="existing_platform_thumbnail",
+        provider="tiktok",
+    )
     return SocialVideoInfo(
         platform="tiktok",
         resolver="tikwm",
@@ -145,6 +149,9 @@ def resolve_with_tikwm(
         raw_metadata=data,
         description=safe_str(data.get("title")),
         thumbnail_source=thumbnail.source,
+        thumbnail_provider=thumbnail.provider,
+        thumbnail_strategy=thumbnail.strategy,
+        thumbnail_candidate_count=thumbnail.candidate_count,
         thumbnail_selected=thumbnail.selected,
     )
 

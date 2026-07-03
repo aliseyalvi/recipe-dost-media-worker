@@ -393,7 +393,10 @@ def extractor_failure(
         "description": None,
         "author_username": None,
         "thumbnail_url": None,
-        "thumbnail_source": "fallback",
+        "thumbnail_source": "placeholder",
+        "thumbnail_provider": platform,
+        "thumbnail_strategy": "platform_first_v2",
+        "thumbnail_candidate_count": 0,
         "thumbnail_selected": False,
         "duration_seconds": None,
         "cdn_download_url": None,
@@ -442,7 +445,7 @@ def extractor_result(
         or info.get("filesize_approx")
     )
     has_local_media = bool(temp_file_path or video_buffer)
-    thumbnail = select_ytdlp_thumbnail(info)
+    thumbnail = select_ytdlp_thumbnail(info, platform)
     return {
         "success": success,
         "platform": platform,
@@ -452,6 +455,9 @@ def extractor_result(
         "author_username": safe_str(info.get("uploader") or info.get("channel")),
         "thumbnail_url": thumbnail.url,
         "thumbnail_source": thumbnail.source,
+        "thumbnail_provider": thumbnail.provider,
+        "thumbnail_strategy": thumbnail.strategy,
+        "thumbnail_candidate_count": thumbnail.candidate_count,
         "thumbnail_selected": thumbnail.selected,
         "duration_seconds": safe_duration_seconds(info.get("duration")),
         "cdn_download_url": cdn_url,
@@ -494,8 +500,16 @@ def extract_opengraph_metadata(
     title = tags.get("og:title") or tags.get("twitter:title")
     description = tags.get("og:description") or tags.get("twitter:description")
     image = (
-        platform_thumbnail(tags.get("og:image")).url
-        or platform_thumbnail(tags.get("twitter:image")).url
+        platform_thumbnail(
+            tags.get("og:image"),
+            source="existing_platform_thumbnail",
+            provider=platform,
+        ).url
+        or platform_thumbnail(
+            tags.get("twitter:image"),
+            source="existing_platform_thumbnail",
+            provider=platform,
+        ).url
     )
     if not title and not image:
         return metadata_fallback_failure(platform)
@@ -507,7 +521,10 @@ def extract_opengraph_metadata(
         "description": description,
         "author_username": None,
         "thumbnail_url": image,
-        "thumbnail_source": "platform_thumbnail" if image else "fallback",
+        "thumbnail_source": "existing_platform_thumbnail" if image else "placeholder",
+        "thumbnail_provider": platform,
+        "thumbnail_strategy": "platform_first_v2",
+        "thumbnail_candidate_count": 1 if image else 0,
         "thumbnail_selected": bool(image),
         "duration_seconds": None,
         "cdn_download_url": None,

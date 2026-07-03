@@ -31,6 +31,7 @@ from app.schemas import (
 )
 from app.social.platforms import detect_social_platform
 from app.social.stream_download import VideoBuffer, safe_int, stream_video_to_memory
+from app.social.thumbnail_selection import should_update_thumbnail
 from app.social.thumbnail_upload import upload_source_thumbnail
 from app.social.models import SocialResolverError, SocialVideoInfo
 from app.social.resolver_orchestrator import resolve_social_video
@@ -2247,11 +2248,14 @@ class JobRunner:
         info: SocialVideoInfo | None = None,
     ) -> str | None:
         thumbnail_source = (
-            info.thumbnail_source if info and info.thumbnail_source else "platform_thumbnail"
+            info.thumbnail_source if info and info.thumbnail_source else "existing_platform_thumbnail"
         )
         event_metadata = {
             "platform": job.platform,
             "thumbnail_source": thumbnail_source,
+            "thumbnail_provider": info.thumbnail_provider if info and info.thumbnail_provider else job.platform,
+            "thumbnail_strategy": info.thumbnail_strategy if info and info.thumbnail_strategy else "platform_first_v2",
+            "candidate_count": info.thumbnail_candidate_count if info and info.thumbnail_candidate_count is not None else 1,
             "thumbnail_selected": bool(thumbnail_url),
         }
         if info is not None and info.duration_seconds is not None:
@@ -2261,7 +2265,12 @@ class JobRunner:
             public_url = upload_source_thumbnail(thumbnail_url, user_id=job.user_id, media_job_id=job.id, repository=self._repository, settings=settings)
             if public_url:
                 self._repository.insert_event(job.id, event_type="thumbnail_uploaded", message="Thumbnail uploaded.", metadata={**event_metadata, "thumbnail_selected": True})
-                self._update_recipe_thumbnail_best_effort(job, public_url)
+                self._update_recipe_thumbnail_best_effort(
+                    job,
+                    public_url,
+                    thumbnail_source=thumbnail_source,
+                    event_metadata=event_metadata,
+                )
                 if info is not None:
                     self._save_source_metadata_best_effort(
                         job,
@@ -2412,14 +2421,29 @@ class JobRunner:
             error_code=None,
             error_message=None,
         )
-        self._update_recipe_thumbnail_best_effort(job, thumbnail_url)
+        self._update_recipe_thumbnail_best_effort(
+            job,
+            thumbnail_url,
+            thumbnail_source="youtube_deterministic",
+            event_metadata={
+                "platform": "youtube",
+                "thumbnail_source": "youtube_deterministic",
+                "thumbnail_provider": "youtube",
+                "thumbnail_strategy": "platform_first_v2",
+                "candidate_count": 1,
+                "thumbnail_selected": True,
+            },
+        )
         self._repository.insert_event(
             media_job_id,
             event_type="thumbnail_resolved",
             message="YouTube thumbnail resolved.",
             metadata={
                 "platform": "youtube",
-                "thumbnail_source": "platform_thumbnail",
+                "thumbnail_source": "youtube_deterministic",
+                "thumbnail_provider": "youtube",
+                "thumbnail_strategy": "platform_first_v2",
+                "candidate_count": 1,
                 "thumbnail_selected": True,
             },
         )
@@ -2771,10 +2795,41 @@ class JobRunner:
         self,
         job: MediaJobRecord,
         thumbnail_url: str,
+        *,
+        thumbnail_source: str = "existing_platform_thumbnail",
+        event_metadata: dict[str, object] | None = None,
     ) -> None:
         if job.recipe_item_id is None:
             return
         try:
+            existing_url = self._repository.get_recipe_thumbnail(
+                recipe_item_id=job.recipe_item_id,
+                user_id=job.user_id,
+            )
+            will_update = should_update_thumbnail(
+                existing_url=existing_url,
+                existing_source=None,
+                new_source=thumbnail_source,
+            )
+            self._repository.insert_event(
+                job.id,
+                event_type="thumbnail_selected",
+                message="Thumbnail update decision made.",
+                metadata={
+                    **(event_metadata or {
+                        "platform": job.platform,
+                        "thumbnail_source": thumbnail_source,
+                        "thumbnail_provider": job.platform,
+                        "thumbnail_strategy": "platform_first_v2",
+                        "candidate_count": 1,
+                        "thumbnail_selected": True,
+                    }),
+                    "used_existing_thumbnail": bool(existing_url and not will_update),
+                    "will_update_recipe_item_thumbnail": will_update,
+                },
+            )
+            if not will_update:
+                return
             self._repository.update_recipe_thumbnail(
                 recipe_item_id=job.recipe_item_id,
                 user_id=job.user_id,
@@ -2956,7 +3011,10 @@ def _social_metadata(info: SocialVideoInfo) -> dict[str, object]:
         "duration_known": info.duration_seconds is not None,
         "duration_seconds": info.duration_seconds,
         "has_thumbnail": bool(info.thumbnail_url),
-        "thumbnail_source": info.thumbnail_source or "platform_thumbnail",
+        "thumbnail_source": info.thumbnail_source or "existing_platform_thumbnail",
+        "thumbnail_provider": info.thumbnail_provider or info.platform,
+        "thumbnail_strategy": info.thumbnail_strategy or "platform_first_v2",
+        "thumbnail_candidate_count": info.thumbnail_candidate_count or 0,
         "thumbnail_selected": bool(info.thumbnail_selected),
         "ext": info.ext,
         "mime_type": info.mime_type,
@@ -2981,7 +3039,10 @@ def build_public_source_metadata(
         "author_username": info.uploader or "",
         "duration_seconds": info.duration_seconds,
         "thumbnail_source_present": bool(info.thumbnail_url),
-        "thumbnail_source": info.thumbnail_source or "platform_thumbnail",
+        "thumbnail_source": info.thumbnail_source or "existing_platform_thumbnail",
+        "thumbnail_provider": info.thumbnail_provider or info.platform,
+        "thumbnail_strategy": info.thumbnail_strategy or "platform_first_v2",
+        "thumbnail_candidate_count": info.thumbnail_candidate_count or 0,
         "thumbnail_selected": bool(info.thumbnail_selected),
         "uploaded_thumbnail_url": uploaded_thumbnail_url,
         "media": {
@@ -3010,7 +3071,10 @@ def social_metadata_event_metadata(info: SocialVideoInfo) -> dict[str, object]:
         "description_present": bool(description),
         "duration_seconds": info.duration_seconds,
         "has_thumbnail": bool(info.thumbnail_url),
-        "thumbnail_source": info.thumbnail_source or "platform_thumbnail",
+        "thumbnail_source": info.thumbnail_source or "existing_platform_thumbnail",
+        "thumbnail_provider": info.thumbnail_provider or info.platform,
+        "thumbnail_strategy": info.thumbnail_strategy or "platform_first_v2",
+        "thumbnail_candidate_count": info.thumbnail_candidate_count or 0,
         "thumbnail_selected": bool(info.thumbnail_selected),
         "has_cdn_url": bool(info.stream_url),
         "mime_type": info.mime_type,

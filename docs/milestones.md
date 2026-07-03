@@ -35,9 +35,10 @@
 | 31 | M20.5 Worker repo cleanup before production cutover | Done | Queue mode documented as production flow, legacy webhook path de-emphasized, and `feature/queue-ytdlp-poc` marked ready to merge to `main` |
 | 32 | M21.7A Worker metadata preview endpoint | Done | Protected `/metadata-preview` returns lightweight title/thumbnail/duration metadata without Gemini or video downloads |
 | 33 | M21.9B Thumbnail selection quality | Done | Prefer platform/oEmbed and best yt-dlp thumbnails, avoid avatar/tiny candidates, and log safe thumbnail source labels |
-| 34 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 35 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 36 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 34 | M21.9B.1B Platform-first no-downgrade thumbnails | Done | Use platform_first_v2 source labels and prevent sampled-frame fallbacks from replacing existing platform thumbnails |
+| 35 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 36 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 37 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
@@ -72,3 +73,4 @@ Merge `feature/queue-ytdlp-poc` to `main`, deploy the production worker from `ma
 - M20.5 confirms `feature/queue-ytdlp-poc` is ready to merge to `main`; after merge, production should run from `main`, and the old webhook Render service should be suspended only after the main service validates TikTok, Instagram, and YouTube.
 - M21.7A adds a worker-powered metadata preview route for saved recipe links. The route is protected by the existing worker secret, returns only safe app metadata, flags over-limit durations without failing, exposes metadata-preview support on `/health`, and leaves the queue/Gemini analysis pipeline unchanged.
 - M21.9B centralizes thumbnail choice for preview and jobs: platform/oEmbed thumbnails stay first, yt-dlp `thumbnail` is used when valid, `thumbnails[]` is scored by dimensions when needed, avatar/tiny candidates are avoided, and safe `thumbnail_source` labels are stored in events/source metadata.
+- M21.9B.1B tightens the thumbnail contract to `platform_first_v2`, returns source/provider/strategy/candidate fields from metadata preview, and checks existing recipe thumbnails before updating so platform image URLs are not downgraded to early-frame fallbacks.

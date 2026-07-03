@@ -4,7 +4,7 @@ import html
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import requests
 
@@ -48,6 +48,11 @@ class MetadataPreview:
     metadata_status: str
     is_too_long: bool
     max_duration_seconds: int
+    thumbnail_source: str
+    thumbnail_provider: str
+    thumbnail_strategy: str
+    thumbnail_candidate_count: int
+    thumbnail_selected: bool
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -62,6 +67,11 @@ class MetadataPreview:
             "metadata_status": self.metadata_status,
             "is_too_long": self.is_too_long,
             "max_duration_seconds": self.max_duration_seconds,
+            "thumbnail_source": self.thumbnail_source,
+            "thumbnail_provider": self.thumbnail_provider,
+            "thumbnail_strategy": self.thumbnail_strategy,
+            "thumbnail_candidate_count": self.thumbnail_candidate_count,
+            "thumbnail_selected": self.thumbnail_selected,
         }
 
 
@@ -105,6 +115,37 @@ def normalize_platform(platform: str | None, url: str) -> str:
     return "other"
 
 
+def youtube_deterministic_thumbnail(url: str):
+    video_id = extract_youtube_video_id(url)
+    return platform_thumbnail(
+        f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg" if video_id else None,
+        source="youtube_deterministic",
+        provider="youtube",
+    )
+
+
+def extract_youtube_video_id(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host == "youtu.be":
+        candidate = parsed.path.strip("/").split("/", 1)[0]
+        return candidate if is_youtube_video_id(candidate) else None
+    query_id = parse_qs(parsed.query).get("v", [None])[0]
+    if is_youtube_video_id(query_id):
+        return query_id
+    parts = [part for part in parsed.path.split("/") if part]
+    for marker in ("shorts", "embed"):
+        if marker in parts:
+            index = parts.index(marker)
+            if index + 1 < len(parts) and is_youtube_video_id(parts[index + 1]):
+                return parts[index + 1]
+    return None
+
+
+def is_youtube_video_id(value: object) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z0-9_-]{11}", value))
+
+
 def fetch_youtube_preview(url: str, settings: Settings) -> MetadataPreview:
     try:
         response = requests.get(
@@ -121,7 +162,11 @@ def fetch_youtube_preview(url: str, settings: Settings) -> MetadataPreview:
                 source={
                     "title": body.get("title"),
                     "description": body.get("title"),
-                    "thumbnail_url": platform_thumbnail(body.get("thumbnail_url")).url,
+                    "thumbnail": platform_thumbnail(
+                        body.get("thumbnail_url"),
+                        source="youtube_oembed",
+                        provider="youtube",
+                    ),
                     "author_username": body.get("author_name"),
                 },
                 settings=settings,
@@ -133,6 +178,14 @@ def fetch_youtube_preview(url: str, settings: Settings) -> MetadataPreview:
     try:
         return fetch_ytdlp_preview(url, "youtube", settings, resolver="youtube_ytdlp")
     except MetadataPreviewError:
+        deterministic = youtube_deterministic_thumbnail(url)
+        if deterministic.url:
+            return preview_from_mapping(
+                platform="youtube",
+                resolver="youtube_deterministic",
+                source={"thumbnail": deterministic},
+                settings=settings,
+            )
         return failed_preview("youtube", "youtube_ytdlp", settings)
 
 
@@ -197,14 +250,14 @@ def fetch_ytdlp_preview(
             "Metadata could not be fetched.",
             502,
         )
-    thumbnail = select_ytdlp_thumbnail(info)
+    thumbnail = select_ytdlp_thumbnail(info, platform)
     return preview_from_mapping(
         platform=platform,
         resolver=resolver,
         source={
             "title": info.get("title"),
             "description": info.get("description"),
-            "thumbnail_url": thumbnail.url,
+            "thumbnail": thumbnail,
             "author_username": (
                 info.get("uploader_id")
                 or info.get("uploader")
@@ -237,6 +290,11 @@ def fetch_opengraph_preview(
             "title": result.get("title"),
             "description": result.get("description"),
             "thumbnail_url": result.get("thumbnail_url"),
+            "thumbnail": platform_thumbnail(
+                result.get("thumbnail_url"),
+                source="existing_platform_thumbnail",
+                provider=platform,
+            ),
             "author_username": result.get("author_username"),
             "duration_seconds": result.get("duration_seconds"),
         },
@@ -257,6 +315,11 @@ def failed_preview(platform: str, resolver: str, settings: Settings) -> Metadata
         metadata_status="failed",
         is_too_long=False,
         max_duration_seconds=settings.max_video_duration_seconds,
+        thumbnail_source="placeholder",
+        thumbnail_provider=platform,
+        thumbnail_strategy="platform_first_v2",
+        thumbnail_candidate_count=0,
+        thumbnail_selected=False,
     )
 
 
@@ -270,7 +333,20 @@ def preview_from_mapping(
     duration_seconds = safe_duration_seconds(source.get("duration_seconds"))
     title = clean_title(source.get("title"))
     description = clean_description(source.get("description"))
+    thumbnail = source.get("thumbnail")
     thumbnail_url = safe_image_url(source.get("thumbnail_url"))
+    thumbnail_source = "placeholder"
+    thumbnail_provider = platform
+    thumbnail_strategy = "platform_first_v2"
+    thumbnail_candidate_count = 0
+    thumbnail_selected = bool(thumbnail_url)
+    if hasattr(thumbnail, "url"):
+        thumbnail_url = safe_image_url(getattr(thumbnail, "url"))
+        thumbnail_source = str(getattr(thumbnail, "source", "placeholder"))
+        thumbnail_provider = str(getattr(thumbnail, "provider", platform))
+        thumbnail_strategy = str(getattr(thumbnail, "strategy", "platform_first_v2"))
+        thumbnail_candidate_count = int(getattr(thumbnail, "candidate_count", 0))
+        thumbnail_selected = bool(getattr(thumbnail, "selected", False))
     tags = sanitize_tags(source.get("tags"))
     has_core_metadata = bool(title or description or thumbnail_url)
     metadata_status = "completed" if title and thumbnail_url else (
@@ -291,6 +367,11 @@ def preview_from_mapping(
             and duration_seconds > settings.max_video_duration_seconds
         ),
         max_duration_seconds=settings.max_video_duration_seconds,
+        thumbnail_source=thumbnail_source,
+        thumbnail_provider=thumbnail_provider,
+        thumbnail_strategy=thumbnail_strategy,
+        thumbnail_candidate_count=thumbnail_candidate_count,
+        thumbnail_selected=thumbnail_selected,
     )
 
 

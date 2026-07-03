@@ -621,3 +621,64 @@ grep -R "cdn_url.*source_metadata\|source_metadata.*cdn_url\|temporary_download_
 # matched existing cookie path literals, generated pycache binaries, README cookie docs,
 # and historical commands-log validation text only; no new thumbnail leak pattern found
 ```
+
+## M21.9B.1B Platform-First Thumbnail Validation
+
+```bash
+python -m compileall app
+# zsh: command not found: python
+
+python3 -m compileall app
+# passed
+
+WORKER_API_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test .venv/bin/python - <<'PY'
+from unittest.mock import Mock, patch
+from fastapi.testclient import TestClient
+
+from app.config import get_settings
+from app.main import app
+from app.social.thumbnail_selection import safe_image_url, select_ytdlp_thumbnail, should_update_thumbnail
+from app.social.thumbnail_upload import frame_score
+
+best = select_ytdlp_thumbnail({
+    'thumbnail': 'https://cdn.example.com/avatar_150x150.jpg',
+    'thumbnails': [
+        {'url': 'https://cdn.example.com/avatar_150x150.jpg', 'width': 150, 'height': 150, 'id': 'avatar'},
+        {'url': 'https://cdn.example.com/frame_small.jpg', 'width': 320, 'height': 180},
+        {'url': 'https://cdn.example.com/frame_large.jpg', 'width': 1280, 'height': 720},
+    ],
+}, 'instagram')
+assert best.source == 'instagram_ytdlp_array'
+assert best.provider == 'instagram'
+assert best.strategy == 'platform_first_v2'
+assert best.candidate_count == 3
+assert select_ytdlp_thumbnail({'thumbnail': 'https://cdn.example.com/food.webp'}, 'tiktok').source == 'tiktok_ytdlp_thumbnail'
+assert safe_image_url('https://cdn.example.com/video.mp4') is None
+assert frame_score(bytes([0, 0, 0]) * (160 * 90)) == 0
+assert should_update_thumbnail(existing_url='https://i.ytimg.com/vi/x/hqdefault.jpg', existing_source=None, new_source='early_frame_fallback') is False
+assert should_update_thumbnail(existing_url='https://storage.example.com/old.jpg', existing_source=None, new_source='instagram_ytdlp_thumbnail') is True
+
+get_settings.cache_clear()
+class FakeResponse:
+    def raise_for_status(self):
+        return None
+    def json(self):
+        return {'title': 'Chicken & Rice', 'thumbnail_url': 'https://i.ytimg.com/vi/abc123/hqdefault.jpg'}
+
+with patch('app.metadata_preview.requests.get', Mock(return_value=FakeResponse())):
+    client = TestClient(app)
+    response = client.post(
+        '/metadata-preview',
+        headers={'Authorization': 'Bearer test'},
+        json={'url': 'https://www.youtube.com/watch?v=abc123abc12', 'platform': None},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body['thumbnail_source'] == 'youtube_oembed'
+    assert body['thumbnail_provider'] == 'youtube'
+    assert body['thumbnail_strategy'] == 'platform_first_v2'
+    assert body['thumbnail_selected'] is True
+print('platform_first_v2 thumbnail smoke passed')
+PY
+# passed; local venv emitted urllib3 LibreSSL warning
+```

@@ -109,7 +109,11 @@ def resolve_with_cobalt(
             )
         filename = safe_str(payload.get("filename"))
         ext = "mp4" if filename and filename.lower().endswith(".mp4") else None
-        thumbnail = platform_thumbnail(payload.get("thumbnail"))
+        thumbnail = platform_thumbnail(
+            payload.get("thumbnail"),
+            source="existing_platform_thumbnail",
+            provider=platform,
+        )
         return SocialVideoInfo(
             platform=platform,
             resolver="cobalt",
@@ -130,6 +134,9 @@ def resolve_with_cobalt(
             uploader=None,
             filesize_approx=None,
             thumbnail_source=thumbnail.source,
+            thumbnail_provider=thumbnail.provider,
+            thumbnail_strategy=thumbnail.strategy,
+            thumbnail_candidate_count=thumbnail.candidate_count,
             thumbnail_selected=thumbnail.selected,
         )
     if status == "picker":
