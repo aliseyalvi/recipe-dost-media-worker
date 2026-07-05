@@ -47,6 +47,10 @@ logger = logging.getLogger("recipe_dost.worker")
 
 PROMPT_VERSION = "m20_gemini31_single_pass_v1"
 TWO_STEP_PROMPT_VERSION = "m20_recipe_video_v1"
+STRUCTURED_EXTRACTION_USER_MESSAGE = (
+    "Recipe extraction could not understand this video well enough."
+)
+STRUCTURED_FAILURE_UNKNOWN = "gemini_unknown_structured_failure"
 
 CANONICAL_RECIPE_PROMPT = """Perform exhaustive line-by-line recipe extraction.
 Do not summarize. Explicitly list every ingredient, including minor spices.
@@ -211,12 +215,33 @@ class QueueJobFailure(Exception):
         *,
         stage: str,
         exception_type: str | None = None,
+        metadata: dict[str, object] | None = None,
     ) -> None:
         super().__init__(code)
         self.code = code
         self.message = message
         self.stage = stage
         self.exception_type = exception_type
+        self.metadata = metadata or {}
+
+
+class StructuredExtractionFailure(QueueJobFailure):
+    def __init__(
+        self,
+        *,
+        failure_category: str,
+        stage: str = "gemini_structured_extraction",
+        exception_type: str | None = None,
+        raw_text: str | None = None,
+    ) -> None:
+        super().__init__(
+            "gemini_structured_extraction_failed",
+            STRUCTURED_EXTRACTION_USER_MESSAGE,
+            stage=stage,
+            exception_type=exception_type,
+            metadata={"failure_category": failure_category},
+        )
+        self.raw_text = raw_text
 
 
 async def run_queue_loop(_build_job_runner: Callable[[Settings], object]) -> None:
@@ -492,6 +517,7 @@ def process_queue_job(
             exc.message,
             stage=exc.stage,
             exception_type=exc.exception_type,
+            metadata=exc.metadata,
         )
     except Exception as exc:
         logger.error(
@@ -1393,12 +1419,19 @@ def generate_content_json(
             )
             text = extract_gemini_text(response)
             if not text:
-                raise QueueJobFailure(
-                    "gemini_recipe_json_empty",
-                    "Gemini returned empty recipe JSON.",
-                    stage="gemini_structured_extraction",
+                category = empty_structured_response_category(response)
+                raise StructuredExtractionFailure(
+                    failure_category=category,
+                    exception_type="EmptyGeminiResponse",
                 )
-            return _extract_json_object(text), response
+            try:
+                return _extract_json_object(text), response
+            except ValueError as exc:
+                raise StructuredExtractionFailure(
+                    failure_category="gemini_json_parse_failed",
+                    exception_type=type(exc).__name__,
+                    raw_text=text[:12000],
+                ) from exc
         except TypeError as exc:
             last_exc = exc
             continue
@@ -1408,13 +1441,27 @@ def generate_content_json(
         response = client.models.generate_content(model=model, contents=contents)
         text = extract_gemini_text(response)
         if not text:
-            raise QueueJobFailure(
-                "gemini_recipe_json_empty",
-                "Gemini returned empty recipe JSON.",
-                stage="gemini_structured_extraction",
+            category = empty_structured_response_category(response)
+            raise StructuredExtractionFailure(
+                failure_category=category,
+                exception_type="EmptyGeminiResponse",
             )
-        return _extract_json_object(text), response
+        try:
+            return _extract_json_object(text), response
+        except ValueError as exc:
+            raise StructuredExtractionFailure(
+                failure_category="gemini_json_parse_failed",
+                exception_type=type(exc).__name__,
+                raw_text=text[:12000],
+            ) from exc
     raise RuntimeError("gemini_structured_generation_failed")
+
+
+def empty_structured_response_category(response: object) -> str:
+    metadata = gemini_response_metadata(response)
+    if metadata.get("candidate_count") == 0:
+        return "gemini_candidate_missing"
+    return "gemini_empty_response"
 
 
 def canonical_time_value(time_value: object, key: str) -> int | None:
@@ -1590,8 +1637,13 @@ def structured_event_metadata(
     quality_passed: bool | None = None,
     validation_errors_count: int | None = None,
     repair_used: bool | None = None,
+    repair_attempted: bool | None = None,
+    fallback_model_used: bool | None = None,
+    fallback_attempted: bool | None = None,
+    failure_category: str | None = None,
     error_code: str | None = None,
     exception_type: str | None = None,
+    safe_error_message: str | None = None,
 ) -> dict[str, object]:
     metadata: dict[str, object] = {
         "platform": platform,
@@ -1612,11 +1664,90 @@ def structured_event_metadata(
         metadata["validation_errors_count"] = validation_errors_count
     if repair_used is not None:
         metadata["repair_used"] = repair_used
+        metadata["repair_attempted"] = repair_used
+    if repair_attempted is not None:
+        metadata["repair_attempted"] = repair_attempted
+    if fallback_model_used is not None:
+        metadata["fallback_model_used"] = fallback_model_used
+    if fallback_attempted is not None:
+        metadata["fallback_attempted"] = fallback_attempted
+    if failure_category is not None:
+        metadata["failure_category"] = failure_category
     if error_code is not None:
         metadata["error_code"] = error_code
     if exception_type is not None:
         metadata["exception_type"] = exception_type
+    if safe_error_message is not None:
+        metadata["safe_error_message"] = safe_error_message
     return metadata
+
+
+def structured_failure_category(
+    exc: Exception | None = None,
+    validation_errors: list[str] | None = None,
+) -> str:
+    if validation_errors:
+        quality_errors = {
+            "title_missing",
+            "summary_missing",
+            "ingredients_too_few",
+            "steps_too_few",
+            "summary_raw_or_section_dump",
+            "quality_gate_failed",
+        }
+        if any(error in quality_errors for error in validation_errors):
+            return "gemini_quality_gate_failed"
+        return "gemini_schema_validation_failed"
+    if isinstance(exc, QueueJobFailure):
+        category = exc.metadata.get("failure_category")
+        if isinstance(category, str) and category:
+            return category
+        if exc.code in {
+            "gemini_candidate_missing",
+            "gemini_empty_response",
+            "gemini_json_parse_failed",
+            "gemini_schema_validation_failed",
+            "gemini_quality_gate_failed",
+        }:
+            return exc.code
+    if isinstance(exc, ValueError):
+        return "gemini_json_parse_failed"
+    if exc is not None and type(exc).__name__ in {"ValidationError", "SchemaError"}:
+        return "gemini_schema_validation_failed"
+    return STRUCTURED_FAILURE_UNKNOWN
+
+
+def structured_failure_metadata(
+    *,
+    platform: str,
+    model: str,
+    input_mode: str,
+    settings: Settings,
+    failure_category: str,
+    repair_attempted: bool,
+    fallback_attempted: bool,
+    fallback_model: str | None = None,
+    fallback_model_used: bool = False,
+    exception_type: str | None = None,
+    result: GeminiRecipeResult | None = None,
+    validation_errors_count: int | None = None,
+) -> dict[str, object]:
+    return structured_event_metadata(
+        platform=platform,
+        model=model,
+        fallback_model=fallback_model,
+        input_mode=input_mode,
+        settings=settings,
+        result=result,
+        validation_errors_count=validation_errors_count,
+        repair_attempted=repair_attempted,
+        fallback_attempted=fallback_attempted,
+        fallback_model_used=fallback_model_used,
+        failure_category=failure_category,
+        error_code="gemini_structured_extraction_failed",
+        exception_type=exception_type,
+        safe_error_message=STRUCTURED_EXTRACTION_USER_MESSAGE,
+    )
 
 
 def build_structured_contents(input_part: object, prompt: str) -> list[object]:
@@ -1647,14 +1778,16 @@ def run_structured_repair_call(
     platform: str,
     validation_errors: list[str],
     invalid_canonical: dict | None,
+    invalid_text: str | None = None,
     settings: Settings,
 ) -> dict:
+    invalid_payload = invalid_text if invalid_text is not None else canonical_to_safe_json(invalid_canonical)
     prompt = (
         f"{CANONICAL_REPAIR_PROMPT}\n\n"
         f"Platform: {platform}\n"
         f"Source title: {clean_recipe_text(source_metadata.get('title')) or 'unknown'}\n"
         f"Validation errors: {', '.join(validation_errors[:12])}\n\n"
-        f"Invalid JSON:\n{canonical_to_safe_json(invalid_canonical)}"
+        f"Invalid JSON:\n{invalid_payload[:12000]}"
     )
     parsed, _response = generate_content_json(
         client=client,
@@ -1678,6 +1811,16 @@ def run_single_pass_structured_extraction(
     platform: str,
 ) -> tuple[GeminiRecipeResult, str, bool]:
     model = settings.gemini_primary_model
+    repair_used = False
+    repair_attempted = False
+    fallback_attempted = False
+    fallback_model_used = False
+    fallback_model = (
+        settings.gemini_fallback_model.strip()
+        if settings.gemini_fallback_model
+        else ""
+    )
+    fallback_available = bool(fallback_model and fallback_model != model)
     repository.insert_event(
         job.id,
         event_type="gemini_structured_extraction_started",
@@ -1690,6 +1833,12 @@ def run_single_pass_structured_extraction(
         ),
     )
     canonical: dict | None = None
+    result: GeminiRecipeResult | None = None
+    errors: list[str] = []
+    failure_category = STRUCTURED_FAILURE_UNKNOWN
+    failure_exception_type: str | None = None
+    invalid_text: str | None = None
+    repairable_failure = True
     try:
         canonical, _response = run_structured_extraction_call(
             client=client,
@@ -1697,80 +1846,41 @@ def run_single_pass_structured_extraction(
             model=model,
             settings=settings,
         )
-    except Exception as exc:
-        if not technical_gemini_failure(exc):
-            repository.insert_event(
-                job.id,
-                event_type="gemini_structured_extraction_failed",
-                message="Gemini structured extraction failed.",
-                metadata=structured_event_metadata(
-                    platform=platform,
-                    model=model,
-                    input_mode=input_mode,
-                    settings=settings,
-                    error_code="gemini_structured_extraction_failed",
-                    exception_type=type(exc).__name__,
-                ),
-            )
-            raise QueueJobFailure(
-                "gemini_structured_extraction_failed",
-                "Gemini structured recipe extraction failed.",
-                stage="gemini_structured_extraction",
-                exception_type=type(exc).__name__,
-            ) from exc
-        fallback_model = settings.gemini_fallback_model
-        repository.insert_event(
-            job.id,
-            event_type="gemini_structured_extraction_fallback_model_used",
-            message="Gemini structured extraction retrying with fallback model.",
-            metadata=structured_event_metadata(
-                platform=platform,
-                model=model,
-                fallback_model=fallback_model,
-                input_mode=input_mode,
-                settings=settings,
-                retry_count=1,
-                exception_type=type(exc).__name__,
-            ),
+        result, errors = validate_and_normalize_canonical_recipe(
+            canonical,
+            source_metadata,
+            settings,
         )
-        model = fallback_model
-        try:
-            canonical, _response = run_structured_extraction_call(
-                client=client,
-                input_part=input_part,
-                model=model,
-                settings=settings,
-            )
-        except Exception as fallback_exc:
-            repository.insert_event(
-                job.id,
-                event_type="gemini_structured_extraction_failed",
-                message="Gemini structured extraction failed.",
-                metadata=structured_event_metadata(
-                    platform=platform,
-                    model=model,
-                    input_mode=input_mode,
-                    settings=settings,
-                    error_code="gemini_structured_extraction_failed",
-                    exception_type=type(fallback_exc).__name__,
-                ),
-            )
-            raise QueueJobFailure(
-                "gemini_structured_extraction_failed",
-                "Gemini structured recipe extraction failed.",
-                stage="gemini_structured_extraction",
-                exception_type=type(fallback_exc).__name__,
-            ) from fallback_exc
-    result, errors = validate_and_normalize_canonical_recipe(
-        canonical,
-        source_metadata,
-        settings,
+        if errors:
+            failure_category = structured_failure_category(validation_errors=errors)
+    except Exception as exc:
+        failure_category = structured_failure_category(exc)
+        failure_exception_type = type(exc).__name__
+        repairable_failure = (
+            isinstance(exc, StructuredExtractionFailure)
+            or not technical_gemini_failure(exc)
+        )
+        if isinstance(exc, StructuredExtractionFailure):
+            invalid_text = exc.raw_text
+
+    quality_passed = (
+        result is not None
+        and not errors
+        and recipe_quality_passed(result, settings)
     )
-    quality_passed = not errors and recipe_quality_passed(result, settings)
-    repair_used = False
-    if settings.recipe_quality_gate_enabled and not quality_passed:
-        if not settings.recipe_repair_enabled:
-            return result, model, repair_used
+    if (
+        not quality_passed
+        and settings.recipe_repair_enabled
+        and repairable_failure
+        and failure_category
+        in {
+            "gemini_json_parse_failed",
+            "gemini_schema_validation_failed",
+            "gemini_quality_gate_failed",
+            STRUCTURED_FAILURE_UNKNOWN,
+        }
+    ):
+        repair_attempted = True
         repair_model = settings.effective_gemini_repair_model
         repository.insert_event(
             job.id,
@@ -1783,18 +1893,21 @@ def run_single_pass_structured_extraction(
                 settings=settings,
                 result=result,
                 validation_errors_count=len(errors),
-                repair_used=True,
+                repair_attempted=True,
                 quality_passed=False,
+                failure_category=failure_category,
             ),
         )
         try:
+            repair_errors = errors or [failure_category]
             repaired = run_structured_repair_call(
                 client=client,
                 model=repair_model,
                 source_metadata=source_metadata,
                 platform=platform,
-                validation_errors=errors,
+                validation_errors=repair_errors,
                 invalid_canonical=canonical,
+                invalid_text=invalid_text,
                 settings=settings,
             )
             repaired_result, repaired_errors = validate_and_normalize_canonical_recipe(
@@ -1805,8 +1918,11 @@ def run_single_pass_structured_extraction(
             repair_used = True
             result = repaired_result
             model = repair_model
+            canonical = repaired
             errors = repaired_errors
             quality_passed = not errors and recipe_quality_passed(result, settings)
+            if errors:
+                failure_category = structured_failure_category(validation_errors=errors)
             repository.insert_event(
                 job.id,
                 event_type="recipe_card_repair_completed",
@@ -1818,11 +1934,15 @@ def run_single_pass_structured_extraction(
                     settings=settings,
                     result=result,
                     validation_errors_count=len(errors),
+                    repair_attempted=True,
                     repair_used=True,
                     quality_passed=quality_passed,
+                    failure_category=None if quality_passed else failure_category,
                 ),
             )
         except Exception as exc:
+            failure_category = structured_failure_category(exc)
+            failure_exception_type = type(exc).__name__
             repository.insert_event(
                 job.id,
                 event_type="recipe_card_repair_failed",
@@ -1834,12 +1954,126 @@ def run_single_pass_structured_extraction(
                     settings=settings,
                     result=result,
                     validation_errors_count=len(errors),
+                    repair_attempted=True,
                     repair_used=True,
                     quality_passed=False,
+                    failure_category=failure_category,
                     error_code="recipe_card_repair_failed",
                     exception_type=type(exc).__name__,
                 ),
             )
+
+    if not quality_passed and fallback_available:
+        fallback_attempted = True
+        repository.insert_event(
+            job.id,
+            event_type="gemini_structured_extraction_fallback_started",
+            message="Gemini structured extraction fallback started.",
+            metadata=structured_event_metadata(
+                platform=platform,
+                model=model,
+                fallback_model=fallback_model,
+                input_mode=input_mode,
+                settings=settings,
+                retry_count=1,
+                repair_attempted=repair_attempted,
+                fallback_attempted=True,
+                fallback_model_used=True,
+                failure_category=failure_category,
+                exception_type=failure_exception_type,
+            ),
+        )
+        model = fallback_model
+        try:
+            canonical, _response = run_structured_extraction_call(
+                client=client,
+                input_part=input_part,
+                model=model,
+                settings=settings,
+            )
+            result, errors = validate_and_normalize_canonical_recipe(
+                canonical,
+                source_metadata,
+                settings,
+            )
+            quality_passed = not errors and recipe_quality_passed(result, settings)
+            fallback_model_used = True
+            if errors:
+                failure_category = structured_failure_category(validation_errors=errors)
+            repository.insert_event(
+                job.id,
+                event_type="gemini_structured_extraction_fallback_completed",
+                message="Gemini structured extraction fallback completed.",
+                metadata=structured_event_metadata(
+                    platform=platform,
+                    model=model,
+                    input_mode=input_mode,
+                    settings=settings,
+                    result=result,
+                    validation_errors_count=len(errors),
+                    repair_attempted=repair_attempted,
+                    fallback_attempted=True,
+                    fallback_model_used=True,
+                    quality_passed=quality_passed,
+                    failure_category=None if quality_passed else failure_category,
+                ),
+            )
+        except Exception as exc:
+            failure_category = structured_failure_category(exc)
+            failure_exception_type = type(exc).__name__
+            fallback_model_used = True
+            repository.insert_event(
+                job.id,
+                event_type="gemini_structured_extraction_fallback_failed",
+                message="Gemini structured extraction fallback failed.",
+                metadata=structured_failure_metadata(
+                    platform=platform,
+                    model=model,
+                    input_mode=input_mode,
+                    settings=settings,
+                    failure_category=failure_category,
+                    repair_attempted=repair_attempted,
+                    fallback_attempted=True,
+                    fallback_model=fallback_model,
+                    fallback_model_used=True,
+                    exception_type=type(exc).__name__,
+                    result=result,
+                    validation_errors_count=len(errors),
+                ),
+            )
+
+    if result is None:
+        repository.insert_event(
+            job.id,
+            event_type="gemini_structured_extraction_failed",
+            message="Gemini structured extraction failed.",
+            metadata=structured_failure_metadata(
+                platform=platform,
+                model=model,
+                input_mode=input_mode,
+                settings=settings,
+                failure_category=failure_category,
+                repair_attempted=repair_attempted,
+                fallback_attempted=fallback_attempted,
+                fallback_model=fallback_model or None,
+                fallback_model_used=fallback_model_used,
+                exception_type=failure_exception_type,
+            ),
+        )
+        raise QueueJobFailure(
+            "gemini_structured_extraction_failed",
+            STRUCTURED_EXTRACTION_USER_MESSAGE,
+            stage="gemini_structured_extraction",
+            exception_type=failure_exception_type,
+            metadata={
+                "failure_category": failure_category,
+                "repair_attempted": repair_attempted,
+                "fallback_attempted": fallback_attempted,
+                "fallback_model": fallback_model,
+                "safe_error_message": STRUCTURED_EXTRACTION_USER_MESSAGE,
+            },
+        )
+
     final_passed = recipe_quality_passed(result, settings) and not errors
     repository.insert_event(
         job.id,
@@ -1852,11 +2086,15 @@ def run_single_pass_structured_extraction(
             settings=settings,
             result=result,
             validation_errors_count=len(errors),
+            repair_attempted=repair_attempted,
             repair_used=repair_used,
+            fallback_attempted=fallback_attempted,
+            fallback_model_used=fallback_model_used,
             quality_passed=final_passed,
         ),
     )
     if settings.recipe_quality_gate_enabled and not final_passed:
+        failure_category = structured_failure_category(validation_errors=errors)
         repository.insert_event(
             job.id,
             event_type="recipe_quality_gate_failed",
@@ -1868,15 +2106,45 @@ def run_single_pass_structured_extraction(
                 settings=settings,
                 result=result,
                 validation_errors_count=len(errors),
+                repair_attempted=repair_attempted,
                 repair_used=repair_used,
+                fallback_attempted=fallback_attempted,
+                fallback_model=fallback_model or None,
+                fallback_model_used=fallback_model_used,
                 quality_passed=False,
+                failure_category=failure_category,
                 error_code="recipe_quality_gate_failed",
             ),
         )
+        repository.insert_event(
+            job.id,
+            event_type="gemini_structured_extraction_failed",
+            message="Gemini structured extraction failed.",
+            metadata=structured_failure_metadata(
+                platform=platform,
+                model=model,
+                input_mode=input_mode,
+                settings=settings,
+                failure_category=failure_category,
+                repair_attempted=repair_attempted,
+                fallback_attempted=fallback_attempted,
+                fallback_model=fallback_model or None,
+                fallback_model_used=fallback_model_used,
+                result=result,
+                validation_errors_count=len(errors),
+            ),
+        )
         raise QueueJobFailure(
-            "recipe_quality_gate_failed",
-            "Could not extract enough recipe details from this video.",
-            stage="recipe_quality_gate",
+            "gemini_structured_extraction_failed",
+            STRUCTURED_EXTRACTION_USER_MESSAGE,
+            stage="gemini_structured_extraction",
+            metadata={
+                "failure_category": failure_category,
+                "repair_attempted": repair_attempted,
+                "fallback_attempted": fallback_attempted,
+                "fallback_model": fallback_model,
+                "safe_error_message": STRUCTURED_EXTRACTION_USER_MESSAGE,
+            },
         )
     repository.insert_event(
         job.id,
@@ -1889,7 +2157,10 @@ def run_single_pass_structured_extraction(
             settings=settings,
             result=result,
             validation_errors_count=len(errors),
+            repair_attempted=repair_attempted,
             repair_used=repair_used,
+            fallback_attempted=fallback_attempted,
+            fallback_model_used=fallback_model_used,
             quality_passed=final_passed,
         ),
     )
@@ -3683,6 +3954,7 @@ def record_queue_failure(
     *,
     stage: str,
     exception_type: str | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> None:
     repository.update_job(
         media_job_id,
@@ -3697,12 +3969,15 @@ def record_queue_failure(
         media_job_id,
         "queue_job_failed",
         "Queue job failed.",
-        safe_failure_metadata(
-            stage=stage,
-            error_code=error_code,
-            message=message,
-            exception_type=exception_type,
-        ),
+        {
+            **safe_failure_metadata(
+                stage=stage,
+                error_code=error_code,
+                message=message,
+                exception_type=exception_type,
+            ),
+            **safe_terminal_metadata(metadata or {}),
+        },
     )
 
 
@@ -3785,6 +4060,18 @@ def safe_failure_metadata(
     if exception_type:
         metadata["exception_type"] = exception_type
     return metadata
+
+
+def safe_terminal_metadata(metadata: dict[str, object]) -> dict[str, object]:
+    allowed = {
+        "failure_category",
+        "repair_attempted",
+        "fallback_attempted",
+        "fallback_model",
+        "fallback_model_used",
+        "safe_error_message",
+    }
+    return {key: metadata[key] for key in allowed if key in metadata}
 
 
 def delete_temp_media(temp_file_path: str | None) -> bool:

@@ -689,3 +689,10 @@ PY
 python3 -m compileall app
 # passed
 ```
+
+## M22B.2D Gemini structured extraction resilience
+
+```bash
+python3 -m compileall app
+# passed
+```
