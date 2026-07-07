@@ -36,14 +36,22 @@
 | 32 | M21.7A Worker metadata preview endpoint | Done | Protected `/metadata-preview` returns lightweight title/thumbnail/duration metadata without Gemini or video downloads |
 | 33 | M21.9B Thumbnail selection quality | Done | Prefer platform/oEmbed and best yt-dlp thumbnails, avoid avatar/tiny candidates, and log safe thumbnail source labels |
 | 34 | M21.9B.1B Platform-first no-downgrade thumbnails | Done | Use platform_first_v2 source labels and prevent sampled-frame fallbacks from replacing existing platform thumbnails |
-| 35 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 36 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 37 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 35 | M21.9B.2 YouTube Shorts thumbnail variants | Done | Prefer deterministic YouTube thumbnails over numbered frame variants |
+| 36 | M22B.2D Gemini structured extraction resilience | Done | Repair/fallback structured extraction failures with safe terminal metadata |
+| 37 | M22D.0B Worker env source-of-truth setup | Done | Dev/prod env templates, validation, Render export, and docs |
+| 38 | M22D.0C Worker env names audit and cleanup | Done | Audit env usage, prune stale template keys, and document source/runtime names |
+| 39 | M22D.0D Worker env/config rationalization | Done | Move non-secret runtime settings to JSON config while preserving env overrides |
+| 40 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 41 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 42 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
 Merge `feature/queue-ytdlp-poc` to `main`, deploy the production worker from `main`, then validate TikTok, Instagram, and YouTube before suspending the old webhook Render service.
 
+- M22D.0B added `env/development.env` and `env/production.env` as untracked source files with committed examples, masked validation, temporary Render export, and `docs/m22d-worker-environments.md`. Existing root `.env` files should be migrated manually if they point to dev Supabase.
+- M22D.0C added `docs/m22d-worker-env-variable-map.md`, pruned clean env examples to canonical source keys plus current queue/Gemini path overrides, and removed stale TikWM/Cobalt/RapidAPI-style resolver keys from templates.
+- M22D.0D added committed runtime config JSON files plus `app/runtime_config.py`; old Render env variables still override config until the phased env group cleanup is verified.
 - `/metadata-preview` is available for app-side saved-link previews before AI generation. It requires the worker secret via `X-Worker-Secret` or `Authorization: Bearer`, uses oEmbed/yt-dlp/OpenGraph metadata only, does not call Gemini, and does not download videos.
 - `WORKER_EXECUTION_MODE=queue` is the primary production mode; FastAPI startup and `GET /wake` keep one serialized queue loop active.
 - `/process-job` is retained for legacy/manual/debug kicks only and is not the primary production flow.

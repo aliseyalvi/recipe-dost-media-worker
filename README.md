@@ -18,91 +18,27 @@ FastAPI worker for Recipe Dost media jobs. The production cutover path is the se
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
+cp env/development.example.env env/development.env
 ```
 
-Set real server-only values in `.env`: `WORKER_API_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `GEMINI_API_KEY` when Gemini is needed.
+Set real development-only server values in `env/development.env`: `MEDIA_WORKER_SHARED_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `GEMINI_API_KEY` when Gemini is needed. See [docs/m22d-worker-environments.md](docs/m22d-worker-environments.md) for dev/prod env source-of-truth, validation, and Render export steps.
 
 ## Key Environment
 
 ```env
 APP_ENV=development
-RUNTIME_PLATFORM=render
-WORKER_MODE=social_video
-MEDIA_PIPELINE_MODE=social_stream
-WORKER_EXECUTION_MODE=queue
-ENABLE_QUEUE_WAKE_ENDPOINT=true
-
-AI_ANALYSIS_MODE=gemini_video_poc
-GEMINI_EXTRACTION_MODE=single_pass_structured
-GEMINI_PRIMARY_MODEL=gemini-3.1-flash-lite
-GEMINI_FALLBACK_MODEL=gemini-2.5-flash
-GEMINI_THINKING_LEVEL=high
-LOCAL_BRIEF_PARSER_ENABLED=false
-GEMINI_MAX_RETRIES=1
-GEMINI_MAX_CALLS_PER_JOB=2
-GEMINI_DAILY_DEV_CALL_LIMIT=5
-GEMINI_VIDEO_OBSERVATION_TIMEOUT_SECONDS=120
-GEMINI_TEXT_NORMALIZATION_TIMEOUT_SECONDS=60
-GEMINI_FILES_UPLOAD_TIMEOUT_SECONDS=90
-GEMINI_FILES_PROCESSING_TIMEOUT_SECONDS=120
-GEMINI_SOCIAL_UPLOAD_MODE=files_api
-MAX_JOB_RUNTIME_SECONDS=240
-SOCIAL_ANALYSIS_MODE=text_first
-ENABLE_TIKTOK_TEXT_FALLBACK=true
-ENABLE_SOCIAL_VIDEO_GEMINI=false
-SOCIAL_VIDEO_GEMINI_TIMEOUT_SECONDS=90
-SOCIAL_TEXT_GEMINI_TIMEOUT_SECONDS=45
-ENABLE_GEMINI_REPAIR_CALL=false
-ENABLE_GEMINI_FALLBACKS=false
-
-YOUTUBE_AI_INPUT_MODE=gemini_url
-ENABLE_SOCIAL_VIDEO=true
-ENABLE_YT_DLP=true
-ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true
-MEDIA_EXTRACT_OUTPUT_MODE=temp_file
-MAX_VIDEO_DURATION_SECONDS=90
-MAX_MEMORY_BUFFER_MB=35
-MAX_VIDEO_HEIGHT=720
-STORE_RAW_MEDIA=false
-
-ENABLE_TIKWM_RESOLVER=true
-TIKWM_API_URL=https://www.tikwm.com/api/
-TIKWM_TIMEOUT_SECONDS=15
-TIKWM_HD=true
-TIKWM_ENABLED_PLATFORMS=tiktok
-TIKWM_MAX_VIDEO_SIZE_MB=30
-TIKWM_PROBE_BYTES=262144
-
-ENABLE_COBALT_RESOLVER=false
-ENABLE_RENDER_INSTAGRAM_RESOLVER=false
-ENABLE_RENDER_FACEBOOK_RESOLVER=false
-COBALT_API_URL=
-COBALT_TIMEOUT_SECONDS=45
-COBALT_ALWAYS_PROXY=true
-COBALT_VIDEO_QUALITY=720
-COBALT_ENABLED_PLATFORMS=instagram,facebook
+LOG_LEVEL=debug
+SUPABASE_URL=https://your-dev-project-ref.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=replace-with-development-service-role-key
+MEDIA_WORKER_SHARED_SECRET=replace-with-development-worker-shared-secret
+GEMINI_API_KEY=replace-with-development-gemini-api-key
 ```
 
-Production queue cutover should run from `main` after `feature/queue-ytdlp-poc` is merged:
+Non-secret runtime settings live in `config/worker.defaults.json` with environment overrides in `config/worker.development.json` and `config/worker.production.json`. Existing Render env vars still override config during the migration window.
 
-```env
-RUNTIME_PLATFORM=render
-WORKER_MODE=social_video
-MEDIA_PIPELINE_MODE=social_stream
-WORKER_EXECUTION_MODE=queue
-AI_ANALYSIS_MODE=gemini_video_poc
-GEMINI_EXTRACTION_MODE=single_pass_structured
-GEMINI_PRIMARY_MODEL=gemini-3.1-flash-lite
-YOUTUBE_AI_INPUT_MODE=gemini_url
-ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true
-MEDIA_EXTRACT_OUTPUT_MODE=temp_file
-ENABLE_SOCIAL_VIDEO=true
-ENABLE_RENDER_INSTAGRAM_RESOLVER=true
-ENABLE_RENDER_FACEBOOK_RESOLVER=false
-```
+Render export maps `MEDIA_WORKER_SHARED_SECRET` to runtime `WORKER_API_SECRET`. See [docs/m22d-worker-env-variable-map.md](docs/m22d-worker-env-variable-map.md) before removing old Render env keys.
 
-For production, Gemini 3.1 single-pass structured extraction is the default. The old two-step brief-to-JSON path remains available only by setting `GEMINI_EXTRACTION_MODE=two_step_brief_then_json`. The local deep parser is disabled by default with `LOCAL_BRIEF_PARSER_ENABLED=false`.
+For production, Gemini 3.1 single-pass structured extraction is the default in code. The old two-step brief-to-JSON path remains available only by setting `GEMINI_EXTRACTION_MODE=two_step_brief_then_json`. The local deep parser is disabled by default with `LOCAL_BRIEF_PARSER_ENABLED=false`.
 
 Suspend the old webhook Render service only after the main-branch service validates TikTok, Instagram, and YouTube end to end.
 
@@ -211,6 +147,8 @@ This endpoint does not call Gemini, does not create media jobs, does not downloa
 
 See [docs/worker-context.md](docs/worker-context.md) for the compact current context.
 See [docs/render-deploy.md](docs/render-deploy.md) for Render setup notes.
+See [docs/m22d-worker-environments.md](docs/m22d-worker-environments.md) for worker environment source-of-truth setup.
+See [docs/m22d-worker-env-variable-map.md](docs/m22d-worker-env-variable-map.md) for env/config ownership.
 
 ## Validation
 

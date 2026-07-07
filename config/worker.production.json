@@ -1,0 +1,4 @@
+{
+  "LOG_LEVEL": "info",
+  "REAL_AI_FALLBACK_TO_MOCK": false
+}

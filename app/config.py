@@ -3,8 +3,10 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Annotated, Literal, Optional
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from app.runtime_config import worker_config_value
 
 WorkerMode = Literal[
     "skeleton",
@@ -36,65 +38,121 @@ class Settings(BaseSettings):
     runtime_platform: str = "cloud_run_compatible"
     worker_mode: WorkerMode = "skeleton"
     media_pipeline_mode: MediaPipelineMode = "youtube_direct"
-    worker_api_secret: SecretStr
+    worker_api_secret: SecretStr = Field(
+        validation_alias=AliasChoices("WORKER_API_SECRET", "MEDIA_WORKER_SHARED_SECRET")
+    )
     supabase_url: str
     supabase_service_role_key: SecretStr
     gemini_api_key: Optional[SecretStr] = None
     gemini_model: str = "gemini-3.5-flash"
-    gemini_extraction_mode: GeminiExtractionMode = "single_pass_structured"
-    gemini_primary_model: str = "gemini-3.1-flash-lite"
+    gemini_extraction_mode: GeminiExtractionMode = worker_config_value(
+        "gemini_extraction_mode", "single_pass_structured"
+    )
+    gemini_primary_model: str = worker_config_value(
+        "gemini_primary_model", "gemini-3.1-flash-lite"
+    )
     gemini_repair_model: Optional[str] = None
-    gemini_fallback_model: str = "gemini-2.5-flash"
-    gemini_thinking_level: str = "high"
-    gemini_structured_output_enabled: bool = True
-    local_brief_parser_enabled: bool = False
-    gemini_video_model: Optional[str] = None
-    gemini_text_model: Optional[str] = None
+    gemini_fallback_model: str = worker_config_value(
+        "gemini_fallback_model", "gemini-2.5-flash"
+    )
+    gemini_thinking_level: str = worker_config_value("gemini_thinking_level", "high")
+    gemini_structured_output_enabled: bool = worker_config_value(
+        "gemini_structured_output_enabled", True
+    )
+    local_brief_parser_enabled: bool = worker_config_value(
+        "local_brief_parser_enabled", False
+    )
+    gemini_video_model: Optional[str] = worker_config_value("gemini_video_model", None)
+    gemini_text_model: Optional[str] = worker_config_value("gemini_text_model", None)
     gemini_video_fallback_models: Annotated[list[str], NoDecode] = Field(
         default_factory=list
     )
     gemini_max_retries: int = 1
     gemini_retry_base_seconds: float = 2.0
-    gemini_max_calls_per_job: int = 2
+    gemini_max_calls_per_job: int = worker_config_value("gemini_max_calls_per_job", 2)
     gemini_daily_dev_call_limit: int = 5
     gemini_video_observation_timeout_seconds: int = 120
     gemini_text_normalization_timeout_seconds: int = 60
     gemini_files_upload_timeout_seconds: int = 90
     gemini_files_processing_timeout_seconds: int = 120
     gemini_social_upload_mode: GeminiSocialUploadMode = "files_api"
-    gemini_video_input_mode: GeminiVideoInputMode = "file_api"
-    gemini_video_analysis_mode: GeminiVideoAnalysisMode = "two_step_brief_then_json"
-    gemini_file_upload_timeout_seconds: int = 120
-    gemini_file_poll_interval_seconds: int = 5
-    gemini_file_max_wait_seconds: int = 120
-    gemini_save_mode: str = "structured_json_with_brief_fallback"
-    gemini_json_retry_enabled: bool = True
-    gemini_json_fallback_enabled: bool = True
+    gemini_video_input_mode: GeminiVideoInputMode = worker_config_value(
+        "gemini_video_input_mode", "file_api"
+    )
+    gemini_video_analysis_mode: GeminiVideoAnalysisMode = worker_config_value(
+        "gemini_video_analysis_mode", "two_step_brief_then_json"
+    )
+    gemini_file_upload_timeout_seconds: int = worker_config_value(
+        "gemini_file_upload_timeout_seconds", 120
+    )
+    gemini_file_poll_interval_seconds: int = worker_config_value(
+        "gemini_file_poll_interval_seconds", 5
+    )
+    gemini_file_max_wait_seconds: int = worker_config_value(
+        "gemini_file_max_wait_seconds", 120
+    )
+    gemini_save_mode: str = worker_config_value(
+        "gemini_save_mode", "structured_json_with_brief_fallback"
+    )
+    gemini_json_retry_enabled: bool = worker_config_value(
+        "gemini_json_retry_enabled", True
+    )
+    gemini_json_fallback_enabled: bool = worker_config_value(
+        "gemini_json_fallback_enabled", True
+    )
     gemini_video_brief_max_output_tokens: int = 768
     gemini_recipe_json_max_output_tokens: int = 1536
     gemini_recipe_brief_max_chars: int = 4000
-    gemini_max_output_tokens: int = 12000
-    gemini_video_brief_retry_enabled: bool = True
-    gemini_video_brief_max_retries: int = 1
-    gemini_recipe_repair_max_retries: int = 1
-    recipe_quality_gate_enabled: bool = True
-    recipe_repair_enabled: bool = True
-    recipe_min_ingredients: int = 2
-    recipe_min_steps: int = 3
-    recipe_min_brief_length: int = 500
-    recipe_bilingual_output_enabled: bool = True
-    recipe_urdu_fallback_enabled: bool = True
-    recipe_card_normalization_enabled: bool = True
-    allow_private_metadata_failure: bool = True
-    enable_queue_wake_endpoint: bool = True
-    youtube_ai_input_mode: YouTubeAIInputMode = "gemini_url"
-    youtube_metadata_mode: YouTubeMetadataMode = "oembed"
+    gemini_max_output_tokens: int = worker_config_value("gemini_max_output_tokens", 12000)
+    gemini_video_brief_retry_enabled: bool = worker_config_value(
+        "gemini_video_brief_retry_enabled", True
+    )
+    gemini_video_brief_max_retries: int = worker_config_value(
+        "gemini_video_brief_max_retries", 1
+    )
+    gemini_recipe_repair_max_retries: int = worker_config_value(
+        "gemini_recipe_repair_max_retries", 1
+    )
+    recipe_quality_gate_enabled: bool = worker_config_value(
+        "recipe_quality_gate_enabled", True
+    )
+    recipe_repair_enabled: bool = worker_config_value("recipe_repair_enabled", True)
+    recipe_min_ingredients: int = worker_config_value("recipe_min_ingredients", 2)
+    recipe_min_steps: int = worker_config_value("recipe_min_steps", 3)
+    recipe_min_brief_length: int = worker_config_value("recipe_min_brief_length", 500)
+    recipe_bilingual_output_enabled: bool = worker_config_value(
+        "recipe_bilingual_output_enabled", True
+    )
+    recipe_urdu_fallback_enabled: bool = worker_config_value(
+        "recipe_urdu_fallback_enabled", True
+    )
+    recipe_card_normalization_enabled: bool = worker_config_value(
+        "recipe_card_normalization_enabled", True
+    )
+    allow_private_metadata_failure: bool = worker_config_value(
+        "allow_private_metadata_failure", True
+    )
+    enable_queue_wake_endpoint: bool = worker_config_value(
+        "enable_queue_wake_endpoint", True
+    )
+    youtube_ai_input_mode: YouTubeAIInputMode = worker_config_value(
+        "youtube_ai_input_mode", "gemini_url"
+    )
+    youtube_metadata_mode: YouTubeMetadataMode = worker_config_value(
+        "youtube_metadata_mode", "oembed"
+    )
     max_job_runtime_seconds: int = 240
-    ai_analysis_mode: AIAnalysisMode = "gemini"
-    real_ai_fallback_to_mock: bool = False
-    mock_recipe_fixture_path: str = "app/fixtures/mock_recipe_card.json"
-    mock_analysis_delay_ms: int = 500
-    mock_video_processing_mode: MockVideoProcessingMode = "skip_video_download"
+    ai_analysis_mode: AIAnalysisMode = worker_config_value("ai_analysis_mode", "gemini")
+    real_ai_fallback_to_mock: bool = worker_config_value(
+        "real_ai_fallback_to_mock", False
+    )
+    mock_recipe_fixture_path: str = worker_config_value(
+        "mock_recipe_fixture_path", "app/fixtures/mock_recipe_card.json"
+    )
+    mock_analysis_delay_ms: int = worker_config_value("mock_analysis_delay_ms", 500)
+    mock_video_processing_mode: MockVideoProcessingMode = worker_config_value(
+        "mock_video_processing_mode", "skip_video_download"
+    )
     social_analysis_mode: SocialAnalysisMode = "text_first"
     enable_tiktok_text_fallback: bool = True
     enable_social_video_gemini: bool = False
@@ -110,16 +168,21 @@ class Settings(BaseSettings):
         default_factory=dict
     )
     gemini_dev_budget_reset_at: Optional[str] = None
-    max_video_duration_seconds: int = 90
-    max_video_size_mb: int = 30
+    max_video_duration_seconds: int = Field(
+        default=worker_config_value("max_video_duration_seconds", 90),
+        validation_alias=AliasChoices("MAX_VIDEO_DURATION_SECONDS", "MAX_VIDEO_SECONDS"),
+    )
+    max_video_size_mb: int = worker_config_value("max_video_size_mb", 30)
     enable_social_video: bool = False
     enable_yt_dlp: bool = False
     cookie_dir: str = "/app/cookies"
     cookie_file_path: str = "/app/cookies.txt"
     enable_cookie_file: bool = True
     enable_generic_cookie_fallback: bool = False
-    enable_ytdlp_cookies: bool = False
-    enable_instagram_cookies: bool = False
+    enable_ytdlp_cookies: bool = worker_config_value("enable_ytdlp_cookies", False)
+    enable_instagram_cookies: bool = worker_config_value(
+        "enable_instagram_cookies", False
+    )
     enable_youtube_cookies: bool = False
     enable_facebook_cookies: bool = False
     enable_tiktok_cookies: bool = False
@@ -131,8 +194,10 @@ class Settings(BaseSettings):
     youtube_cookies_b64: Optional[SecretStr] = None
     facebook_cookies_b64: Optional[SecretStr] = None
     tiktok_cookies_b64: Optional[SecretStr] = None
-    ytdlp_user_agent: Optional[str] = None
-    enable_metadata_only_mock_fallback: bool = True
+    ytdlp_user_agent: Optional[str] = worker_config_value("ytdlp_user_agent", None)
+    enable_metadata_only_mock_fallback: bool = worker_config_value(
+        "enable_metadata_only_mock_fallback", True
+    )
     enable_og_metadata_fallback: bool = True
     allow_mock_completion_without_video: bool = True
     tiktok_cookie_file: str = "/app/cookies/tiktok.txt"
@@ -147,7 +212,7 @@ class Settings(BaseSettings):
     enable_ytdlp_stdout_fallback: bool = False
     max_memory_buffer_mb: int = 35
     max_video_height: int = 720
-    thumbnail_bucket: str = "recipe-thumbnails"
+    thumbnail_bucket: str = worker_config_value("thumbnail_bucket", "recipe-thumbnails")
     use_source_thumbnail_first: bool = True
     store_raw_media: bool = False
     delete_raw_media_after_processing: bool = True
@@ -156,11 +221,19 @@ class Settings(BaseSettings):
     youtube_resolver: YouTubeResolver = "ytdlp"
     instagram_resolver: InstagramResolver = "snapinsta"
     facebook_resolver: FacebookResolver = "snapsave"
-    worker_execution_mode: WorkerExecutionMode = "queue"
-    queue_poll_interval_seconds: int = 5
-    queue_empty_sleep_seconds: int = 5
-    enable_unified_ytdlp_stream_extractor: bool = False
-    media_extract_output_mode: MediaExtractOutputMode = "temp_file"
+    worker_execution_mode: WorkerExecutionMode = worker_config_value(
+        "worker_execution_mode", "queue"
+    )
+    queue_poll_interval_seconds: int = worker_config_value(
+        "queue_poll_interval_seconds", 5
+    )
+    queue_empty_sleep_seconds: int = worker_config_value("queue_empty_sleep_seconds", 5)
+    enable_unified_ytdlp_stream_extractor: bool = worker_config_value(
+        "enable_unified_ytdlp_stream_extractor", False
+    )
+    media_extract_output_mode: MediaExtractOutputMode = worker_config_value(
+        "media_extract_output_mode", "temp_file"
+    )
     snapinsta_api_url: str = "https://snapinsta.app"
     snapsave_api_url: str = "https://snapsave.app"
     tikwm_api_url: str = "https://www.tikwm.com/api/"
@@ -186,7 +259,7 @@ class Settings(BaseSettings):
         default_factory=lambda: ["instagram", "facebook"]
     )
     cobalt_api_key: Optional[SecretStr] = None
-    temp_media_dir: str = "/tmp/recipe-dost-media"
+    temp_media_dir: str = worker_config_value("temp_media_dir", "/tmp/recipe-dost-media")
 
     model_config = SettingsConfigDict(
         env_file=".env",

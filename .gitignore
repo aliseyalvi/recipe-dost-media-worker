@@ -1,6 +1,13 @@
 .env
+.env.local
+.env.development
+.env.production
+.env.*.local
 .env.*
 *.env
+env/development.env
+env/production.env
+!env/*.example.env
 .venv/
 __pycache__/
 *.py[cod]
@@ -16,4 +23,3 @@ app/cookies/
 graphify-out/
 .code-review-graph/
 .mcp.json
-

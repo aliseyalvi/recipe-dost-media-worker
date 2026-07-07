@@ -696,3 +696,138 @@ python3 -m compileall app
 python3 -m compileall app
 # passed
 ```
+
+## M22D.0B Worker env source-of-truth
+
+```bash
+python scripts/validate_env.py development
+# zsh: command not found: python
+
+python3 scripts/validate_env.py development
+# failed gracefully because env/development.env has not been created yet
+
+python3 scripts/validate_env.py production
+# may fail locally until env/production.env is created from env/production.example.env
+
+python3 scripts/export_render_env.py development --output /tmp/recipe-dost-worker-development.env
+# validates first, prints key names only, and writes a temporary secret-bearing upload file
+
+python3 scripts/export_render_env.py production --output /tmp/recipe-dost-worker-production.env
+# validates first, prints key names only, and writes a temporary secret-bearing upload file
+
+python3 -m compileall app scripts
+# passed
+
+python3 -m compileall app
+# passed
+
+PYTHONPATH=scripts python3 - <<'PY'
+from pathlib import Path
+from validate_env import read_env_file, validate_values
+for env in ('development', 'production'):
+    values = read_env_file(Path(f'env/{env}.example.env'))
+    validate_values(env, values)
+print('example env templates validate')
+PY
+# passed
+```
+
+## M22D.0C Worker env names audit and cleanup
+
+```bash
+rg -n --hidden --glob '!/.env' --glob '!/.env.*' --glob '!recipe-dost-media-worker-queue-poc.env' --glob '!cloudrun.env.yaml' --glob '!app/cookies/**' "os\.environ|os\.getenv|dotenv|SUPABASE_|GEMINI_|MEDIA_WORKER_|COBALT|TIKWM|RAPIDAPI|APP_ENV|MAX_VIDEO_SECONDS|ALLOW_RAW_URL_LOGS|LOG_LEVEL" .
+# reviewed without reading real env files
+
+python3 -m compileall app scripts
+# passed
+
+python3 scripts/validate_env.py development
+# failed gracefully because env/development.env has not been created yet
+
+python3 scripts/validate_env.py development --example
+# passed; printed masked values only
+
+python3 scripts/validate_env.py production --example
+# passed; printed masked values only
+
+rg -n --hidden --glob '!/.env' --glob '!/.env.*' --glob '!recipe-dost-media-worker-queue-poc.env' --glob '!cloudrun.env.yaml' --glob '!app/cookies/**' "COBALT|TIKWM|RAPIDAPI" env README.md docs/m22d-worker-environments.md docs/m22d-worker-env-variable-map.md scripts Makefile
+# matched only the variable-map documentation
+```
+
+## M22D.0D Worker env/config rationalization
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+for name in ['.env', 'recipe-dost-media-worker-queue-poc.env']:
+    path = Path(name)
+    if not path.exists():
+        print(f'{name}: missing')
+        continue
+    keys = []
+    for raw in path.read_text(encoding='utf-8').splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('export '):
+            line = line[7:].strip()
+        if '=' in line:
+            keys.append(line.split('=', 1)[0].strip())
+    print(f'{name}: {len(keys)} keys')
+    for key in sorted(set(keys)):
+        print(f'- {key}')
+PY
+# printed key names only, no values
+
+python3 -m compileall app scripts
+# passed
+
+python3 scripts/validate_env.py development --example
+# passed; masked env and config values
+
+python3 scripts/validate_env.py production --example
+# passed; masked env and config values
+
+python3 scripts/validate_env.py development
+# failed gracefully because env/development.env does not exist
+
+APP_ENV=development MEDIA_WORKER_SHARED_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test GEMINI_API_KEY=test .venv/bin/python - <<'PY'
+from app.config import Settings
+s = Settings()
+assert s.worker_api_secret.get_secret_value() == 'test'
+assert s.ai_analysis_mode == 'gemini_video_poc'
+assert s.enable_unified_ytdlp_stream_extractor is True
+assert s.max_video_duration_seconds <= 120
+print('settings config smoke passed')
+PY
+# passed
+
+APP_ENV=development MEDIA_WORKER_SHARED_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test GEMINI_API_KEY=test AI_ANALYSIS_MODE=mock_fixture ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=false .venv/bin/python - <<'PY'
+from app.config import Settings
+s = Settings()
+assert s.ai_analysis_mode == 'mock_fixture'
+assert s.enable_unified_ytdlp_stream_extractor is False
+print('legacy env override smoke passed')
+PY
+# passed
+
+PYTHONPATH=scripts python3 - <<'PY'
+from export_render_env import render_values
+values = render_values({
+    'APP_ENV': 'development',
+    'LOG_LEVEL': 'debug',
+    'SUPABASE_URL': 'https://example.supabase.co',
+    'SUPABASE_SERVICE_ROLE_KEY': 'test',
+    'MEDIA_WORKER_SHARED_SECRET': 'secret',
+    'GEMINI_API_KEY': 'test',
+    'AI_ANALYSIS_MODE': 'mock_fixture',
+    'MAX_VIDEO_DURATION_SECONDS': '120',
+})
+assert 'WORKER_API_SECRET' in values
+assert 'MEDIA_WORKER_SHARED_SECRET' not in values
+assert 'AI_ANALYSIS_MODE' not in values
+assert 'MAX_VIDEO_DURATION_SECONDS' not in values
+print('render export filter smoke passed')
+PY
+# passed
+```

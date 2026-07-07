@@ -42,6 +42,9 @@ Keep this file terse: only durable architecture decisions, not full task history
 - M21.9B.1B added platform_first_v2 thumbnail strategy and no-downgrade protection so full AI jobs do not replace platform thumbnails with sampled frames.
 - M21.9B.2 fixed YouTube Shorts thumbnail selection by treating hq1/hq2/hq3 oEmbed thumbnails as low-priority frame variants and validating deterministic YouTube thumbnail candidates first.
 - M22B.2D added one repair/fallback path for Gemini structured extraction failures and safer failure categories. Terminal structured failures use `gemini_structured_extraction_failed` with safe metadata only; private metadata save failure remains non-fatal when configured.
+- M22D.0B sets worker env source of truth to `env/development.env` and `env/production.env`, with committed example templates only, gitignored real files, masked validation, and temporary Render export files. The Render export maps `MEDIA_WORKER_SHARED_SECRET` to the worker's `WORKER_API_SECRET` key and keeps `MAX_VIDEO_SECONDS` aligned with `MAX_VIDEO_DURATION_SECONDS`.
+- M22D.0C narrows clean worker env templates to canonical source keys plus current queue/Gemini path overrides. TikWM, Cobalt, RapidAPI, cookie, and other experimental resolver keys are removed from clean templates unless intentionally re-enabled and documented in the env variable map.
+- M22D.0D moves non-secret worker runtime configuration into committed `config/worker*.json` files loaded by `app/runtime_config.py`. Environment variables still override config for Render backward compatibility; env templates/export now contain only secrets and environment identity.
 
 ## Next Decision To Prove
 
