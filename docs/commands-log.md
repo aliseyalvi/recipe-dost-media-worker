@@ -940,3 +940,25 @@ python3 scripts/check_process_job_queue_mode.py
 .venv/bin/python scripts/check_process_job_queue_mode.py
 # passed; local venv emitted urllib3 LibreSSL warning
 ```
+
+## M22D.5E Production config packaging/loading fix
+
+```bash
+python3 -m compileall app scripts
+# passed
+
+python3 scripts/check_runtime_config.py production
+# passed; loaded worker.defaults.json and worker.production.json
+
+python3 scripts/check_runtime_config.py development
+# passed; loaded worker.defaults.json and worker.development.json
+
+python3 scripts/validate_env.py production --example
+# passed; masked env and config values
+
+python3 scripts/validate_env.py development --example
+# passed; masked env and config values
+
+python3 scripts/validate_env.py production
+# passed; env/production.env exists locally and output stayed masked
+```

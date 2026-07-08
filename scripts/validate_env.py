@@ -219,6 +219,11 @@ def validate_config(environment: str) -> dict[str, Any]:
             errors.append("config MAX_VIDEO_DURATION_SECONDS must be greater than 0")
         if max_duration > 120:
             errors.append("config MAX_VIDEO_DURATION_SECONDS must be <= 120")
+        if environment == "production" and max_duration == 90:
+            errors.append(
+                "production config MAX_VIDEO_DURATION_SECONDS must not be the "
+                "fallback default 90"
+            )
 
     if _config_bool(config.get("ALLOW_RAW_URL_LOGS", False)):
         errors.append("config ALLOW_RAW_URL_LOGS must be false")
@@ -249,6 +254,16 @@ def validate_config(environment: str) -> dict[str, Any]:
         for key in required_true:
             if not _config_bool(config.get(key, False)):
                 errors.append(f"production config {key} must be true")
+        fallback_false_keys = [
+            "ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR",
+            "ENABLE_INSTAGRAM_COOKIES",
+            "ENABLE_YTDLP_COOKIES",
+        ]
+        for key in fallback_false_keys:
+            if _config_bool(config.get(key, False)) is False:
+                errors.append(
+                    f"production effective config still has {key}=false"
+                )
         if _config_bool(config.get("LOCAL_BRIEF_PARSER_ENABLED", False)):
             errors.append("production config LOCAL_BRIEF_PARSER_ENABLED must be false")
         if _config_bool(config.get("REAL_AI_FALLBACK_TO_MOCK", False)):

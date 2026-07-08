@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir --upgrade pip \
     && python -m yt_dlp --version
 
 COPY app ./app
+COPY config ./config
 
 EXPOSE 10000
 

@@ -157,3 +157,25 @@ Next production smoke expected event order for Instagram/TikTok:
 5. Gemini file path emits the existing structured extraction events.
 
 Unexpected for normal queue jobs: `tikwm_resolver_started`, `instagram_resolver_disabled`, or `background_worker_error`.
+
+## M22D.5E Addendum - Production Config Loading Fix
+
+Status date: 2026-07-08.
+
+Observed production `/health` after M22D.5D proved the queue wake code was deployed, because `safe_config.process_job_mode=queue_wake_compatibility`. However, non-secret runtime settings still matched code fallbacks rather than `config/worker.production.json`: unified extractor disabled, Instagram/ytdlp cookies disabled, `AI_ANALYSIS_MODE=gemini`, and max duration `90`.
+
+Root cause: the production Docker image did not package `config/`. Render env was clean and contained only env-only keys, so old Render env overrides were not the cause.
+
+Fix: package `config/` in Docker, resolve config from the project root or `WORKER_CONFIG_DIR`, report safe config-source metadata on `/health`, and fail production startup if `worker.production.json` is missing. This protects the intended queue path from silently running with fallback defaults.
+
+Expected after redeploy:
+
+| Field | Expected |
+|---|---|
+| `safe_config.config_source.loaded_files` | `["worker.defaults.json", "worker.production.json"]` |
+| `safe_config.config_source.production_config_loaded` | `true` |
+| `safe_config.ai_analysis_mode` | `gemini_video_poc` |
+| `safe_config.enable_unified_ytdlp_stream_extractor` | `true` |
+| `safe_config.enable_instagram_cookies` | `true` |
+| `safe_config.enable_ytdlp_cookies` | `true` |
+| `safe_config.max_video_duration_seconds` | `120` |

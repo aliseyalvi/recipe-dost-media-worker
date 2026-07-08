@@ -22,6 +22,7 @@ from app.metadata_preview import (
     fetch_metadata_preview,
 )
 from app.queue_worker import run_queue_loop
+from app.runtime_config import worker_config_report
 from app.schemas import (
     ErrorDetail,
     ErrorResponse,
@@ -320,6 +321,7 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
         "gemini_video_model": settings.effective_gemini_video_model,
         "gemini_text_model": settings.effective_gemini_text_model,
         "raw_url_logging_enabled": settings.allow_raw_url_logs,
+        "config_source": worker_config_report(settings.app_env),
         "mock_fallback": {
             "ai_analysis_mode": settings.ai_analysis_mode,
             "real_ai_fallback_to_mock": settings.real_ai_fallback_to_mock,

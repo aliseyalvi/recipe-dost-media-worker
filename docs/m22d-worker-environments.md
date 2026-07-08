@@ -162,3 +162,26 @@ Fix: in `WORKER_EXECUTION_MODE=queue`, `/process-job` now validates the worker s
 TikWM status: legacy/manual/debug only for production AI jobs. The M22D.5B TikWM timing fix is kept so the legacy path fails safely if someone deliberately runs non-queue/manual processing, but `config/worker.production.json` no longer carries explicit TikWM production overrides.
 
 Next smoke test order after redeploy: verify `/health.safe_config` shows `worker_execution_mode=queue`, `process_job_mode=queue_wake_compatibility`, `raw_url_logging_enabled=false`, duration `<=120`, and unified extraction enabled. Then run YouTube, Instagram, and TikTok production jobs. For normal TikTok/Instagram queue jobs, expected events include `worker_trigger_success`, `process_job_queue_wake_requested`, `queue_job_claimed`, and `unified_extractor_started`; unexpected events are `tikwm_resolver_started` and `instagram_resolver_disabled`.
+
+## M22D.5E Production Config Packaging And Loading
+
+Status date: 2026-07-08.
+
+Root cause: production `/health` showed the M22D.5D code was deployed, but runtime config values still matched code fallbacks: `AI_ANALYSIS_MODE=gemini`, `ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=false`, `ENABLE_INSTAGRAM_COOKIES=false`, `ENABLE_YTDLP_COOKIES=false`, and `MAX_VIDEO_DURATION_SECONDS=90`. The Render env group was clean and only contained env-only secrets/environment keys, so the env group was not overriding JSON. The Docker image copied `app/` but not `config/`, so `/service/config/worker.production.json` was missing at runtime.
+
+Fix: the Dockerfile now copies `config/` into the runtime image. `app/runtime_config.py` resolves config from the project root or `WORKER_CONFIG_DIR`, loads `worker.defaults.json` then `worker.<APP_ENV>.json`, and fails production startup if `worker.production.json` is missing or empty. `/health.safe_config.config_source` reports loaded/missing filenames and booleans only; it does not expose secrets.
+
+Expected production `/health.safe_config.config_source` after redeploy:
+
+```json
+{
+  "app_env": "production",
+  "config_dir_exists": true,
+  "loaded_files": ["worker.defaults.json", "worker.production.json"],
+  "missing_files": [],
+  "defaults_config_loaded": true,
+  "production_config_loaded": true
+}
+```
+
+Expected production config values after redeploy: `ai_analysis_mode=gemini_video_poc`, `enable_unified_ytdlp_stream_extractor=true`, `enable_instagram_cookies=true`, `enable_ytdlp_cookies=true`, `media_extract_output_mode=temp_file`, `max_video_duration_seconds=120`, and `raw_url_logging_enabled=false`.
