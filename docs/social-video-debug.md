@@ -25,6 +25,7 @@
 - W-M16Q-POC-C1 adds cookie-aware queue extraction and metadata-only fallback. Unified yt-dlp first runs without cookies, retries with platform cookies when configured, emits `unified_extractor_video_verified` only when temp file/buffer bytes exist, and can complete mock jobs from OpenGraph metadata with `resolution_mode=metadata_only` when video bytes are unavailable.
 - W-M16G-POC adds real Gemini video analysis behind `AI_ANALYSIS_MODE=gemini_video_poc`. It requires `video_bytes_verified=true` and an existing temp file, uploads that temp file to Gemini, validates strict recipe JSON, saves the recipe card, marks `ai_provider=gemini`, and still deletes temp media in cleanup.
 - M20.5 production cutover cleanup confirms `feature/queue-ytdlp-poc` is ready to merge to `main`. Production should run from `main` in `WORKER_EXECUTION_MODE=queue`; `/wake` keeps the queue loop active, `/ping` and `/health` remain simple probes, and `/process-job` is legacy/manual/debug only.
+- M22D.5A production extractor config parity fixes the post-env-cleanup Instagram failure. Production config explicitly enables queue mode, unified yt-dlp temp-file extraction, Instagram resolver gating, and Instagram yt-dlp cookies. Cookie values remain env-only through `INSTAGRAM_COOKIES_B64`; when cookie mode is enabled but cookies are missing, the queue extractor fails safely with `instagram_cookies_missing`.
 
 ## TikTok / TikWM Finding
 
@@ -97,7 +98,7 @@ Success should report booleans and selected metadata only:
 }
 ```
 
-Failure codes include: `invalid_tiktok_url`, `tikwm_disabled`, `tikwm_api_http_error`, `tikwm_api_failed`, `tikwm_invalid_response`, `tikwm_stream_url_missing`, `instagram_resolver_disabled`, `facebook_resolver_disabled`, `cobalt_resolver_failed`, `cobalt_picker_not_supported`, `cobalt_local_processing_not_supported`, `social_resolver_unavailable`, `unsupported_social_platform`, `social_caption_missing`, `insufficient_recipe_details`, `social_video_gemini_disabled`, `video_duration_exceeded`, `social_stream_forbidden`, `social_stream_expired`, `media_size_exceeded`, `media_memory_limit_exceeded`, `media_unsupported_type`, `media_download_failed`, `gemini_text_timeout`, `gemini_video_timeout`, `gemini_video_bytes_failed`.
+Failure codes include: `invalid_tiktok_url`, `tikwm_disabled`, `tikwm_api_http_error`, `tikwm_api_failed`, `tikwm_invalid_response`, `tikwm_stream_url_missing`, `instagram_resolver_disabled`, `instagram_cookies_missing`, `facebook_resolver_disabled`, `cobalt_resolver_failed`, `cobalt_picker_not_supported`, `cobalt_local_processing_not_supported`, `social_resolver_unavailable`, `unsupported_social_platform`, `social_caption_missing`, `insufficient_recipe_details`, `social_video_gemini_disabled`, `video_duration_exceeded`, `social_stream_forbidden`, `social_stream_expired`, `media_size_exceeded`, `media_memory_limit_exceeded`, `media_unsupported_type`, `media_download_failed`, `gemini_text_timeout`, `gemini_video_timeout`, `gemini_video_bytes_failed`.
 
 ## Local Request
 
@@ -147,7 +148,7 @@ Full test plan:
 - Instagram/Facebook mock fixture: with default flags, expect `instagram_resolver_disabled` or `facebook_resolver_disabled`; when enabled, expect completion only if SnapInsta/SnapSave returns parseable metadata/direct media.
 - TikTok with missing/thin title fails with `social_caption_missing` before stream download.
 - Long TikTok metadata fails with `video_duration_exceeded` and `video_too_long` before Gemini.
-- Instagram: with default Render POC config, expect `instagram_resolver_disabled`.
+- Instagram production queue path: with `WORKER_EXECUTION_MODE=queue`, `ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true`, and `MEDIA_EXTRACT_OUTPUT_MODE=temp_file`, expect unified yt-dlp extraction before Gemini. If Instagram cookie mode is enabled but the private cookie env value is absent, expect `instagram_cookies_missing`. The legacy/manual resolver path may still fail with `instagram_resolver_disabled` when intentionally disabled.
 - Facebook: with default Render POC config, expect `facebook_resolver_disabled`.
 - YouTube: unchanged native path.
 - Progress should move through analyzing progress 60 for TikTok text analysis, 85 for recipe-card saving, and `completed` 100. Video mode uses analyzing progress 50 for Gemini video start, 60 for video observation, 75 for recipe normalization, and must fail with `gemini_video_timeout` instead of staying at 50.

@@ -249,7 +249,9 @@ class Settings(BaseSettings):
     )
     tikwm_probe_bytes: int = 262144
     enable_cobalt_resolver: bool = False
-    enable_render_instagram_resolver: bool = False
+    enable_render_instagram_resolver: bool = worker_config_value(
+        "enable_render_instagram_resolver", False
+    )
     enable_render_facebook_resolver: bool = False
     cobalt_api_url: Optional[str] = None
     cobalt_timeout_seconds: int = 45

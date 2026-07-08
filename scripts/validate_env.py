@@ -34,18 +34,22 @@ CONFIG_ONLY_KEYS = [
     "ENABLE_INSTAGRAM_COOKIES",
     "ENABLE_METADATA_ONLY_MOCK_FALLBACK",
     "ENABLE_QUEUE_WAKE_ENDPOINT",
+    "ENABLE_RENDER_INSTAGRAM_RESOLVER",
     "ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR",
     "ENABLE_YTDLP_COOKIES",
+    "GEMINI_EXTRACTION_MODE",
     "GEMINI_FILE_MAX_WAIT_SECONDS",
     "GEMINI_FILE_POLL_INTERVAL_SECONDS",
     "GEMINI_FILE_UPLOAD_TIMEOUT_SECONDS",
     "GEMINI_JSON_FALLBACK_ENABLED",
     "GEMINI_JSON_RETRY_ENABLED",
+    "GEMINI_PRIMARY_MODEL",
     "GEMINI_SAVE_MODE",
     "GEMINI_TEXT_MODEL",
     "GEMINI_VIDEO_ANALYSIS_MODE",
     "GEMINI_VIDEO_INPUT_MODE",
     "GEMINI_VIDEO_MODEL",
+    "LOCAL_BRIEF_PARSER_ENABLED",
     "MAX_VIDEO_DURATION_SECONDS",
     "MAX_VIDEO_SIZE_MB",
     "MEDIA_EXTRACT_OUTPUT_MODE",
@@ -218,8 +222,33 @@ def validate_config(environment: str) -> dict[str, Any]:
         errors.append("config ALLOW_RAW_URL_LOGS must be false")
 
     if environment == "production":
-        if str(config.get("AI_ANALYSIS_MODE", "")).strip().lower() == "mock_fixture":
-            errors.append("production config must not default to mock AI mode")
+        required_strings = {
+            "AI_ANALYSIS_MODE": "gemini_video_poc",
+            "GEMINI_EXTRACTION_MODE": "single_pass_structured",
+            "GEMINI_PRIMARY_MODEL": "gemini-3.1-flash-lite",
+            "MEDIA_EXTRACT_OUTPUT_MODE": "temp_file",
+            "WORKER_EXECUTION_MODE": "queue",
+            "YOUTUBE_AI_INPUT_MODE": "gemini_url",
+            "YOUTUBE_METADATA_MODE": "oembed",
+        }
+        for key, expected in required_strings.items():
+            actual = str(config.get(key, "")).strip().lower()
+            if actual != expected:
+                errors.append(f"production config {key} must be {expected}")
+        required_true = [
+            "ENABLE_INSTAGRAM_COOKIES",
+            "ENABLE_RENDER_INSTAGRAM_RESOLVER",
+            "ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR",
+            "ENABLE_YTDLP_COOKIES",
+            "GEMINI_STRUCTURED_OUTPUT_ENABLED",
+            "RECIPE_QUALITY_GATE_ENABLED",
+            "RECIPE_REPAIR_ENABLED",
+        ]
+        for key in required_true:
+            if not _config_bool(config.get(key, False)):
+                errors.append(f"production config {key} must be true")
+        if _config_bool(config.get("LOCAL_BRIEF_PARSER_ENABLED", False)):
+            errors.append("production config LOCAL_BRIEF_PARSER_ENABLED must be false")
         if _config_bool(config.get("REAL_AI_FALLBACK_TO_MOCK", False)):
             errors.append("production config must not enable real AI fallback to mock")
 

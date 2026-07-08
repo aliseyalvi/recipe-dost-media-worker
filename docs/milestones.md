@@ -41,17 +41,21 @@
 | 37 | M22D.0B Worker env source-of-truth setup | Done | Dev/prod env templates, validation, Render export, and docs |
 | 38 | M22D.0C Worker env names audit and cleanup | Done | Audit env usage, prune stale template keys, and document source/runtime names |
 | 39 | M22D.0D Worker env/config rationalization | Done | Move non-secret runtime settings to JSON config while preserving env overrides |
-| 40 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 41 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 42 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 40 | M22D.3 Production worker setup result log | Done | Production Supabase and Render worker/env group setup logged with remaining blockers |
+| 41 | M22D.5A Production worker extractor config parity fix | Done | Production JSON explicitly enables the queue/Gemini/unified yt-dlp Instagram extraction path after env cleanup |
+| 42 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 43 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 44 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Merge `feature/queue-ytdlp-poc` to `main`, deploy the production worker from `main`, then validate TikTok, Instagram, and YouTube before suspending the old webhook Render service.
+Sync production Supabase secrets, deploy production Edge Functions, and run production function smoke tests before resuming RevenueCat/Google Play setup.
 
 - M22D.0B added `env/development.env` and `env/production.env` as untracked source files with committed examples, masked validation, temporary Render export, and `docs/m22d-worker-environments.md`. Existing root `.env` files should be migrated manually if they point to dev Supabase.
 - M22D.0C added `docs/m22d-worker-env-variable-map.md`, pruned clean env examples to canonical source keys plus current queue/Gemini path overrides, and removed stale TikWM/Cobalt/RapidAPI-style resolver keys from templates.
 - M22D.0D added committed runtime config JSON files plus `app/runtime_config.py`; old Render env variables still override config until the phased env group cleanup is verified.
+- M22D.3 logged production Supabase ref `cjlvkagkcfswsycsblfw`, Render production env group `recipe-dost-worker-prod`, and Render production service `recipe-dost-media-worker-prod`. Production Supabase migrations and SQL smoke tests passed. Render deploy/health/log smoke is pending, and remaining blockers are production Supabase secret sync, production Edge Function deploy, production function smoke tests, and RevenueCat/Google Play setup.
+- M22D.5A fixes production worker extractor config parity. Root cause: production JSON did not explicitly carry the non-secret Instagram/unified yt-dlp extractor flags after env cleanup. Fix: keep `WORKER_EXECUTION_MODE=queue`, `AI_ANALYSIS_MODE=gemini_video_poc`, `ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true`, `MEDIA_EXTRACT_OUTPUT_MODE=temp_file`, Instagram resolver/cookie booleans, and Gemini single-pass model/mode settings in `config/worker.production.json`; keep cookie values only in env. Next step: redeploy the production worker and rerun the production smoke test.
 - `/metadata-preview` is available for app-side saved-link previews before AI generation. It requires the worker secret via `X-Worker-Secret` or `Authorization: Bearer`, uses oEmbed/yt-dlp/OpenGraph metadata only, does not call Gemini, and does not download videos.
 - `WORKER_EXECUTION_MODE=queue` is the primary production mode; FastAPI startup and `GET /wake` keep one serialized queue loop active.
 - `/process-job` is retained for legacy/manual/debug kicks only and is not the primary production flow.

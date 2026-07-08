@@ -831,3 +831,42 @@ print('render export filter smoke passed')
 PY
 # passed
 ```
+
+## M22D.3 Production worker setup result log
+
+```bash
+python3 -m compileall app scripts
+# passed
+```
+
+## M22D.5A Production worker extractor config parity fix
+
+```bash
+python3 -m compileall app scripts
+# passed
+
+python3 scripts/validate_env.py production --example
+# passed; masked env and config values
+
+python3 scripts/validate_env.py development --example
+# passed; masked env and config values
+
+python3 scripts/validate_env.py production
+# passed; env/production.env exists locally and output stayed masked
+
+APP_ENV=production WORKER_API_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test GEMINI_API_KEY=test .venv/bin/python - <<'PY'
+from app.config import Settings
+s = Settings(_env_file=None)
+assert s.worker_execution_mode == 'queue'
+assert s.ai_analysis_mode == 'gemini_video_poc'
+assert s.enable_unified_ytdlp_stream_extractor is True
+assert s.enable_render_instagram_resolver is True
+assert s.enable_ytdlp_cookies is True
+assert s.enable_instagram_cookies is True
+assert s.media_extract_output_mode == 'temp_file'
+assert s.max_video_duration_seconds <= 120
+assert s.real_ai_fallback_to_mock is False
+print('production settings smoke passed')
+PY
+# passed
+```

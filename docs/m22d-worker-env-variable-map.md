@@ -86,7 +86,7 @@ These may remain in the current Render env group during Phase A. They should be 
 
 | Variable name | Source | Used by file | Required? | Secret? | Current worker path? | Status | Notes |
 |---|---|---|---:|---:|---:|---|---|
-| `ENABLE_RENDER_INSTAGRAM_RESOLVER` | code/default/env override | `app/config.py`, `app/job_runner.py`, `app/main.py`, `app/social/simple_resolvers.py` | no | no | legacy/manual paths | deprecated env | Leave only if intentionally testing legacy resolver paths. |
+| `ENABLE_RENDER_INSTAGRAM_RESOLVER` | config/default/env override | `app/config.py`, `app/job_runner.py`, `app/main.py`, `app/social/simple_resolvers.py` | no | no | production Instagram gate | moved | Production JSON keeps this true for parity; do not put it back in clean env templates. |
 | `ENABLE_RENDER_FACEBOOK_RESOLVER` | code/default/env override | `app/config.py`, `app/job_runner.py`, `app/main.py`, `app/social/simple_resolvers.py` | no | no | legacy/manual paths | deprecated env | Leave only if intentionally testing legacy resolver paths. |
 | `ENABLE_SOCIAL_VIDEO_GEMINI` | code/default/env override | `app/config.py`, `app/job_runner.py`, `app/main.py` | no | no | legacy/manual paths | deprecated env | Current queue path uses `AI_ANALYSIS_MODE=gemini_video_poc`. |
 | `SOCIAL_ANALYSIS_MODE` | code/default/env override | `app/config.py`, `app/job_runner.py`, `app/main.py` | no | no | legacy/manual paths | deprecated env | Default is `text_first`. |

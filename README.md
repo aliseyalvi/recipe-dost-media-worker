@@ -165,3 +165,105 @@ python3 -m compileall app
 ## Deploy Note
 
 Cloud Run can be unauthenticated at the infrastructure layer if needed, but worker endpoints that mutate or debug protected data must require `X-Worker-Secret`.
+
+## What is the process for future deployments?
+A. If you add a new worker config value
+
+Example: queue interval, model name, thumbnail bucket, feature flag.
+
+Do not add it to Render env unless it is secret.
+
+Process:
+
+Step	Action
+1	Add value to config/worker.defaults.json or env-specific JSON
+2	Update docs/env map if needed
+3	Run worker validation
+4	Commit and push
+5	Render redeploys worker
+6	No env group update needed
+
+Commands:
+```bash
+cd /Users/sadaqatali/Documents/AiAppBuilder/recipe-dost-media-worker
+
+python3 -m compileall app scripts
+python3 scripts/validate_env.py development
+git add .
+git commit -m "chore: update worker runtime config"
+git push
+```
+# If you add a new worker secret/API key
+
+Example: new API key, cookies, private token.
+
+Process:
+
+Step	Action
+1	Add key to env/development.env locally
+2	Add placeholder to env/development.example.env
+3	Update scripts/validate_env.py if required
+4	Export Render env file
+5	Upload to Render env group
+6	Restart/redeploy Render worker
+7	Commit only examples/scripts/docs, not real env
+
+Commands:
+```bash
+cd /Users/sadaqatali/Documents/AiAppBuilder/recipe-dost-media-worker
+
+python3 scripts/validate_env.py development
+python3 scripts/export_render_env.py development --output /tmp/recipe-dost-worker-development.env
+```
+
+Upload /tmp/recipe-dost-worker-development.env to Render env group, then:
+```bash
+rm /tmp/recipe-dost-worker-development.env
+```
+
+# If you add a new app public env value
+
+Example: RevenueCat key, Supabase URL, future PostHog key, Sentry DSN.
+
+Process:
+
+Step	Action
+1	Add to env/development.env
+2	Add placeholder to example env
+3	Update validation and EAS sync allowlist
+4	Run dry-run
+5	Apply EAS env sync
+6	Rebuild app if required
+
+Commands:
+```bash
+cd /Users/sadaqatali/Documents/AiAppBuilder/recipe-dost/recipe-dost
+
+node scripts/env/validate-env.mjs development
+npm run env:eas:dev:dry
+node scripts/env/sync-eas-env.mjs development --apply
+eas build --platform android --profile development
+```
+
+# If you add a new Supabase Edge Function secret
+
+Example: REVENUECAT_API_KEY, GEMINI_API_KEY, MEDIA_WORKER_URL.
+
+Process:
+
+Step	Action
+1	Add to env/development.env
+2	Add placeholder to example env
+3	Update Supabase sync allowlist if needed
+4	Dry-run
+5	Apply Supabase secret sync
+6	Test function
+7	Deploy function only if code changed
+
+Commands:
+```bash
+cd /Users/sadaqatali/Documents/AiAppBuilder/recipe-dost/recipe-dost
+
+npm run env:supabase:dev:dry
+node scripts/env/sync-supabase-secrets.mjs development --apply
+```

@@ -1,4 +1,21 @@
 {
+  "AI_ANALYSIS_MODE": "gemini_video_poc",
+  "ALLOW_RAW_URL_LOGS": false,
+  "ENABLE_INSTAGRAM_COOKIES": true,
+  "ENABLE_RENDER_INSTAGRAM_RESOLVER": true,
+  "ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR": true,
+  "ENABLE_YTDLP_COOKIES": true,
+  "GEMINI_EXTRACTION_MODE": "single_pass_structured",
+  "GEMINI_PRIMARY_MODEL": "gemini-3.1-flash-lite",
+  "GEMINI_TEXT_MODEL": null,
+  "GEMINI_VIDEO_INPUT_MODE": "file_api",
+  "GEMINI_VIDEO_MODEL": null,
+  "LOCAL_BRIEF_PARSER_ENABLED": false,
   "LOG_LEVEL": "info",
-  "REAL_AI_FALLBACK_TO_MOCK": false
+  "MAX_VIDEO_DURATION_SECONDS": 120,
+  "MEDIA_EXTRACT_OUTPUT_MODE": "temp_file",
+  "REAL_AI_FALLBACK_TO_MOCK": false,
+  "WORKER_EXECUTION_MODE": "queue",
+  "YOUTUBE_AI_INPUT_MODE": "gemini_url",
+  "YOUTUBE_METADATA_MODE": "oembed"
 }

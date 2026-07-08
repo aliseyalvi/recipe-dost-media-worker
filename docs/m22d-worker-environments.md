@@ -96,6 +96,25 @@ Upload flow:
 
 Do not attach both env groups to one service. Do not paste production service-role keys into the dev group or dev service-role keys into the prod group.
 
+## M22D.3 Production Setup Status
+
+Status date: 2026-07-08.
+
+- Production Supabase ref used by the worker: `cjlvkagkcfswsycsblfw`
+- Render production env group: `recipe-dost-worker-prod`
+- Render production service: `recipe-dost-media-worker-prod`
+- Production Supabase migrations: passed
+- Production SQL smoke tests: passed
+- Local compile validation: passed with `python3 -m compileall app scripts`
+- Render deploy/health/log smoke test: pending, not yet recorded as passed
+
+Remaining blockers before production app release:
+
+- Sync production Supabase secrets.
+- Deploy production Edge Functions.
+- Run production function smoke tests.
+- Complete RevenueCat/Google Play setup.
+
 ## Render Env Group Migration
 
 Phase A: deploy the config-capable worker while the current Render env group still contains old non-secret runtime variables. Env vars intentionally override config, so this should not break the current deployment.
@@ -107,3 +126,15 @@ Phase C: remove deprecated non-secret config variables from the Render env group
 Phase D: keep only env-only values in Render: `APP_ENV`, `LOG_LEVEL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`, `WORKER_API_SECRET`, and any required `*_COOKIES_B64` private auth values.
 
 Do not remove non-secret Render env variables before Phase B succeeds.
+
+## M22D.5A Production Extractor Config Parity
+
+Status date: 2026-07-08.
+
+Root cause: after production env cleanup, the production worker was relying on missing or invisible runtime defaults for the Instagram/unified extractor path. Production jobs could be claimed by the queue worker and then fail with `unified_extractor_failed` when `ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR` was off, or hit the legacy/manual Instagram gate with `instagram_resolver_disabled`.
+
+Fix: non-secret extractor behavior belongs in `config/worker.production.json`, not the Render env group. Production config now explicitly keeps `WORKER_EXECUTION_MODE=queue`, `AI_ANALYSIS_MODE=gemini_video_poc`, `ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true`, `MEDIA_EXTRACT_OUTPUT_MODE=temp_file`, `ENABLE_RENDER_INSTAGRAM_RESOLVER=true`, `ENABLE_YTDLP_COOKIES=true`, and `ENABLE_INSTAGRAM_COOKIES=true`.
+
+Private Instagram cookies remain env-only. If Instagram extraction requires authenticated cookies, set `INSTAGRAM_COOKIES_B64` in the production Render env group; never commit or print the value. When cookie mode is enabled but cookies are missing, the worker should fail safely with `instagram_cookies_missing`.
+
+Remaining next step: redeploy the production worker and rerun the production smoke test for Instagram, TikTok, and YouTube.

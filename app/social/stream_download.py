@@ -68,6 +68,20 @@ def extract_social_video(
         normalized_platform,
         settings,
     )
+    if (
+        normalized_platform == "instagram"
+        and settings.enable_ytdlp_cookies
+        and settings.enable_instagram_cookies
+        and not cookie_file
+    ):
+        return extractor_failure(
+            normalized_platform,
+            "instagram_cookies_missing",
+            "Instagram cookies are not configured for extraction.",
+            resolver="ytdlp_stream_cookies",
+            cookie_mode="platform_cookie_file",
+            output_mode=output_mode,
+        )
     use_cookie_first = normalized_platform == "instagram" and bool(cookie_file)
     opts = ytdlp_options(
         normalized_platform,
