@@ -132,6 +132,7 @@ class Settings(BaseSettings):
     allow_private_metadata_failure: bool = worker_config_value(
         "allow_private_metadata_failure", True
     )
+    allow_raw_url_logs: bool = worker_config_value("allow_raw_url_logs", False)
     enable_queue_wake_endpoint: bool = worker_config_value(
         "enable_queue_wake_endpoint", True
     )
@@ -216,7 +217,7 @@ class Settings(BaseSettings):
     use_source_thumbnail_first: bool = True
     store_raw_media: bool = False
     delete_raw_media_after_processing: bool = True
-    enable_tikwm_resolver: bool = True
+    enable_tikwm_resolver: bool = worker_config_value("enable_tikwm_resolver", True)
     enable_render_youtube_resolver: bool = True
     youtube_resolver: YouTubeResolver = "ytdlp"
     instagram_resolver: InstagramResolver = "snapinsta"
@@ -236,7 +237,9 @@ class Settings(BaseSettings):
     )
     snapinsta_api_url: str = "https://snapinsta.app"
     snapsave_api_url: str = "https://snapsave.app"
-    tikwm_api_url: str = "https://www.tikwm.com/api/"
+    tikwm_api_url: str = worker_config_value(
+        "tikwm_api_url", "https://www.tikwm.com/api/"
+    )
     tikwm_timeout_seconds: int = 15
     tikwm_hd: bool = True
     tikwm_enabled_platforms: Annotated[list[str], NoDecode] = Field(

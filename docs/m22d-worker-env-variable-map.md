@@ -32,6 +32,7 @@ These moved to committed JSON config. Existing Render env values with the same n
 | `ENABLE_INSTAGRAM_COOKIES` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | optional | moved | Default false. |
 | `ENABLE_METADATA_ONLY_MOCK_FALLBACK` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | mock/dev fallback | moved | Default true for mock/dev fallback behavior. |
 | `ENABLE_QUEUE_WAKE_ENDPOINT` | config/default/env override | `app/config.py`, `app/main.py` | no | no | yes | moved | Default true. |
+| `ENABLE_TIKWM_RESOLVER` | config/default/env override | `app/config.py`, `app/social/tikwm_resolver.py` | no | no | TikTok resolver | moved | Default true; production validation requires it. |
 | `ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default true for queue social extraction. |
 | `ENABLE_YTDLP_COOKIES` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | optional | moved | Default false. |
 | `GEMINI_EXTRACTION_MODE` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default `single_pass_structured`. |
@@ -90,7 +91,7 @@ These may remain in the current Render env group during Phase A. They should be 
 | `ENABLE_RENDER_FACEBOOK_RESOLVER` | code/default/env override | `app/config.py`, `app/job_runner.py`, `app/main.py`, `app/social/simple_resolvers.py` | no | no | legacy/manual paths | deprecated env | Leave only if intentionally testing legacy resolver paths. |
 | `ENABLE_SOCIAL_VIDEO_GEMINI` | code/default/env override | `app/config.py`, `app/job_runner.py`, `app/main.py` | no | no | legacy/manual paths | deprecated env | Current queue path uses `AI_ANALYSIS_MODE=gemini_video_poc`. |
 | `SOCIAL_ANALYSIS_MODE` | code/default/env override | `app/config.py`, `app/job_runner.py`, `app/main.py` | no | no | legacy/manual paths | deprecated env | Default is `text_first`. |
-| `TIKWM_API_URL` | code/default/env override | `app/config.py`, `app/social/tikwm_resolver.py` | no | no | legacy/debug | deprecated env | Do not keep in clean env unless TikWM legacy/debug path is needed. |
+| `TIKWM_API_URL` | config/default/env override | `app/config.py`, `app/social/tikwm_resolver.py` | no | no | TikTok resolver | moved | Default `https://www.tikwm.com/api/`; do not put it back in clean env templates. |
 | `WORKER_MODE` | code/default/env override | `app/config.py`, `app/main.py` | no | no | health/legacy | deprecated env | Current queue config does not need it in Render env. |
 | `QUEUE_RECOVER_STALE_JOBS` | env only from old file | no current source match | no | no | no | remove | No active code reference found. |
 | `QUEUE_STALE_JOB_MINUTES` | env only from old file | no current source match | no | no | no | remove | No active code reference found. |

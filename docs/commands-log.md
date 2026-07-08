@@ -870,3 +870,73 @@ print('production settings smoke passed')
 PY
 # passed
 ```
+
+## M22D.5B Social resolver production parity and TikTok NameError fix
+
+```bash
+python3 -m compileall app scripts
+# passed
+
+python3 scripts/validate_env.py development --example
+# passed; masked env and config values
+
+python3 scripts/validate_env.py production --example
+# passed; masked env and config values
+
+python3 scripts/validate_env.py production
+# passed; env/production.env exists locally and output stayed masked
+
+APP_ENV=production WORKER_API_SECRET=test SUPABASE_URL=https://example.supabase.co SUPABASE_SERVICE_ROLE_KEY=test GEMINI_API_KEY=test .venv/bin/python - <<'PY'
+from app.config import Settings
+from app.main import safe_config_summary
+s = Settings(_env_file=None)
+summary = safe_config_summary(s)
+assert summary['app_env'] == 'production'
+assert summary['worker_execution_mode'] == 'queue'
+assert summary['ai_analysis_mode'] == 'gemini_video_poc'
+assert summary['enabled_platforms']['instagram'] is True
+assert summary['enabled_platforms']['tiktok'] is True
+assert summary['resolvers']['tiktok'] == 'tikwm'
+assert summary['enable_unified_ytdlp_stream_extractor'] is True
+assert summary['enable_instagram_cookies'] is True
+assert summary['enable_ytdlp_cookies'] is True
+assert summary['media_extract_output_mode'] == 'temp_file'
+assert summary['max_video_duration_seconds'] <= 120
+assert summary['raw_url_logging_enabled'] is False
+assert summary['mock_fallback']['real_ai_fallback_to_mock'] is False
+assert isinstance(summary['has_instagram_cookies'], bool)
+assert isinstance(summary['has_youtube_cookies'], bool)
+assert isinstance(summary['has_tiktok_cookies'], bool)
+print('safe config summary smoke passed')
+PY
+# passed
+```
+
+## M22D.5C Social pipeline source-of-truth audit
+
+```bash
+python3 -m compileall app scripts
+# passed
+```
+
+## M22D.5D Queue orchestration compatibility fix
+
+```bash
+python3 -m compileall app scripts
+# passed
+
+python3 scripts/validate_env.py development --example
+# passed; masked env and config values
+
+python3 scripts/validate_env.py production --example
+# passed; masked env and config values
+
+python3 scripts/validate_env.py production
+# passed; env/production.env exists locally and output stayed masked
+
+python3 scripts/check_process_job_queue_mode.py
+# failed locally because system python does not have FastAPI installed
+
+.venv/bin/python scripts/check_process_job_queue_mode.py
+# passed; local venv emitted urllib3 LibreSSL warning
+```

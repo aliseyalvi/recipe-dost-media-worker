@@ -138,3 +138,27 @@ Fix: non-secret extractor behavior belongs in `config/worker.production.json`, n
 Private Instagram cookies remain env-only. If Instagram extraction requires authenticated cookies, set `INSTAGRAM_COOKIES_B64` in the production Render env group; never commit or print the value. When cookie mode is enabled but cookies are missing, the worker should fail safely with `instagram_cookies_missing`.
 
 Remaining next step: redeploy the production worker and rerun the production smoke test for Instagram, TikTok, and YouTube.
+
+## M22D.5B Social Resolver Production Parity
+
+Status date: 2026-07-08.
+
+Production smoke status: YouTube AI recipe generation passed end to end through the production app, Supabase, Edge Functions, worker trigger, queue loop, Gemini path, and recipe-card save.
+
+Remaining social findings: Instagram still failed with `instagram_resolver_disabled`, which means the runtime effective config or deployed revision had the Instagram resolver gate disabled. TikTok reached `tikwm_resolver_started`, then failed with a `NameError` that escaped into `background_worker_error`.
+
+Fix: the worker now exposes a safe config summary in `/health.safe_config` and startup logs. It includes only non-secret strings, booleans, numbers, resolver names, and cookie-presence booleans. TikTok's legacy/background TikWM path now initializes resolver timing before use, and unexpected TikWM resolver exceptions produce a safe `tikwm_resolver_exception` failure event instead of leaking raw data.
+
+M22D.5D supersedes the social smoke interpretation below: TikWM should not be the production-primary TikTok route for normal queue jobs.
+
+## M22D.5D Queue Orchestration Compatibility
+
+Status date: 2026-07-08.
+
+Root cause: production was still triggering `/process-job` for normal queued media jobs. In queue mode, that endpoint previously scheduled the legacy direct `JobRunner.run()` path, where TikTok emits `tikwm_resolver_started` and Instagram can fail at the SnapInsta `instagram_resolver_disabled` gate.
+
+Fix: in `WORKER_EXECUTION_MODE=queue`, `/process-job` now validates the worker secret and media job, records `process_job_queue_wake_requested`, starts the queue loop, returns `202`, and does not schedule the legacy background runner. The queue loop remains responsible for claiming `queued` jobs and processing TikTok/Instagram through unified yt-dlp temp-file extraction plus Gemini Files API.
+
+TikWM status: legacy/manual/debug only for production AI jobs. The M22D.5B TikWM timing fix is kept so the legacy path fails safely if someone deliberately runs non-queue/manual processing, but `config/worker.production.json` no longer carries explicit TikWM production overrides.
+
+Next smoke test order after redeploy: verify `/health.safe_config` shows `worker_execution_mode=queue`, `process_job_mode=queue_wake_compatibility`, `raw_url_logging_enabled=false`, duration `<=120`, and unified extraction enabled. Then run YouTube, Instagram, and TikTok production jobs. For normal TikTok/Instagram queue jobs, expected events include `worker_trigger_success`, `process_job_queue_wake_requested`, `queue_job_claimed`, and `unified_extractor_started`; unexpected events are `tikwm_resolver_started` and `instagram_resolver_disabled`.

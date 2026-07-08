@@ -133,6 +133,7 @@ class HealthResponse(BaseModel):
     allow_mock_completion_without_video: bool
     metadata_preview_enabled: bool
     supported_metadata_platforms: list[str]
+    safe_config: dict[str, Any]
 
 
 class MediaJobData(BaseModel):

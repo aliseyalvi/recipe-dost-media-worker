@@ -35,6 +35,7 @@ CONFIG_ONLY_KEYS = [
     "ENABLE_METADATA_ONLY_MOCK_FALLBACK",
     "ENABLE_QUEUE_WAKE_ENDPOINT",
     "ENABLE_RENDER_INSTAGRAM_RESOLVER",
+    "ENABLE_TIKWM_RESOLVER",
     "ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR",
     "ENABLE_YTDLP_COOKIES",
     "GEMINI_EXTRACTION_MODE",
@@ -62,6 +63,7 @@ CONFIG_ONLY_KEYS = [
     "RECIPE_CARD_NORMALIZATION_ENABLED",
     "TEMP_MEDIA_DIR",
     "THUMBNAIL_BUCKET",
+    "TIKWM_API_URL",
     "WORKER_EXECUTION_MODE",
     "YOUTUBE_AI_INPUT_MODE",
     "YOUTUBE_METADATA_MODE",
@@ -251,10 +253,40 @@ def validate_config(environment: str) -> dict[str, Any]:
             errors.append("production config LOCAL_BRIEF_PARSER_ENABLED must be false")
         if _config_bool(config.get("REAL_AI_FALLBACK_TO_MOCK", False)):
             errors.append("production config must not enable real AI fallback to mock")
+        _validate_queue_process_job_compatibility(errors)
 
     if errors:
         raise EnvValidationError("; ".join(errors))
     return config
+
+
+def _validate_queue_process_job_compatibility(errors: list[str]) -> None:
+    main_source = REPO_ROOT / "app" / "main.py"
+    try:
+        source = main_source.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(f"could not read {main_source.relative_to(REPO_ROOT)}: {exc}")
+        return
+
+    required_markers = [
+        'settings.worker_execution_mode == "queue"',
+        "process_job_queue_wake_requested",
+        "ensure_queue_worker_started(settings)",
+        "run_job_background",
+    ]
+    missing = [marker for marker in required_markers if marker not in source]
+    if missing:
+        errors.append(
+            "production queue compatibility missing app/main.py markers: "
+            + ", ".join(missing)
+        )
+    queue_marker = source.find('settings.worker_execution_mode == "queue"')
+    background_marker = source.find("background_tasks.add_task(")
+    if queue_marker == -1 or background_marker == -1 or queue_marker > background_marker:
+        errors.append(
+            "production queue mode /process-job must wake the queue before any "
+            "legacy background task scheduling branch"
+        )
 
 
 def validate_environment(environment: str, *, example: bool = False) -> dict[str, str]:

@@ -53,7 +53,7 @@ class JsonFormatter(logging.Formatter):
             "event": record.getMessage(),
             "logger": record.name,
         }
-        for field in ("media_job_id", "exception_type"):
+        for field in ("media_job_id", "exception_type", "safe_config"):
             value = getattr(record, field, None)
             if value is not None:
                 payload[field] = value
@@ -272,7 +272,65 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         allow_mock_completion_without_video=settings.allow_mock_completion_without_video,
         metadata_preview_enabled=True,
         supported_metadata_platforms=SUPPORTED_METADATA_PLATFORMS,
+        safe_config=safe_config_summary(settings),
     )
+
+
+def safe_config_summary(settings: Settings) -> dict[str, object]:
+    tiktok_enabled = (
+        settings.enable_tikwm_resolver and "tiktok" in settings.tikwm_enabled_platforms
+    )
+    queue_mode = settings.worker_execution_mode == "queue"
+    return {
+        "app_env": settings.app_env,
+        "worker_execution_mode": settings.worker_execution_mode,
+        "queue_mode_active": queue_mode,
+        "process_job_mode": (
+            "queue_wake_compatibility" if queue_mode else "legacy_direct_background"
+        ),
+        "ai_analysis_mode": settings.ai_analysis_mode,
+        "enabled_platforms": {
+            "youtube": settings.enable_render_youtube_resolver,
+            "instagram": settings.enable_render_instagram_resolver,
+            "tiktok": tiktok_enabled,
+            "facebook": settings.enable_render_facebook_resolver,
+        },
+        "resolvers": {
+            "youtube": settings.youtube_resolver,
+            "instagram": settings.instagram_resolver,
+            "tiktok": (
+                "queue_unified_ytdlp"
+                if queue_mode
+                else ("tikwm" if tiktok_enabled else "disabled")
+            ),
+            "tiktok_legacy_manual": "tikwm" if tiktok_enabled else "disabled",
+            "facebook": settings.facebook_resolver,
+        },
+        "enable_unified_ytdlp_stream_extractor": (
+            settings.enable_unified_ytdlp_stream_extractor
+        ),
+        "enable_instagram_cookies": settings.enable_instagram_cookies,
+        "enable_ytdlp_cookies": settings.enable_ytdlp_cookies,
+        "has_instagram_cookies": cookies_configured(settings, "instagram"),
+        "has_youtube_cookies": cookies_configured(settings, "youtube"),
+        "has_tiktok_cookies": cookies_configured(settings, "tiktok"),
+        "media_extract_output_mode": settings.media_extract_output_mode,
+        "max_video_duration_seconds": settings.max_video_duration_seconds,
+        "max_video_size_mb": settings.max_video_size_mb,
+        "gemini_video_model": settings.effective_gemini_video_model,
+        "gemini_text_model": settings.effective_gemini_text_model,
+        "raw_url_logging_enabled": settings.allow_raw_url_logs,
+        "mock_fallback": {
+            "ai_analysis_mode": settings.ai_analysis_mode,
+            "real_ai_fallback_to_mock": settings.real_ai_fallback_to_mock,
+            "enable_metadata_only_mock_fallback": (
+                settings.enable_metadata_only_mock_fallback
+            ),
+            "allow_mock_completion_without_video": (
+                settings.allow_mock_completion_without_video
+            ),
+        },
+    }
 
 
 def cookies_configured(settings: Settings, platform: str) -> bool:
@@ -327,7 +385,12 @@ async def wake(settings: Settings = Depends(get_settings)) -> dict[str, object]:
 
 @app.on_event("startup")
 async def start_queue_worker() -> None:
-    ensure_queue_worker_started(get_settings())
+    settings = get_settings()
+    logger.info(
+        "worker_safe_config_summary",
+        extra={"safe_config": safe_config_summary(settings)},
+    )
+    ensure_queue_worker_started(settings)
 
 
 @app.on_event("shutdown")
@@ -551,7 +614,7 @@ def debug_tikwm_endpoint(
         500: {"model": ErrorResponse},
     },
 )
-def process_job(
+async def process_job(
     request: ProcessJobRequest,
     background_tasks: BackgroundTasks,
     _authorized: None = Depends(require_worker_secret),
@@ -608,6 +671,55 @@ def process_job(
                 event_type="dev_attempt_budget_reset_requested",
                 message="Development attempt budget reset requested.",
                 metadata={},
+            )
+        if settings.worker_execution_mode == "queue":
+            if job.status in PROCESSING_STATUSES:
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content=ProcessJobResponse(
+                        accepted=False,
+                        job_id=request.media_job_id,
+                        status=job.status,
+                        reason="already_processing",
+                    ).model_dump(mode="json", exclude_none=True),
+                )
+            if job.status == "failed":
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content=ProcessJobResponse(
+                        accepted=False,
+                        job_id=request.media_job_id,
+                        status=job.status,
+                        reason="already_failed",
+                    ).model_dump(mode="json", exclude_none=True),
+                )
+            if job.status != INITIAL_JOB_STATUS:
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content=ProcessJobResponse(
+                        accepted=False,
+                        job_id=request.media_job_id,
+                        status=job.status,
+                        reason="not_queued",
+                    ).model_dump(mode="json", exclude_none=True),
+                )
+            repository.insert_event(
+                request.media_job_id,
+                event_type="process_job_queue_wake_requested",
+                message="Process-job request accepted as a queue wake.",
+                metadata={
+                    "worker_execution_mode": settings.worker_execution_mode,
+                    "queue_loop_enabled": queue_loop_enabled(settings),
+                },
+            )
+            ensure_queue_worker_started(settings)
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED,
+                content=ProcessJobResponse(
+                    accepted=True,
+                    job_id=request.media_job_id,
+                    message="Job accepted; queue worker wake requested.",
+                ).model_dump(mode="json", exclude_none=True),
             )
         background_tasks.add_task(
             run_job_background,

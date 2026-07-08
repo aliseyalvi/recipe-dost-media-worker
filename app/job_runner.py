@@ -896,6 +896,7 @@ class JobRunner:
             message="TikWM resolver started.",
             metadata={"platform": "tiktok", "resolver": "tikwm"},
         )
+        resolver_started_at = perf_counter()
         try:
             info = resolve_social_video(
                 job.source_url,
@@ -921,6 +922,28 @@ class JobRunner:
                 exc.code,
                 exc.message,
                 {"platform": "tiktok", **exc.metadata},
+            ) from exc
+        except Exception as exc:
+            self._repository.insert_event(
+                job.id,
+                event_type="tikwm_resolver_failed",
+                message="TikWM resolver failed.",
+                metadata={
+                    "platform": "tiktok",
+                    "resolver": "tikwm",
+                    "error_code": "tikwm_resolver_exception",
+                    "exception_type": type(exc).__name__,
+                    "elapsed_ms": int((perf_counter() - resolver_started_at) * 1000),
+                },
+            )
+            raise PipelineFailure(
+                "tikwm_resolver_exception",
+                "TikTok metadata could not be resolved.",
+                {
+                    "platform": "tiktok",
+                    "resolver": "tikwm",
+                    "exception_type": type(exc).__name__,
+                },
             ) from exc
 
         self._repository.insert_event(

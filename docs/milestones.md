@@ -43,9 +43,12 @@
 | 39 | M22D.0D Worker env/config rationalization | Done | Move non-secret runtime settings to JSON config while preserving env overrides |
 | 40 | M22D.3 Production worker setup result log | Done | Production Supabase and Render worker/env group setup logged with remaining blockers |
 | 41 | M22D.5A Production worker extractor config parity fix | Done | Production JSON explicitly enables the queue/Gemini/unified yt-dlp Instagram extraction path after env cleanup |
-| 42 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 43 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 44 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 42 | M22D.5B Social resolver production parity and TikTok NameError fix | Done | Add safe config summary, keep production social resolver validation strict, and fix TikWM resolver timing NameError |
+| 43 | M22D.5C Social pipeline source-of-truth audit | Done | Audit-only resolver/source-of-truth map explaining TikWM, Instagram disabled gate, metadata preview split, and minimal prod parity plan |
+| 44 | M22D.5D Queue orchestration compatibility fix | Done | `/process-job` wakes queue mode instead of scheduling the legacy direct runner for normal queued jobs |
+| 45 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 46 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 47 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
@@ -56,6 +59,9 @@ Sync production Supabase secrets, deploy production Edge Functions, and run prod
 - M22D.0D added committed runtime config JSON files plus `app/runtime_config.py`; old Render env variables still override config until the phased env group cleanup is verified.
 - M22D.3 logged production Supabase ref `cjlvkagkcfswsycsblfw`, Render production env group `recipe-dost-worker-prod`, and Render production service `recipe-dost-media-worker-prod`. Production Supabase migrations and SQL smoke tests passed. Render deploy/health/log smoke is pending, and remaining blockers are production Supabase secret sync, production Edge Function deploy, production function smoke tests, and RevenueCat/Google Play setup.
 - M22D.5A fixes production worker extractor config parity. Root cause: production JSON did not explicitly carry the non-secret Instagram/unified yt-dlp extractor flags after env cleanup. Fix: keep `WORKER_EXECUTION_MODE=queue`, `AI_ANALYSIS_MODE=gemini_video_poc`, `ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true`, `MEDIA_EXTRACT_OUTPUT_MODE=temp_file`, Instagram resolver/cookie booleans, and Gemini single-pass model/mode settings in `config/worker.production.json`; keep cookie values only in env. Next step: redeploy the production worker and rerun the production smoke test.
+- M22D.5B records that YouTube production smoke passed, Instagram failed with `instagram_resolver_disabled`, and TikTok failed after `tikwm_resolver_started` with a `NameError`. Fix: `/health.safe_config` and startup logs expose only non-secret runtime config summary fields, and the TikWM path initializes resolver timing before use. M22D.5D replaces any production-primary TikWM implication with queue/unified-extractor compatibility checks.
+- M22D.5C adds `docs/m22d-social-pipeline-audit.md` as an audit-only source-of-truth review. Finding: observed TikWM/disabled-Instagram failures are from the legacy `/process-job` background path, while the intended production social AI workflow is the queue path with unified yt-dlp extraction for TikTok/Instagram. Metadata preview uses a separate metadata-only resolver flow.
+- M22D.5D fixes worker-side orchestration compatibility. In queue mode, `/process-job` now validates and wakes the queue loop without scheduling legacy `JobRunner.run()`, so normal queued TikTok/Instagram jobs should be claimed by the queue worker and use unified yt-dlp extraction. TikWM remains legacy/manual/debug only; the M22D.5B TikWM NameError fix is kept for that legacy path.
 - `/metadata-preview` is available for app-side saved-link previews before AI generation. It requires the worker secret via `X-Worker-Secret` or `Authorization: Bearer`, uses oEmbed/yt-dlp/OpenGraph metadata only, does not call Gemini, and does not download videos.
 - `WORKER_EXECUTION_MODE=queue` is the primary production mode; FastAPI startup and `GET /wake` keep one serialized queue loop active.
 - `/process-job` is retained for legacy/manual/debug kicks only and is not the primary production flow.
