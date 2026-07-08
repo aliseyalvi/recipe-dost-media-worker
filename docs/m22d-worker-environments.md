@@ -185,3 +185,34 @@ Expected production `/health.safe_config.config_source` after redeploy:
 ```
 
 Expected production config values after redeploy: `ai_analysis_mode=gemini_video_poc`, `enable_unified_ytdlp_stream_extractor=true`, `enable_instagram_cookies=true`, `enable_ytdlp_cookies=true`, `media_extract_output_mode=temp_file`, `max_video_duration_seconds=120`, and `raw_url_logging_enabled=false`.
+
+## M22D.5F Production Worker Smoke Completion
+
+Status date: 2026-07-08.
+
+Production worker smoke testing is complete.
+
+- Production Render service: `recipe-dost-media-worker-prod`
+- Production Render env group: `recipe-dost-worker-prod`
+- Final architecture: the same main branch is deployed to separate Render services with separate environment groups for dev/prod.
+- Config rule: Render env contains secrets and environment identity only; `config/worker.production.json` contains non-secret production runtime config.
+
+Post-deploy `/health` confirmed:
+
+- `safe_config.config_source.production_config_loaded=true`
+- `safe_config.config_source.loaded_files` includes `worker.defaults.json` and `worker.production.json`
+- `worker_execution_mode=queue`
+- `safe_config.process_job_mode=queue_wake_compatibility`
+- `enable_unified_ytdlp_stream_extractor=true`
+- `enable_instagram_cookies=true`
+- `enable_ytdlp_cookies=true`
+- `max_video_duration_seconds=120`
+- `raw_url_logging_enabled=false`
+
+Production end-to-end smoke passed:
+
+- YouTube AI recipe generation works.
+- Instagram AI recipe generation works.
+- TikTok AI recipe generation works.
+
+Next milestone: app repo M22C.3 RevenueCat + Google Play billing setup.

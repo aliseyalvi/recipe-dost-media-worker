@@ -179,3 +179,33 @@ Expected after redeploy:
 | `safe_config.enable_instagram_cookies` | `true` |
 | `safe_config.enable_ytdlp_cookies` | `true` |
 | `safe_config.max_video_duration_seconds` | `120` |
+
+## M22D.5F Addendum - Production Social Pipeline Proven
+
+Status date: 2026-07-08.
+
+Production worker smoke testing is complete. After M22D.5E, `/health` confirmed `worker.production.json` was loaded from the runtime image and the effective production settings matched the queue/unified-extractor path:
+
+- `production_config_loaded=true`
+- loaded files include `worker.defaults.json` and `worker.production.json`
+- `worker_execution_mode=queue`
+- `process_job_mode=queue_wake_compatibility`
+- `enable_unified_ytdlp_stream_extractor=true`
+- `enable_instagram_cookies=true`
+- `enable_ytdlp_cookies=true`
+- `max_video_duration_seconds=120`
+- `raw_url_logging_enabled=false`
+
+Production end-to-end results:
+
+| Platform | Result | Proven path |
+|---|---|---|
+| YouTube | Passed | Queue mode with YouTube Gemini URL path |
+| Instagram | Passed | Queue mode with unified yt-dlp temp-file extraction and Gemini Files API |
+| TikTok | Passed | Queue mode with unified yt-dlp temp-file extraction and Gemini Files API |
+
+The final root cause was packaging/config loading, not Render env override: the production Render env group contained secrets/environment values only, while the Docker image initially omitted `config/worker.production.json` and fell back to defaults.
+
+Final production worker architecture: one main code branch, separate Render services/env groups for dev and prod. Keep secrets in Render env; keep non-secret production runtime behavior in `config/worker.production.json`.
+
+Next milestone: app repo M22C.3 RevenueCat + Google Play billing setup.

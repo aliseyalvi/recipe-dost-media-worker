@@ -962,3 +962,13 @@ python3 scripts/validate_env.py development --example
 python3 scripts/validate_env.py production
 # passed; env/production.env exists locally and output stayed masked
 ```
+
+## M22D.5F Production worker smoke completion log
+
+```bash
+python3 -m compileall app scripts
+# passed
+
+python3 scripts/check_runtime_config.py production
+# passed; loaded worker.defaults.json and worker.production.json
+```
