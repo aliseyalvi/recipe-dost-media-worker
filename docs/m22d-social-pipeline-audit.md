@@ -209,3 +209,19 @@ The final root cause was packaging/config loading, not Render env override: the 
 Final production worker architecture: one main code branch, separate Render services/env groups for dev and prod. Keep secrets in Render env; keep non-secret production runtime behavior in `config/worker.production.json`.
 
 Next milestone: app repo M22C.3 RevenueCat + Google Play billing setup.
+
+## M22E.0B Addendum - Branch-Safe Release Workflow
+
+Status date: 2026-07-09.
+
+The social pipeline remains unchanged. M22E.0B adds release safety around the proven queue/unified-extractor path:
+
+- Development worker service tracks `develop`.
+- Production worker service tracks `main`.
+- Dev and prod Render env groups remain separate.
+- Render env contains secrets/environment identity only.
+- Non-secret resolver, queue, Gemini, duration, and logging behavior stays in JSON config.
+
+Before production smoke testing, run the production environment doctor from `main`. It checks that production config files load and that `worker_execution_mode=queue`, `enable_unified_ytdlp_stream_extractor=true`, `max_video_duration_seconds<=120`, and `raw_url_logging_enabled=false`. It does not inspect or print resolver payloads, cookies, source URLs, stream URLs, prompts, or raw Gemini responses.
+
+Release order for worker changes is now: `develop` -> dev Render smoke -> merge to `main` -> prod Render deploy -> health and platform smoke.

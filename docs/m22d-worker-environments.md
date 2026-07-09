@@ -96,6 +96,38 @@ Upload flow:
 
 Do not attach both env groups to one service. Do not paste production service-role keys into the dev group or dev service-role keys into the prod group.
 
+## Branch And Release Safety
+
+Current branch mapping:
+
+- `develop` deploys to the development Render worker service.
+- `main` deploys to the production Render worker service.
+- `recipe-dost-media-worker-dev` must track `develop`.
+- `recipe-dost-media-worker-prod` must track `main`.
+- `recipe-dost-worker-dev` and `recipe-dost-worker-prod` remain separate Render env groups.
+
+Render env groups should contain secrets and environment identity only. Non-secret runtime behavior belongs in `config/worker.defaults.json`, `config/worker.development.json`, and `config/worker.production.json`.
+
+Use the safe environment doctor before deploys:
+
+```bash
+make env-doctor-dev
+make env-doctor-prod
+make check-dev
+make check-prod
+```
+
+`make env-doctor-prod` and `make check-prod` require the current branch to be `main`. To intentionally test the production check from another branch, set `ALLOW_NON_MAIN_PROD_DEPLOY=1` for that one command; do not use the override for normal production deploys.
+
+Worker release process:
+
+1. Land and test worker changes on `develop`.
+2. Let the dev Render worker deploy from `develop`.
+3. Smoke dev with `/health`, `/wake`, and at least the relevant platform job path.
+4. Merge `develop` to `main`.
+5. Let the prod Render worker deploy from `main`.
+6. Smoke prod with `/health`, `/wake`, and YouTube/Instagram/TikTok platform checks.
+
 ## M22D.3 Production Setup Status
 
 Status date: 2026-07-08.
@@ -216,3 +248,23 @@ Production end-to-end smoke passed:
 - TikTok AI recipe generation works.
 
 Next milestone: app repo M22C.3 RevenueCat + Google Play billing setup.
+
+## M22E.0B Worker Branch And Environment Safety
+
+Status date: 2026-07-09.
+
+Added `scripts/check_environment.py` as a safe release preflight. It prints only branch, requested environment, expected branch, config filenames, expected `APP_ENV`, the Supabase URL host when an env file exists, and selected non-secret runtime config checks. It must not print service-role keys, worker secrets, Gemini keys, cookies, raw URLs, stream URLs, prompts, payloads, or full env values.
+
+Branch guard:
+
+- Production deploy checks require `main` unless `ALLOW_NON_MAIN_PROD_DEPLOY=1` is set.
+- Development checks prefer `develop` and warn when run elsewhere.
+
+Make targets:
+
+```bash
+make env-doctor-dev
+make env-doctor-prod
+make check-dev
+make check-prod
+```

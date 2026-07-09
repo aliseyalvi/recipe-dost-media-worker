@@ -48,9 +48,10 @@
 | 44 | M22D.5D Queue orchestration compatibility fix | Done | `/process-job` wakes queue mode instead of scheduling the legacy direct runner for normal queued jobs |
 | 45 | M22D.5E Production config packaging/loading fix | Done | Docker image packages `config/`, runtime config loads by absolute project path, and production fails if `worker.production.json` is missing |
 | 46 | M22D.5F Production worker smoke completion log | Done | Production worker health and YouTube/Instagram/TikTok end-to-end smoke passed |
-| 47 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 48 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 49 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 47 | M22E.0B Worker branch and environment safety | Done | Safe env doctor, branch guard, Make checks, and dev/prod Render branch workflow docs |
+| 48 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 49 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 50 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
@@ -67,6 +68,7 @@ Continue in the app repo with M22C.3 RevenueCat + Google Play billing setup.
 - M22D.5E fixes the production config load gap observed in `/health`: Render env was clean, but the Docker image did not copy `config/`, so runtime config fell back to code defaults. Docker now copies `config/`, the loader reports loaded/missing config files, and production fails startup if `worker.production.json` is absent.
 - M22D.5F records the completed production worker smoke. `/health` confirmed `worker.production.json` was loaded, queue mode and `/process-job` queue-wake compatibility were active, unified yt-dlp extraction and Instagram/yt-dlp cookies were enabled, max duration was 120, and raw URL logging was false. Production YouTube, Instagram, and TikTok AI recipe generation passed end to end through the production app/backend/worker/Gemini path.
 - Final production worker architecture: same main branch, separate Render services and env groups for dev/prod. Render env contains secrets/environment identity only; `config/worker.production.json` contains non-secret production runtime config.
+- M22E.0B adds `scripts/check_environment.py`, `make env-doctor-dev`, `make env-doctor-prod`, `make check-dev`, and `make check-prod`. Dev deploy checks prefer `develop`; production deploy checks require `main` unless `ALLOW_NON_MAIN_PROD_DEPLOY=1`. Release flow is `develop` -> dev Render smoke -> merge `main` -> prod Render deploy -> health and platform smoke.
 - `/metadata-preview` is available for app-side saved-link previews before AI generation. It requires the worker secret via `X-Worker-Secret` or `Authorization: Bearer`, uses oEmbed/yt-dlp/OpenGraph metadata only, does not call Gemini, and does not download videos.
 - `WORKER_EXECUTION_MODE=queue` is the primary production mode; FastAPI startup and `GET /wake` keep one serialized queue loop active.
 - `/process-job` is retained for legacy/manual/debug kicks only and is not the primary production flow.

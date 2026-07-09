@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: env-check-dev env-check-prod env-check-examples render-env-dev render-env-prod
+.PHONY: env-check-dev env-check-prod env-check-examples render-env-dev render-env-prod env-doctor-dev env-doctor-prod check-dev check-prod
 
 env-check-dev:
 	$(PYTHON) scripts/validate_env.py development
@@ -17,3 +17,19 @@ render-env-dev:
 
 render-env-prod:
 	$(PYTHON) scripts/export_render_env.py production --output /tmp/recipe-dost-worker-production.env
+
+env-doctor-dev:
+	$(PYTHON) scripts/check_environment.py development
+
+env-doctor-prod:
+	$(PYTHON) scripts/check_environment.py production
+
+check-dev:
+	$(PYTHON) -m compileall app scripts
+	$(PYTHON) scripts/check_runtime_config.py development
+	$(PYTHON) scripts/check_environment.py development
+
+check-prod:
+	$(PYTHON) -m compileall app scripts
+	$(PYTHON) scripts/check_runtime_config.py production
+	$(PYTHON) scripts/check_environment.py production

@@ -38,6 +38,51 @@ Non-secret runtime settings live in `config/worker.defaults.json` with environme
 
 Render export maps `MEDIA_WORKER_SHARED_SECRET` to runtime `WORKER_API_SECRET`. See [docs/m22d-worker-env-variable-map.md](docs/m22d-worker-env-variable-map.md) before removing old Render env keys.
 
+## Daily Branch Workflow
+
+Branch mapping:
+
+- `develop` -> `recipe-dost-media-worker-dev`
+- `main` -> `recipe-dost-media-worker-prod`
+- Dev env group: `recipe-dost-worker-dev`
+- Prod env group: `recipe-dost-worker-prod`
+
+Daily development:
+
+```bash
+cd /Users/sadaqatali/Documents/AiAppBuilder/recipe-dost/recipe-dost-media-worker
+git checkout develop
+git pull origin develop
+make check-dev
+git push origin develop
+```
+
+After Render deploys the dev service from `develop`, smoke `/health`, `/wake`, and the platform path affected by the change.
+
+Production release:
+
+```bash
+cd /Users/sadaqatali/Documents/AiAppBuilder/recipe-dost/recipe-dost-media-worker
+git checkout main
+git pull origin main
+git merge --ff-only develop
+make check-prod
+git push origin main
+```
+
+After Render deploys the prod service from `main`, smoke `/health`, `/wake`, then YouTube, Instagram, and TikTok jobs. `make check-prod` refuses to pass from a non-`main` branch unless `ALLOW_NON_MAIN_PROD_DEPLOY=1` is set for an intentional one-off check.
+
+Useful focused checks:
+
+```bash
+make env-doctor-dev
+make env-doctor-prod
+python3 scripts/check_runtime_config.py development
+python3 scripts/check_runtime_config.py production
+```
+
+The environment doctor prints only safe release context: branch, requested environment, expected branch, config filenames, expected `APP_ENV`, Supabase host, and selected non-secret runtime config checks. It must not print service-role keys, worker secrets, Gemini keys, cookies, raw URLs, stream URLs, prompts, or payloads.
+
 For production, Gemini 3.1 single-pass structured extraction is the default in code. The old two-step brief-to-JSON path remains available only by setting `GEMINI_EXTRACTION_MODE=two_step_brief_then_json`. The local deep parser is disabled by default with `LOCAL_BRIEF_PARSER_ENABLED=false`.
 
 Suspend the old webhook Render service only after the main-branch service validates TikTok, Instagram, and YouTube end to end.
@@ -153,13 +198,16 @@ See [docs/m22d-worker-env-variable-map.md](docs/m22d-worker-env-variable-map.md)
 ## Validation
 
 ```bash
-python -m compileall app
+python3 -m compileall app scripts
+python3 scripts/check_runtime_config.py development
+python3 scripts/check_environment.py development
 ```
 
-If local `python` is unavailable:
+Production preflight from `main`:
 
 ```bash
-python3 -m compileall app
+python3 scripts/check_runtime_config.py production
+python3 scripts/check_environment.py production
 ```
 
 ## Deploy Note
@@ -185,13 +233,13 @@ Step	Action
 
 Commands:
 ```bash
-cd /Users/sadaqatali/Documents/AiAppBuilder/recipe-dost-media-worker
+cd /Users/sadaqatali/Documents/AiAppBuilder/recipe-dost/recipe-dost-media-worker
 
 python3 -m compileall app scripts
-python3 scripts/validate_env.py development
+make check-dev
 git add .
 git commit -m "chore: update worker runtime config"
-git push
+git push origin develop
 ```
 # If you add a new worker secret/API key
 
@@ -210,7 +258,7 @@ Step	Action
 
 Commands:
 ```bash
-cd /Users/sadaqatali/Documents/AiAppBuilder/recipe-dost-media-worker
+cd /Users/sadaqatali/Documents/AiAppBuilder/recipe-dost/recipe-dost-media-worker
 
 python3 scripts/validate_env.py development
 python3 scripts/export_render_env.py development --output /tmp/recipe-dost-worker-development.env

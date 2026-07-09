@@ -972,3 +972,33 @@ python3 -m compileall app scripts
 python3 scripts/check_runtime_config.py production
 # passed; loaded worker.defaults.json and worker.production.json
 ```
+
+## M22E.0B Worker branch and environment safety
+
+```bash
+python3 -m compileall app scripts
+# passed
+
+python3 scripts/check_runtime_config.py development
+# passed; loaded worker.defaults.json and worker.development.json
+
+python3 scripts/check_runtime_config.py production
+# passed; loaded worker.defaults.json and worker.production.json
+
+python3 scripts/check_environment.py development
+# passed on branch develop; output limited to branch, env identity, config filenames,
+# Supabase host only, and non-secret runtime config checks
+
+python3 scripts/check_environment.py production
+# blocked as designed on branch develop:
+# production deployment requires branch main unless ALLOW_NON_MAIN_PROD_DEPLOY=1
+
+ALLOW_NON_MAIN_PROD_DEPLOY=1 python3 scripts/check_environment.py production
+# passed; verifies the explicit one-command override path without printing secrets
+
+make check-dev
+# passed
+
+make check-prod
+# blocked as designed on branch develop after compile and runtime config checks passed
+```
