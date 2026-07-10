@@ -336,6 +336,7 @@ class MediaJobRepository:
                     "servings": result.servings,
                     "difficulty": result.difficulty,
                     "grocery_list_json": grocery_list,
+                    "tags_json": result.tags,
                     "missing_info_json": bilingual_list(
                         result.missing_info_en,
                         result.missing_info_ur,

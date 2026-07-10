@@ -218,6 +218,7 @@ class GeminiRecipeResult(BaseModel):
     ingredients: list[RecipeIngredient]
     steps: list[RecipeStep]
     grocery_list: list[GroceryItem]
+    tags: list[str] = Field(default_factory=list)
     missing_info_en: list[str]
     missing_info_ur: list[str]
     storage_tip_en: str
@@ -233,6 +234,7 @@ class GeminiRecipeResult(BaseModel):
         "ingredients",
         "steps",
         "grocery_list",
+        "tags",
         "missing_info_en",
         "missing_info_ur",
         "source_assumptions_en",

@@ -24,6 +24,7 @@ from app.job_runner import (
     platform_for_job,
     save_mock_recipe_card_for_job,
 )
+from app.recipe_tags import has_required_recipe_tags, normalize_recipe_tags
 from app.schemas import (
     GeminiRecipeResult,
     GroceryItem,
@@ -45,7 +46,7 @@ from app.supabase_client import MediaJobRepository, create_repository
 
 logger = logging.getLogger("recipe_dost.worker")
 
-PROMPT_VERSION = "m20_gemini31_single_pass_v1"
+PROMPT_VERSION = "m22e_recipe_tags_v1"
 TWO_STEP_PROMPT_VERSION = "m20_recipe_video_v1"
 STRUCTURED_EXTRACTION_USER_MESSAGE = (
     "Recipe extraction could not understand this video well enough."
@@ -75,12 +76,21 @@ Use this shape:
   "difficulty": null,
   "cuisine_en": "string",
   "cuisine_ur": "string",
-  "tags": ["string"],
+  "tags": ["chicken", "pakistani", "curry", "spicy", "quick dinner"],
   "missing_info": ["string"],
   "confidence": "low"
 }
 
-If unknown, use null or empty arrays/strings. Do not omit keys.
+Tags are required: return 5-8 short, useful, searchable categories. Include
+relevant main ingredients/protein, cuisine or region, dish type, cooking method,
+and taste or use case when supported by the video. Use lowercase plain text with
+no hashtags. Never use generic values such as food, recipe, or video; never use
+source usernames, handles, URLs, or other raw source identifiers. Each tag must
+be 24 characters or fewer. If a category is not supported by the video, choose a
+different supported category rather than inventing a fact.
+
+If unknown, use null or empty arrays/strings except tags, which must still contain
+5-8 supported categories. Do not omit keys.
 Do not include markdown."""
 
 CANONICAL_REPAIR_PROMPT = """Repair this invalid canonical recipe JSON.
@@ -90,6 +100,7 @@ canonical JSON only, with the same keys requested for extraction."""
 
 CANONICAL_RECIPE_SCHEMA: dict[str, object] = {
     "type": "object",
+    "required": ["tags"],
     "properties": {
         "title_en": {"type": "string"},
         "title_ur": {"type": "string"},
@@ -137,7 +148,12 @@ CANONICAL_RECIPE_SCHEMA: dict[str, object] = {
         "difficulty": {},
         "cuisine_en": {"type": "string"},
         "cuisine_ur": {"type": "string"},
-        "tags": {"type": "array", "items": {"type": "string"}},
+        "tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 5,
+            "maxItems": 8,
+        },
         "missing_info": {"type": "array", "items": {"type": "string"}},
         "confidence": {"type": "string"},
     },
@@ -176,7 +192,9 @@ MISSING_OR_UNCERTAIN_DETAILS"""
 RECIPE_JSON_PROMPT = """Convert this recipe brief into strict JSON only.
 Required keys: title, summary, ingredients, steps, prep_time_minutes, cook_time_minutes,
 servings, difficulty, cuisine, tags. Use null when unknown and arrays for ingredients,
-steps, grocery_list, tags, missing_info, and uncertainties.
+steps, grocery_list, tags, missing_info, and uncertainties. Tags must be 5-8 lowercase,
+useful searchable categories, each at most 24 characters. Do not include food, recipe,
+video, hashtags, source usernames, handles, or URLs.
 
 Ingredients may be strings or objects with name, quantity, notes, name_en, name_ur,
 notes_en, and notes_ur. Steps may be strings or objects with instruction,
@@ -1336,6 +1354,7 @@ def recipe_quality_stats(result: GeminiRecipeResult) -> dict[str, object]:
         "ingredients_count": len(result.ingredients),
         "steps_count": len(result.steps),
         "grocery_count": len(result.grocery_list),
+        "tags_count": len(result.tags),
         "summary_length": len(clean_recipe_text(result.short_summary_en)),
         "urdu_fields_present": recipe_urdu_fields_present(result),
     }
@@ -1546,7 +1565,7 @@ def validate_and_normalize_canonical_recipe(
     if confidence not in {"low", "medium", "high"}:
         confidence = "low"
     tags_raw = canonical_recipe.get("tags") if isinstance(canonical_recipe.get("tags"), list) else []
-    tags = [clean_recipe_text(tag).lower() for tag in tags_raw if clean_recipe_text(tag)]
+    tags = normalize_recipe_tags(tags_raw)
     missing_raw = (
         canonical_recipe.get("missing_info")
         if isinstance(canonical_recipe.get("missing_info"), list)
@@ -1582,6 +1601,7 @@ def validate_and_normalize_canonical_recipe(
         ingredients=ingredients,
         steps=steps,
         grocery_list=grocery,
+        tags=tags,
         missing_info_en=missing,
         missing_info_ur=[],
         storage_tip_en="",
@@ -3288,7 +3308,6 @@ def normalize_recipe_card_payload(
     prompt_version: str,
 ) -> GeminiRecipeResult:
     if isinstance(raw_recipe, GeminiRecipeResult):
-        known_tags = {"ai-video-recipe", platform, "tiktok", "instagram", "youtube", "facebook"}
         raw = {
             "title": raw_recipe.recipe_title_en,
             "summary": raw_recipe.short_summary_en,
@@ -3300,16 +3319,8 @@ def normalize_recipe_card_payload(
             "servings": raw_recipe.servings,
             "difficulty": raw_recipe.difficulty,
             "confidence": raw_recipe.confidence,
-            "tags": [
-                item
-                for item in raw_recipe.missing_info_en
-                if clean_recipe_text(item).lower() in known_tags
-            ],
-            "missing_info": [
-                item
-                for item in raw_recipe.missing_info_en
-                if clean_recipe_text(item).lower() not in known_tags
-            ],
+            "tags": raw_recipe.tags,
+            "missing_info": raw_recipe.missing_info_en,
         }
     else:
         raw = raw_recipe
@@ -3369,12 +3380,8 @@ def normalize_recipe_card_payload(
         ]
 
     tags = raw.get("tags") if isinstance(raw.get("tags"), list) else []
-    tags = [clean_recipe_text(tag).lower() for tag in tags if clean_recipe_text(tag)]
-    tags.extend(clean_recipe_text(tag).lower() for tag in sections.get("tags", []) if clean_recipe_text(tag))
-    if "ai-video-recipe" not in tags:
-        tags.append("ai-video-recipe")
-    if platform and platform not in tags:
-        tags.append(platform)
+    tags.extend(sections.get("tags", []))
+    tags = normalize_recipe_tags(tags)
 
     confidence = clean_recipe_text(raw.get("confidence")).lower() or None
     if confidence not in {"low", "medium", "high"}:
@@ -3402,6 +3409,7 @@ def normalize_recipe_card_payload(
         ingredients=recipe_ingredients,
         steps=recipe_steps,
         grocery_list=grocery_items,
+        tags=tags,
         missing_info_en=missing,
         missing_info_ur=[],
         storage_tip_en="",
@@ -3728,6 +3736,24 @@ def save_gemini_recipe_card(
             client=client,
             settings=settings,
         )
+        if not has_required_recipe_tags(result.tags):
+            repository.insert_event(
+                job.id,
+                event_type="recipe_tags_invalid",
+                message="Recipe card tags did not meet the required contract.",
+                metadata={
+                    "platform": platform,
+                    "resolver": resolver,
+                    "model": model,
+                    "stage": "recipe_card_saving",
+                    "tags_count": len(result.tags),
+                },
+            )
+            raise QueueJobFailure(
+                "recipe_tags_invalid",
+                "Could not categorize this recipe. Please try again.",
+                stage="recipe_card_saving",
+            )
         repository.insert_event(
             job.id,
             event_type="recipe_card_normalized",

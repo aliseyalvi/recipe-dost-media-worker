@@ -1002,3 +1002,30 @@ make check-dev
 make check-prod
 # blocked as designed on branch develop after compile and runtime config checks passed
 ```
+
+## M22E.1R-B AI-generated tags end-to-end
+
+```bash
+python3 -m compileall app scripts
+# passed
+
+.venv/bin/python scripts/check_recipe_tags.py
+# passed; checks lowercase/trim/dedupe/length/generic/unsafe filtering and the
+# in-memory recipe_cards insert payload maps the final list to tags_json
+
+python3 scripts/check_runtime_config.py development
+# passed; loaded worker.defaults.json and worker.development.json
+
+python3 scripts/check_runtime_config.py production
+# passed; loaded worker.defaults.json and worker.production.json
+
+python3 scripts/check_environment.py development
+# passed on develop; output limited to branch, environment identity, Supabase host,
+# and non-secret runtime config values
+
+cd ../recipe-dost && npm run qa:static
+# passed; typecheck, Expo config, and static guards passed
+
+cd ../recipe-dost && node scripts/env/env-doctor.mjs development
+# passed; development env doctor did not print secret values
+```
