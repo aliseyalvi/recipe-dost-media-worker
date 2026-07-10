@@ -49,7 +49,7 @@
 | 45 | M22D.5E Production config packaging/loading fix | Done | Docker image packages `config/`, runtime config loads by absolute project path, and production fails if `worker.production.json` is missing |
 | 46 | M22D.5F Production worker smoke completion log | Done | Production worker health and YouTube/Instagram/TikTok end-to-end smoke passed |
 | 47 | M22E.0B Worker branch and environment safety | Done | Safe env doctor, branch guard, Make checks, and dev/prod Render branch workflow docs |
-| 48 | M22E.1R-B AI-generated tags end-to-end | In Progress | Active queue Gemini tag contract, normalization, and `recipe_cards.tags_json` persistence; development Render smoke pending |
+| 48 | M22E.1R-B AI-generated tags end-to-end | In Progress | Pushed to `develop`; active queue Gemini tag contract, normalization, and `recipe_cards.tags_json` persistence; development Render/database smoke awaits authenticated verification |
 | 49 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
 | 50 | M15 Auth + Account Linking | Later | Email/Google auth |
 | 51 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
@@ -58,7 +58,7 @@
 
 Continue in the app repo with M22C.3 RevenueCat + Google Play billing setup.
 
-- M22E.1R-B is in progress on worker `develop`. The queue structured prompt/schema now requires 5-8 searchable tags and `MediaJobRepository.insert_recipe_card` writes the normalized array to the existing `recipe_cards.tags_json` JSONB field. Local normalization and persistence-mapper smoke tests pass. Next: deploy only the development Render worker and verify one disposable development media job links to a card with 5-8 compliant `tags_json` values; do not deploy production.
+- M22E.1R-B is in progress on worker `develop` and commit `d3b29b3` is pushed. The queue structured prompt/schema now requires 5-8 searchable tags and `MediaJobRepository.insert_recipe_card` writes the normalized array to the existing `recipe_cards.tags_json` JSONB field. Local normalization and persistence-mapper smoke tests pass. The Render dashboard is unauthenticated in this workspace, so deployment observation and a disposable development job/card query remain pending. Next: authenticate to the development Render dashboard, verify the `develop` revision, then create one disposable development AI media job and confirm only its linked card's 5-8 compliant `tags_json` shape/count; do not deploy production.
 
 - M22D.0B added `env/development.env` and `env/production.env` as untracked source files with committed examples, masked validation, temporary Render export, and `docs/m22d-worker-environments.md`. Existing root `.env` files should be migrated manually if they point to dev Supabase.
 - M22D.0C added `docs/m22d-worker-env-variable-map.md`, pruned clean env examples to canonical source keys plus current queue/Gemini path overrides, and removed stale TikWM/Cobalt/RapidAPI-style resolver keys from templates.

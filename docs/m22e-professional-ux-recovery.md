@@ -2,9 +2,10 @@
 
 ## M22E.1R-B: AI-Generated Tags End-to-End
 
-Status: implementation complete locally; development Render deployment and one
-disposable development media-job verification are required before marking the
-milestone done.
+Status: implementation is pushed to `develop` as `d3b29b3`; development Render
+deployment observation and one disposable development media-job verification are
+blocked in this workspace because the Render dashboard is not signed in. The
+milestone must not be marked done until that verification is recorded.
 
 The active user-facing path is `media_jobs -> queue worker -> recipe_cards`.
 The prior queue prompt already named `tags`, but the intermediate result model
