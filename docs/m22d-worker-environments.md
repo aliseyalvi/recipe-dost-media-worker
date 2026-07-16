@@ -29,6 +29,7 @@ Do not fill `env/production.env` until the production Supabase project and produ
 - Keep `MAX_VIDEO_DURATION_SECONDS=120` or lower in config.
 - Do not store raw video, resolver CDN URLs, cookies, Gemini prompts, Gemini raw responses, or secrets in env docs or logs.
 - Keep non-secret runtime config out of clean env files. Legacy Render env values can remain during transition and still override config.
+- Keep `SENTRY_DEV_TEST=false` except during the one controlled development verification; production requires it to remain false. Unsetting `SENTRY_DSN` is the monitoring rollback switch.
 
 ## Validate
 
@@ -155,7 +156,7 @@ Phase B: verify queue worker behavior, `/health`, `/wake`, metadata preview, and
 
 Phase C: remove deprecated non-secret config variables from the Render env group, using [docs/m22d-worker-env-variable-map.md](m22d-worker-env-variable-map.md) as the checklist. Do not remove secrets or cookie/private auth values.
 
-Phase D: keep only env-only values in Render: `APP_ENV`, `LOG_LEVEL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`, `WORKER_API_SECRET`, and any required `*_COOKIES_B64` private auth values.
+Phase D: keep only env-only values in Render: `APP_ENV`, `LOG_LEVEL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`, `WORKER_API_SECRET`, `SENTRY_DSN`, `SENTRY_DEV_TEST=false`, and any required `*_COOKIES_B64` private auth values.
 
 Do not remove non-secret Render env variables before Phase B succeeds.
 

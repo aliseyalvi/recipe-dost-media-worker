@@ -21,6 +21,7 @@ from app.metadata_preview import (
     SUPPORTED_METADATA_PLATFORMS,
     fetch_metadata_preview,
 )
+from app.observability.sentry import flush_sentry, initialize_sentry, report_worker_error
 from app.queue_worker import run_queue_loop
 from app.runtime_config import worker_config_report
 from app.schemas import (
@@ -72,6 +73,7 @@ def configure_logging() -> None:
 
 
 configure_logging()
+initialize_sentry()
 
 app = FastAPI(
     title="Recipe Dost Media Worker",
@@ -370,7 +372,20 @@ def ensure_queue_worker_started(settings: Settings) -> None:
         return
     if queue_task is not None and not queue_task.done():
         return
-    queue_task = asyncio.create_task(run_queue_loop(build_job_runner))
+    try:
+        queue_task = asyncio.create_task(run_queue_loop(build_job_runner))
+    except Exception as exc:
+        report_worker_error(
+            exc,
+            feature="worker_runtime",
+            operation="worker_startup",
+            stage="startup",
+            error_code="worker_startup_failed",
+            source_platform="unknown",
+            recoverable=True,
+            terminal=False,
+        )
+        raise
 
 
 @app.get("/wake")
@@ -387,25 +402,38 @@ async def wake(settings: Settings = Depends(get_settings)) -> dict[str, object]:
 
 @app.on_event("startup")
 async def start_queue_worker() -> None:
-    settings = get_settings()
-    logger.info(
-        "worker_safe_config_summary",
-        extra={"safe_config": safe_config_summary(settings)},
-    )
-    ensure_queue_worker_started(settings)
+    try:
+        settings = get_settings()
+        logger.info(
+            "worker_safe_config_summary",
+            extra={"safe_config": safe_config_summary(settings)},
+        )
+        ensure_queue_worker_started(settings)
+    except Exception as exc:
+        report_worker_error(
+            exc,
+            feature="worker_runtime",
+            operation="worker_startup",
+            stage="startup",
+            error_code="worker_startup_failed",
+            source_platform="unknown",
+            recoverable=False,
+            terminal=True,
+        )
+        raise
 
 
 @app.on_event("shutdown")
 async def stop_queue_worker() -> None:
     global queue_task
-    if queue_task is None:
-        return
-    queue_task.cancel()
-    try:
-        await queue_task
-    except asyncio.CancelledError:
-        pass
-    queue_task = None
+    if queue_task is not None:
+        queue_task.cancel()
+        try:
+            await queue_task
+        except asyncio.CancelledError:
+            pass
+        queue_task = None
+    flush_sentry(timeout=2.0)
 
 
 def build_job_runner(settings: Settings) -> JobRunner:

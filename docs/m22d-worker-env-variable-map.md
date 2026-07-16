@@ -19,6 +19,8 @@ These remain in Render env groups and local `env/*.env` files.
 | `YOUTUBE_COOKIES_B64` | env | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | yes | optional | keep if needed | Cookie/private auth value; never commit. |
 | `FACEBOOK_COOKIES_B64` | env | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | yes | optional | keep if needed | Cookie/private auth value; never commit. |
 | `TIKTOK_COOKIES_B64` | env | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | yes | optional | keep if needed | Cookie/private auth value; never commit. |
+| `SENTRY_DSN` | env | `app/observability/sentry.py` | production monitoring | yes | active queue observability | keep | Unset disables Sentry; never print or commit a real value. |
+| `SENTRY_DEV_TEST` | env | `app/observability/sentry.py`, `scripts/validate_env.py` | no | no | controlled verification only | keep false normally | May be `true` only for the one development verification command; production validation requires false. |
 
 ## Config Variables
 

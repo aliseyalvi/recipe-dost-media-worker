@@ -38,6 +38,18 @@ Non-secret runtime settings live in `config/worker.defaults.json` with environme
 
 Render export maps `MEDIA_WORKER_SHARED_SECRET` to runtime `WORKER_API_SECRET`. See [docs/m22d-worker-env-variable-map.md](docs/m22d-worker-env-variable-map.md) before removing old Render env keys.
 
+## Privacy-Safe Worker Sentry
+
+Sentry covers only the active production queue flow: `app.main:app` startup/`GET /wake` -> `run_queue_loop` -> `process_queue_job` -> active YouTube oEmbed or unified social extraction -> Gemini structured extraction -> recipe/job persistence. The legacy direct `JobRunner` branch behind non-queue `/process-job`, `/metadata-preview`, and debug resolver routes are excluded. Default and auto-enabled Sentry integrations are disabled, so FastAPI and Python logging cannot report those routes implicitly.
+
+Production reporting requires `APP_ENV=production`, a valid `SENTRY_DSN`, and, on Render, `RENDER_GIT_BRANCH=main`. Ordinary development is disabled. One controlled development event is permitted only with `APP_ENV=development`, `SENTRY_DEV_TEST=true`, a valid DSN, and, on Render, `RENDER_GIT_BRANCH=develop`:
+
+```bash
+python -m app.observability.sentry_test
+```
+
+Render supplies `RENDER`, `RENDER_GIT_BRANCH`, and `RENDER_GIT_COMMIT`; the commit becomes safe release metadata. Events contain only allowlisted current-flow tags, exception class/stack locations without source context or locals, and bounded retry/status booleans. Requests, headers, bodies, URLs, users, arbitrary extras, breadcrumbs, tokens, prompts/responses, and recipe content are dropped. Unset `SENTRY_DSN` to roll monitoring back without affecting worker processing.
+
 ## Daily Branch Workflow
 
 Branch mapping:

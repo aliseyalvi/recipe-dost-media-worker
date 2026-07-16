@@ -24,6 +24,7 @@ from app.job_runner import (
     platform_for_job,
     save_mock_recipe_card_for_job,
 )
+from app.observability.sentry import report_worker_error
 from app.recipe_tags import has_required_recipe_tags, normalize_recipe_tags
 from app.schemas import (
     GeminiRecipeResult,
@@ -281,6 +282,16 @@ async def run_queue_loop(_build_job_runner: Callable[[Settings], object]) -> Non
                 "queue_loop_iteration_failed",
                 extra={"exception_type": type(exc).__name__},
             )
+            report_worker_error(
+                exc,
+                feature="worker_loop",
+                operation="poll_queue",
+                stage="queue_iteration",
+                error_code="queue_loop_iteration_failed",
+                source_platform="unknown",
+                recoverable=True,
+                terminal=False,
+            )
             await asyncio.sleep(max(1, settings.queue_empty_sleep_seconds))
 
 
@@ -316,6 +327,7 @@ def process_queue_job(
     temp_file_path: str | None = None
     started_at = perf_counter()
     current_stage = "queue_claim"
+    platform = job.platform or "unknown"
     try:
         previous_status = job.status
         job = repository.update_job(
@@ -528,7 +540,8 @@ def process_queue_job(
             },
         )
     except QueueJobFailure as exc:
-        record_queue_failure(
+        report_queue_job_failure(exc, platform)
+        record_queue_failure_with_reporting(
             repository,
             job.id,
             exc.code,
@@ -536,19 +549,33 @@ def process_queue_job(
             stage=exc.stage,
             exception_type=exc.exception_type,
             metadata=exc.metadata,
+            source_platform=platform,
         )
     except Exception as exc:
         logger.error(
             "queue_job_failed",
             extra={"media_job_id": str(job.id), "exception_type": type(exc).__name__},
         )
-        record_queue_failure(
+        feature, operation = sentry_boundary_for_stage(current_stage)
+        report_worker_error(
+            exc,
+            feature=feature,
+            operation=operation,
+            stage=sentry_stage(current_stage),
+            error_code=error_code_for_stage(current_stage),
+            source_platform=platform,
+            retry_exhausted=True,
+            recoverable=False,
+            terminal=True,
+        )
+        record_queue_failure_with_reporting(
             repository,
             job.id,
             error_code_for_stage(current_stage),
             safe_message_for_stage(current_stage),
             stage=current_stage,
             exception_type=type(exc).__name__,
+            source_platform=platform,
         )
     finally:
         if video_buffer is not None:
@@ -3970,6 +3997,107 @@ def emit_extractor_progress_events(
                 "cookie_mode": result.get("cookie_mode") or "none",
             },
         )
+
+
+def sentry_stage(stage: str) -> str:
+    aliases = {
+        "source_metadata_backfill": "source_metadata_update",
+        "recipe_quality_gate": "gemini_structured_extraction",
+        "gemini_video_brief": "gemini_video_analysis",
+        "gemini_recipe_json": "gemini_structured_extraction",
+        "mock_fixture_analysis": "terminal_failure",
+        "metadata_fallback": "unified_extractor",
+    }
+    normalized = aliases.get(stage, stage)
+    allowed = {
+        "queue_claim",
+        "unified_extractor",
+        "metadata_save",
+        "private_metadata_save",
+        "source_metadata_update",
+        "youtube_gemini_url",
+        "gemini_file_upload",
+        "gemini_file_processing",
+        "gemini_structured_extraction",
+        "gemini_video_analysis",
+        "recipe_card_saving",
+        "job_completion_update",
+        "terminal_failure",
+    }
+    return normalized if normalized in allowed else "terminal_failure"
+
+
+def sentry_boundary_for_stage(stage: str) -> tuple[str, str]:
+    normalized = sentry_stage(stage)
+    if normalized in {"unified_extractor", "youtube_metadata"}:
+        return "metadata", "extract_metadata"
+    if normalized in {
+        "youtube_gemini_url",
+        "gemini_file_upload",
+        "gemini_file_processing",
+        "gemini_structured_extraction",
+        "gemini_video_analysis",
+    }:
+        return "ai_generation", "generate_recipe"
+    if normalized in {"metadata_save", "private_metadata_save", "source_metadata_update"}:
+        return "persistence", "persist_metadata"
+    if normalized in {"recipe_card_saving", "job_completion_update"}:
+        return "persistence", "persist_recipe_card"
+    return "worker_loop", "process_job"
+
+
+def report_queue_job_failure(exc: QueueJobFailure, source_platform: str) -> None:
+    error = exc.__cause__ or exc
+    if exc.exception_type is None and exc.__cause__ is None:
+        return
+    feature, operation = sentry_boundary_for_stage(exc.stage)
+    report_worker_error(
+        error,
+        feature=feature,
+        operation=operation,
+        stage=sentry_stage(exc.stage),
+        error_code=exc.code,
+        source_platform=source_platform,
+        retry_exhausted=True,
+        recoverable=False,
+        terminal=True,
+    )
+
+
+def record_queue_failure_with_reporting(
+    repository: MediaJobRepository,
+    media_job_id: UUID,
+    error_code: str,
+    message: str,
+    *,
+    stage: str,
+    exception_type: str | None = None,
+    metadata: dict[str, object] | None = None,
+    source_platform: str = "unknown",
+) -> None:
+    try:
+        record_queue_failure(
+            repository,
+            media_job_id,
+            error_code,
+            message,
+            stage=stage,
+            exception_type=exception_type,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        report_worker_error(
+            exc,
+            feature="persistence",
+            operation="persist_job_failure",
+            stage="terminal_failure",
+            error_code="terminal_failure_persistence_failed",
+            source_platform=source_platform,
+            retry_exhausted=True,
+            recoverable=False,
+            terminal=True,
+        )
+        raise
 
 
 def record_queue_failure(

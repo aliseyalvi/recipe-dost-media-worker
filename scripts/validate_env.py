@@ -25,6 +25,8 @@ ENV_ONLY_OPTIONAL_KEYS = [
     "YOUTUBE_COOKIES_B64",
     "FACEBOOK_COOKIES_B64",
     "TIKTOK_COOKIES_B64",
+    "SENTRY_DSN",
+    "SENTRY_DEV_TEST",
 ]
 ENV_ONLY_EXPORT_KEYS = sorted(set(ENV_ONLY_REQUIRED_KEYS + ENV_ONLY_OPTIONAL_KEYS))
 CONFIG_ONLY_KEYS = [
@@ -169,7 +171,8 @@ def validate_values(
     if not allow_placeholders:
         placeholder_keys = [
             key
-            for key in ENV_ONLY_REQUIRED_KEYS + ["MEDIA_WORKER_SHARED_SECRET", "WORKER_API_SECRET"]
+            for key in ENV_ONLY_REQUIRED_KEYS
+            + ["MEDIA_WORKER_SHARED_SECRET", "WORKER_API_SECRET", "SENTRY_DSN"]
             if any(marker in values.get(key, "") for marker in PLACEHOLDER_MARKERS)
         ]
         if placeholder_keys:
@@ -188,6 +191,14 @@ def validate_values(
         joined_values = "\n".join(value.lower() for value in values.values())
         if DEV_SUPABASE_REF in joined_values:
             errors.append("production env must not contain the known dev Supabase ref")
+        if values.get("SENTRY_DEV_TEST", "").strip().lower() not in {"", "false"}:
+            errors.append("SENTRY_DEV_TEST must be false in production")
+
+    sentry_dev_test = values.get("SENTRY_DEV_TEST", "").strip().lower()
+    if sentry_dev_test not in {"", "true", "false"}:
+        errors.append("SENTRY_DEV_TEST must be true or false")
+    if sentry_dev_test == "true" and not values.get("SENTRY_DSN", "").strip():
+        errors.append("SENTRY_DEV_TEST=true requires SENTRY_DSN")
 
     worker_api_secret = values.get("WORKER_API_SECRET", "").strip()
     media_secret = values.get("MEDIA_WORKER_SHARED_SECRET", "").strip()

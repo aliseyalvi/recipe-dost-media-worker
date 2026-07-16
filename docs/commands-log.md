@@ -1035,3 +1035,47 @@ git push origin develop
 # Render deployment/database smoke not run: dashboard.render.com required sign-in
 # in this workspace. No development media job was created and no production action occurred.
 ```
+
+## M22E.2C Privacy-safe worker Sentry monitoring
+
+```bash
+.venv/bin/python -m pip install 'sentry-sdk>=2.65,<3.0'
+# installed sentry-sdk 2.65.0 without upgrading unrelated packages
+
+.venv/bin/python -m unittest discover -s tests -v
+# passed: 19 focused policy, sanitizer, reporting, controlled-test, and active-queue-boundary tests
+
+python3 -m compileall app scripts tests
+# passed
+
+.venv/bin/python scripts/check_process_job_queue_mode.py
+# passed
+
+.venv/bin/python scripts/check_recipe_tags.py
+# passed
+
+python3 scripts/check_runtime_config.py development
+python3 scripts/check_runtime_config.py production
+# passed for both environments
+
+python3 scripts/validate_env.py development --example
+python3 scripts/validate_env.py production --example
+# passed; output remained masked
+
+.venv/bin/python -m pip check
+# passed: no broken requirements
+
+# Bounded startup/shutdown smoke used mocked queue startup and fake local settings.
+# It made no Supabase, Gemini, URL, or Render calls and passed.
+
+# Actual sentry-sdk transport smoke patched the HTTP transport in memory, captured
+# one sanitized current-flow event, flushed, and passed without a network event.
+
+make check-dev
+# passed on develop
+
+git diff --check
+# passed
+```
+
+No Render deploy, live Sentry event, live Supabase/Gemini call, real URL processing, or production action was performed.
