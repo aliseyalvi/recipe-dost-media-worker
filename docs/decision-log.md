@@ -1,5 +1,16 @@
 # Decision Log
 
+## 2026-07-16 — M22E.2E observability QA freeze
+
+- Worker Sentry now fails closed unless execution is on Render with the exact
+  deployment branch: production runtime requires production + `main`; the one
+  controlled diagnostic requires development + `develop` + `SENTRY_DEV_TEST=true`.
+- The active queue flow, retry/backoff and job-state semantics, expected product
+  failure exclusions, sanitizer, and legacy-flow exclusion remain unchanged.
+- Focused policy/privacy/reporting/active-boundary tests pass. No deployment,
+  controlled event, provider call, live Supabase call, or legacy instrumentation
+  was performed.
+
 Keep this file terse: only durable architecture decisions, not full task history.
 
 ## Completed Decisions

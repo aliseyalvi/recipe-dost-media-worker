@@ -136,6 +136,20 @@ class SentryPolicyTests(unittest.TestCase):
         values.pop("SENTRY_DSN")
         self.assertFalse(sentry.compute_sentry_config(environment=values).enabled)
 
+    def test_non_render_runtime_fails_closed_even_with_production_and_main(self) -> None:
+        values = render_env("production", "main")
+        values.pop("RENDER")
+        config = sentry.compute_sentry_config(environment=values)
+        self.assertFalse(config.enabled)
+        self.assertEqual(config.reason, "render_service_required")
+
+    def test_non_render_controlled_test_fails_closed(self) -> None:
+        values = render_env("development", "develop", dev_test="true")
+        values.pop("RENDER")
+        config = sentry.compute_sentry_config(controlled_test=True, environment=values)
+        self.assertFalse(config.enabled)
+        self.assertEqual(config.reason, "render_service_required")
+
     def test_render_missing_branch_fails_closed(self) -> None:
         values = render_env("production", "main")
         values["RENDER_GIT_BRANCH"] = ""

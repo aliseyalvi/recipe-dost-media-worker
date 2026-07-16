@@ -201,19 +201,21 @@ def compute_sentry_config(
 
     if not is_valid_sentry_dsn(dsn):
         return SentryRuntimeConfig(False, None, release, None, controlled_test, "dsn_missing_or_invalid")
+    if not on_render:
+        return SentryRuntimeConfig(False, None, release, None, controlled_test, "render_service_required")
 
     if controlled_test:
         if worker_env != "development":
             return SentryRuntimeConfig(False, None, release, None, True, "test_requires_development")
         if not _env_true(values.get("SENTRY_DEV_TEST")):
             return SentryRuntimeConfig(False, None, release, None, True, "test_flag_disabled")
-        if on_render and render_branch != "develop":
+        if render_branch != "develop":
             return SentryRuntimeConfig(False, None, release, None, True, "render_branch_mismatch")
         return SentryRuntimeConfig(True, "development-test", release, dsn, True, "enabled")
 
     if worker_env != "production":
         return SentryRuntimeConfig(False, None, release, None, False, "runtime_requires_production")
-    if on_render and render_branch != "main":
+    if render_branch != "main":
         return SentryRuntimeConfig(False, None, release, None, False, "render_branch_mismatch")
     return SentryRuntimeConfig(True, "production", release, dsn, False, "enabled")
 
