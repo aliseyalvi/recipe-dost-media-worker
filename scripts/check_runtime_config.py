@@ -85,6 +85,24 @@ def check_runtime_config(environment: str) -> dict[str, object]:
                     "MAX_VIDEO_DURATION_SECONDS effective value still matches fallback 90"
                 )
 
+        try:
+            preferred_size = int(_effective_value(config, "PREFERRED_VIDEO_SIZE_MB") or 0)
+            hard_size = int(_effective_value(config, "MAX_VIDEO_SIZE_MB") or 0)
+            provider_bytes = int(
+                _effective_value(config, "GEMINI_FILE_MAX_SIZE_BYTES") or 0
+            )
+            min_height = int(_effective_value(config, "MIN_VIDEO_HEIGHT") or 0)
+            max_height = int(_effective_value(config, "MAX_VIDEO_HEIGHT") or 0)
+        except (TypeError, ValueError):
+            errors.append("effective media size limits must be integers")
+        else:
+            if not 0 < preferred_size <= hard_size:
+                errors.append("effective size limits must satisfy 0 < preferred <= hard")
+            if hard_size * 1024 * 1024 > provider_bytes:
+                errors.append("effective hard media limit exceeds provider limit")
+            if not 360 <= min_height <= max_height <= 720:
+                errors.append("effective video height limits are invalid")
+
         production_config = _read_environment_config("production")
         for key in ("ENABLE_TIKWM_RESOLVER", "TIKWM_API_URL"):
             if key in production_config:

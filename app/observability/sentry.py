@@ -68,6 +68,7 @@ ALLOWED_ERROR_CODES = {
     "youtube_gemini_url_failed",
     "gemini_video_analysis_failed",
     "terminal_failure_persistence_failed",
+    "media_size_exceeded",
 }
 ALLOWED_PLATFORMS = {"instagram", "tiktok", "youtube", "unknown"}
 EXPECTED_PRODUCT_ERROR_CODES = {
@@ -135,7 +136,14 @@ ALLOWED_CONTEXT_KEYS = {
     "recoverable",
     "terminal",
     "safe_http_status",
+    "duration_bucket",
+    "size_bucket",
+    "selected_resolution_bucket",
+    "adaptive_attempt_count",
+    "cookie_retry_used",
 }
+MEDIA_SIZE_WARNING_MESSAGE = "worker_outcome:media_size_exceeded"
+MEDIA_SIZE_FINGERPRINT = ["worker_outcome", "media_size_exceeded"]
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 SAFE_RELEASE = re.compile(r"^recipe-dost-media-worker@[A-Za-z0-9._-]{7,64}$")
 
@@ -369,11 +377,37 @@ def _sanitize_worker_context(event: Mapping[str, Any]) -> dict[str, object] | No
     sanitized: dict[str, object] = {}
     for key in ALLOWED_CONTEXT_KEYS:
         value = worker.get(key)
-        if key in {"retry_exhausted", "recoverable", "terminal"} and isinstance(value, bool):
+        if key in {
+            "retry_exhausted",
+            "recoverable",
+            "terminal",
+            "cookie_retry_used",
+        } and isinstance(value, bool):
             sanitized[key] = value
-        elif key in {"retry_attempt", "safe_http_status"} and isinstance(value, int):
+        elif key in {
+            "retry_attempt",
+            "safe_http_status",
+            "adaptive_attempt_count",
+        } and isinstance(value, int) and 0 <= value <= 1000:
+            sanitized[key] = value
+        elif key in {
+            "duration_bucket",
+            "size_bucket",
+            "selected_resolution_bucket",
+        } and isinstance(value, str) and SAFE_IDENTIFIER.fullmatch(value):
             sanitized[key] = value
     return sanitized or None
+
+
+def _sanitize_message(event: Mapping[str, Any], error_code: str) -> str | None:
+    message = event.get("message")
+    if (
+        error_code == "media_size_exceeded"
+        and message == MEDIA_SIZE_WARNING_MESSAGE
+        and event.get("level") == "warning"
+    ):
+        return MEDIA_SIZE_WARNING_MESSAGE
+    return None
 
 
 def before_send(event: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any] | None:
@@ -381,15 +415,21 @@ def before_send(event: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any] 
     if tags is None:
         return None
     exception = _sanitize_exception(event, tags["error_code"])
-    if exception is None:
+    message = _sanitize_message(event, tags["error_code"])
+    if exception is None and message is None:
         return None
 
     sanitized: dict[str, Any] = {
         "platform": "python",
-        "level": "error",
+        "level": "warning" if message is not None else "error",
         "tags": tags,
-        "exception": exception,
     }
+    if exception is not None:
+        sanitized["exception"] = exception
+    if message is not None:
+        sanitized["message"] = message
+        if event.get("fingerprint") == MEDIA_SIZE_FINGERPRINT:
+            sanitized["fingerprint"] = list(MEDIA_SIZE_FINGERPRINT)
     event_id = event.get("event_id")
     if isinstance(event_id, str) and re.fullmatch(r"[a-fA-F0-9]{32}", event_id):
         sanitized["event_id"] = event_id
@@ -500,6 +540,56 @@ def report_worker_error(
             scope.set_tags(tags)
             scope.set_context("worker", worker_context)
             event_id = sentry_sdk.capture_exception(exception)
+        return str(event_id) if event_id else None
+    except Exception as capture_error:
+        logger.warning(
+            "sentry_capture_failed",
+            extra={"exception_type": type(capture_error).__name__},
+        )
+        return None
+
+
+def report_terminal_worker_outcome(
+    *,
+    error_code: str,
+    source_platform: str | None,
+    duration_bucket: str | None,
+    size_bucket: str | None,
+    selected_resolution_bucket: str | None,
+    adaptive_attempt_count: int,
+    cookie_retry_used: bool,
+) -> str | None:
+    if error_code != "media_size_exceeded" or not initialize_sentry():
+        return None
+    platform = (source_platform or "unknown").strip().lower()
+    if platform not in ALLOWED_PLATFORMS:
+        platform = "unknown"
+    tags = {
+        "service": SERVICE_NAME,
+        "flow": "current",
+        "feature": "metadata",
+        "operation": "extract_metadata",
+        "stage": "unified_extractor",
+        "error_code": "media_size_exceeded",
+        "source_platform": platform,
+    }
+    worker_context = {
+        "duration_bucket": duration_bucket or "unknown",
+        "size_bucket": size_bucket or "unknown",
+        "selected_resolution_bucket": selected_resolution_bucket or "unknown",
+        "adaptive_attempt_count": max(0, min(adaptive_attempt_count, 4)),
+        "cookie_retry_used": bool(cookie_retry_used),
+        "terminal": True,
+    }
+    try:
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tags(tags)
+            scope.set_context("worker", worker_context)
+            scope.fingerprint = list(MEDIA_SIZE_FINGERPRINT)
+            event_id = sentry_sdk.capture_message(
+                MEDIA_SIZE_WARNING_MESSAGE,
+                level="warning",
+            )
         return str(event_id) if event_id else None
     except Exception as capture_error:
         logger.warning(

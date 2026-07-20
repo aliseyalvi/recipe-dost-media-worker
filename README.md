@@ -195,6 +195,10 @@ This endpoint does not call Gemini, does not create media jobs, does not downloa
 
 - YouTube uses oEmbed metadata plus Gemini native URL input when `YOUTUBE_AI_INPUT_MODE=gemini_url`.
 - TikTok and Instagram use verified temp-file extraction plus Gemini Files API.
+- Social extraction chooses combined audio/video formats through a bounded
+  720p -> 540p -> 480p -> 360p ladder, targets 36 MiB, and enforces a 50 MiB
+  streaming/temp-file hard limit. The historical `*_MB` config names are binary
+  MiB.
 - Gemini 3.1 Flash-Lite single-pass structured extraction is the documented default.
 - Cobalt is not used for TikTok or YouTube.
 - Temporary stream URLs are never stored or returned.
@@ -206,6 +210,7 @@ See [docs/worker-context.md](docs/worker-context.md) for the compact current con
 See [docs/render-deploy.md](docs/render-deploy.md) for Render setup notes.
 See [docs/m22d-worker-environments.md](docs/m22d-worker-environments.md) for worker environment source-of-truth setup.
 See [docs/m22d-worker-env-variable-map.md](docs/m22d-worker-env-variable-map.md) for env/config ownership.
+See [docs/m23-adaptive-media.md](docs/m23-adaptive-media.md) for the audited media policy, failure/Sentry contract, and staged deployment/rollback checklist.
 
 ## Validation
 

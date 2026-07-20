@@ -92,6 +92,38 @@ def active_event() -> dict[str, object]:
     }
 
 
+def media_size_warning_event() -> dict[str, object]:
+    event = active_event()
+    event.pop("exception")
+    event["level"] = "warning"
+    event["message"] = sentry.MEDIA_SIZE_WARNING_MESSAGE
+    event["fingerprint"] = list(sentry.MEDIA_SIZE_FINGERPRINT)
+    event["tags"] = {
+        "service": sentry.SERVICE_NAME,
+        "flow": "current",
+        "feature": "metadata",
+        "operation": "extract_metadata",
+        "stage": "unified_extractor",
+        "error_code": "media_size_exceeded",
+        "source_platform": "instagram",
+    }
+    event["contexts"] = {
+        "worker": {
+            "duration_bucket": "60_90_seconds",
+            "size_bucket": "40_50_mib",
+            "selected_resolution_bucket": "720p",
+            "adaptive_attempt_count": 3,
+            "cookie_retry_used": True,
+            "terminal": True,
+            "source_url": "https://secret.invalid/video",
+            "temporary_path": "/tmp/private-video.mp4",
+            "user_id": "private-user",
+            "recipe_id": "private-recipe",
+        }
+    }
+    return event
+
+
 class SentryPolicyTests(unittest.TestCase):
     def setUp(self) -> None:
         sentry._reset_state_for_tests()
@@ -134,6 +166,12 @@ class SentryPolicyTests(unittest.TestCase):
     def test_missing_dsn_fails_closed(self) -> None:
         values = render_env("production", "main")
         values.pop("SENTRY_DSN")
+        self.assertFalse(sentry.compute_sentry_config(environment=values).enabled)
+
+    def test_frontend_dsn_name_is_never_used_as_worker_dsn(self) -> None:
+        values = render_env("production", "main")
+        values.pop("SENTRY_DSN")
+        values["EXPO_PUBLIC_SENTRY_DSN"] = DSN
         self.assertFalse(sentry.compute_sentry_config(environment=values).enabled)
 
     def test_non_render_runtime_fails_closed_even_with_production_and_main(self) -> None:
@@ -227,6 +265,28 @@ class SentrySanitizerTests(unittest.TestCase):
             )
         )
 
+    def test_capture_message_warning_is_retained_without_exception(self) -> None:
+        sanitized = sentry.before_send(media_size_warning_event(), {})
+        self.assertIsNotNone(sanitized)
+        assert sanitized is not None
+        self.assertEqual(sanitized["level"], "warning")
+        self.assertEqual(sanitized["message"], sentry.MEDIA_SIZE_WARNING_MESSAGE)
+        self.assertEqual(sanitized["fingerprint"], sentry.MEDIA_SIZE_FINGERPRINT)
+        self.assertNotIn("exception", sanitized)
+
+    def test_warning_retains_optional_missing_context_and_drops_unsafe_context(self) -> None:
+        event = media_size_warning_event()
+        event["contexts"] = {"worker": {"terminal": True, "source_url": "https://x"}}
+        tags = dict(event["tags"])
+        tags.pop("source_platform")
+        event["tags"] = tags
+        sanitized = sentry.before_send(event, {})
+        self.assertIsNotNone(sanitized)
+        assert sanitized is not None
+        serialized = json.dumps(sanitized)
+        self.assertNotIn("source_url", serialized)
+        self.assertNotIn("https://", serialized)
+
 
 class SentryReportingTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -294,6 +354,57 @@ class SentryReportingTests(unittest.TestCase):
             result = sentry_test.main()
         self.assertEqual(result, 2)
         initialize.assert_not_called()
+
+    def test_two_terminal_size_jobs_capture_two_occurrences_with_same_fingerprint(self) -> None:
+        scopes = []
+        for _ in range(2):
+            manager = MagicMock()
+            scope = MagicMock()
+            manager.__enter__.return_value = scope
+            scopes.append((manager, scope))
+        with patch("app.observability.sentry.initialize_sentry", return_value=True), patch(
+            "app.observability.sentry.sentry_sdk.new_scope",
+            side_effect=[item[0] for item in scopes],
+        ), patch(
+            "app.observability.sentry.sentry_sdk.capture_message",
+            side_effect=["c" * 32, "d" * 32],
+        ) as capture:
+            results = [
+                sentry.report_terminal_worker_outcome(
+                    error_code="media_size_exceeded",
+                    source_platform="instagram",
+                    duration_bucket="60_90_seconds",
+                    size_bucket="40_50_mib",
+                    selected_resolution_bucket="720p",
+                    adaptive_attempt_count=3,
+                    cookie_retry_used=True,
+                )
+                for _ in range(2)
+            ]
+        self.assertEqual(results, ["c" * 32, "d" * 32])
+        self.assertEqual(capture.call_count, 2)
+        for _manager, scope in scopes:
+            self.assertEqual(scope.fingerprint, sentry.MEDIA_SIZE_FINGERPRINT)
+
+    def test_sentry_warning_delivery_failure_does_not_escape(self) -> None:
+        manager = MagicMock()
+        manager.__enter__.return_value = MagicMock()
+        with patch("app.observability.sentry.initialize_sentry", return_value=True), patch(
+            "app.observability.sentry.sentry_sdk.new_scope", return_value=manager
+        ), patch(
+            "app.observability.sentry.sentry_sdk.capture_message",
+            side_effect=RuntimeError("transport failed"),
+        ):
+            result = sentry.report_terminal_worker_outcome(
+                error_code="media_size_exceeded",
+                source_platform="instagram",
+                duration_bucket=None,
+                size_bucket=None,
+                selected_resolution_bucket=None,
+                adaptive_attempt_count=4,
+                cookie_retry_used=False,
+            )
+        self.assertIsNone(result)
 
 
 class ActiveQueueBoundaryTests(unittest.TestCase):

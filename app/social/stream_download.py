@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 import os
 import re
 import shutil
@@ -16,12 +17,22 @@ from app.config import Settings
 from app.social.models import SocialResolverError, SocialVideoInfo
 from app.social.thumbnail_selection import platform_thumbnail, select_ytdlp_thumbnail
 from app.social.yt_dlp_resolver import (
+    collect_candidate_formats,
     platform_headers,
     safe_float,
     safe_http_url,
     safe_str,
     sanitized_ytdlp_metadata,
-    select_optional_direct_video_format,
+)
+
+logger = logging.getLogger("recipe_dost.worker")
+
+MIB_BYTES = 1024 * 1024
+QUALITY_LADDER = (720, 540, 480, 360)
+SUPPORTED_VIDEO_EXTENSIONS = {"mp4", "m4v", "mov", "webm"}
+TERMINAL_SIZE_MESSAGE = (
+    "Recipe Dost tried a smaller video version, but this video is still too "
+    "large for automatic recipe analysis. Try a shorter video or another recipe link."
 )
 
 
@@ -31,6 +42,46 @@ class VideoBuffer:
     size_bytes: int
     mime_type: str
     ext: str | None = None
+
+
+@dataclass(frozen=True)
+class MediaFormatCandidate:
+    format_id: str
+    width: int | None
+    height: int | None
+    quality_height: int | None
+    total_bitrate_kbps: float | None
+    fps: float | None
+    ext: str
+    has_audio: bool
+    has_video: bool
+    filesize: int | None
+    filesize_approx: int | None
+    estimated_size_bytes: int | None
+    estimate_source: str
+    raw: dict[str, Any]
+
+    @property
+    def resolution_bucket(self) -> str:
+        return resolution_bucket(self.quality_height)
+
+
+class HardByteLimitExceeded(Exception):
+    pass
+
+
+class HardByteGuard:
+    def __init__(self, hard_limit_bytes: int) -> None:
+        self.hard_limit_bytes = hard_limit_bytes
+        self.observed_bytes = 0
+        self.exceeded = False
+
+    def __call__(self, progress: dict[str, Any]) -> None:
+        observed = safe_int(progress.get("downloaded_bytes")) or 0
+        self.observed_bytes = max(self.observed_bytes, observed)
+        if observed > self.hard_limit_bytes:
+            self.exceeded = True
+            raise HardByteLimitExceeded("media_size_exceeded")
 
 
 class InMemoryVideoWriter:
@@ -105,7 +156,11 @@ def extract_social_video(
     if no_cookie_result.get("success"):
         return no_cookie_result
 
-    if cookie_file and not use_cookie_first:
+    if (
+        cookie_file
+        and not use_cookie_first
+        and should_retry_with_cookies(no_cookie_result)
+    ):
         cookie_opts = ytdlp_options(normalized_platform, settings, cookie_file)
         cookie_result = try_ytdlp_extract(
             url,
@@ -152,8 +207,8 @@ def try_ytdlp_extract(
     try:
         with YoutubeDL({**opts, "skip_download": True}) as ydl:
             info = ydl.extract_info(url, download=False)
-    except Exception:
-        return extractor_failure(
+    except Exception as exc:
+        result = extractor_failure(
             platform,
             "unified_extractor_failed",
             "This social video could not be accessed.",
@@ -161,6 +216,9 @@ def try_ytdlp_extract(
             cookie_mode=cookie_mode,
             output_mode=output_mode,
         )
+        if is_unexpected_ytdlp_exception(exc):
+            result["_technical_exception"] = exc
+        return result
     if not isinstance(info, dict):
         return extractor_failure(
             platform,
@@ -170,7 +228,9 @@ def try_ytdlp_extract(
             cookie_mode=cookie_mode,
             output_mode=output_mode,
         )
-    selected_format = select_optional_direct_video_format(info, settings)
+    candidates = build_media_format_candidates(info, settings)
+    attempts = build_adaptive_attempts(candidates, settings)
+    selected_format = attempts[0].raw if attempts else None
     duration_seconds = safe_duration_seconds(info.get("duration"))
     if (
         duration_seconds is not None
@@ -196,7 +256,7 @@ def try_ytdlp_extract(
             settings,
             opts,
             info,
-            selected_format,
+            attempts,
             resolver=resolver,
             cookie_mode=cookie_mode,
         )
@@ -207,7 +267,7 @@ def try_ytdlp_extract(
         settings,
         opts,
         info,
-        selected_format,
+        attempts,
         resolver=resolver,
         cookie_mode=cookie_mode,
     )
@@ -219,11 +279,11 @@ def ytdlp_options(
     cookie_file: str | None,
 ) -> dict[str, Any]:
     opts: dict[str, Any] = {
-        "format": "best[ext=mp4][height<=720]/best[height<=720]/best",
         "noplaylist": True,
-        "retries": 2,
-        "fragment_retries": 2,
-        "socket_timeout": 15,
+        "retries": settings.ytdlp_retries,
+        "fragment_retries": settings.ytdlp_retries,
+        "extractor_retries": settings.ytdlp_retries,
+        "socket_timeout": settings.ytdlp_socket_timeout_seconds,
         "quiet": True,
         "no_warnings": True,
         "logtostderr": True,
@@ -246,7 +306,7 @@ def extract_to_temp_file(
     settings: Settings,
     opts: dict[str, Any],
     info: dict[str, Any],
-    selected_format: dict[str, Any] | None,
+    attempts: list[MediaFormatCandidate],
     *,
     resolver: str,
     cookie_mode: str,
@@ -254,71 +314,143 @@ def extract_to_temp_file(
     from yt_dlp import YoutubeDL
 
     job_dir = Path(settings.temp_media_dir) / safe_path_segment(job_id)
-    if job_dir.exists():
-        shutil.rmtree(job_dir, ignore_errors=True)
-    job_dir.mkdir(parents=True, exist_ok=True)
-    download_opts = {
-        **opts,
-        "outtmpl": str(job_dir / "video.%(ext)s"),
-    }
-    try:
-        with YoutubeDL(download_opts) as ydl:
-            ydl.download([url])
-    except Exception:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        return extractor_result(
+    preferred_bytes = settings.preferred_video_size_bytes
+    hard_bytes = settings.max_video_size_bytes
+    last_size_bytes: int | None = None
+    last_candidate: MediaFormatCandidate | None = None
+    technical_exception: Exception | None = None
+    size_fallback_used = False
+
+    if not attempts:
+        return no_candidate_result(
             platform,
             info,
-            selected_format,
-            success=False,
-            error_code="unified_extractor_failed",
-            safe_error_message="This social video could not be downloaded.",
             resolver=resolver,
             cookie_mode=cookie_mode,
             output_mode="temp_file",
+            settings=settings,
         )
 
-    file_path = locate_downloaded_file(job_dir)
-    if file_path is None:
-        shutil.rmtree(job_dir, ignore_errors=True)
+    for index, candidate in enumerate(attempts, 1):
+        last_candidate = candidate
+        cleanup_job_dir(job_dir)
+        job_dir.mkdir(parents=True, exist_ok=True)
+        guard = HardByteGuard(hard_bytes)
+        download_opts = {
+            **opts,
+            "format": candidate.format_id,
+            "outtmpl": str(job_dir / "video.%(ext)s"),
+            "progress_hooks": [guard],
+        }
+        try:
+            with YoutubeDL(download_opts) as ydl:
+                ydl.download([url])
+        except Exception as exc:
+            if technical_exception is None and is_unexpected_ytdlp_exception(exc):
+                technical_exception = exc
+            last_size_bytes = guard.observed_bytes or candidate.estimated_size_bytes
+            cleanup_job_dir(job_dir)
+            if guard.exceeded:
+                size_fallback_used = True
+                log_format_fallback(
+                    index,
+                    candidate,
+                    next_candidate(attempts, index),
+                    "hard_size_exceeded",
+                )
+                continue
+            log_format_fallback(
+                index,
+                candidate,
+                next_candidate(attempts, index),
+                "download_failed",
+            )
+            continue
+
+        file_path = locate_downloaded_file(job_dir)
+        if file_path is None:
+            cleanup_job_dir(job_dir)
+            log_format_fallback(
+                index,
+                candidate,
+                next_candidate(attempts, index),
+                "download_missing",
+            )
+            continue
+        size_bytes = file_path.stat().st_size
+        last_size_bytes = size_bytes
+        has_smaller_attempt = index < len(attempts)
+        if size_bytes > hard_bytes:
+            size_fallback_used = True
+            cleanup_job_dir(job_dir)
+            log_format_fallback(
+                index,
+                candidate,
+                next_candidate(attempts, index),
+                "hard_size_exceeded",
+            )
+            continue
+        if size_bytes > preferred_bytes and has_smaller_attempt:
+            size_fallback_used = True
+            cleanup_job_dir(job_dir)
+            log_format_fallback(
+                index,
+                candidate,
+                next_candidate(attempts, index),
+                "preferred_size_exceeded",
+            )
+            continue
         return extractor_result(
             platform,
             info,
-            selected_format,
-            success=False,
-            error_code="unified_extractor_failed",
-            safe_error_message="This social video could not be downloaded.",
-            resolver=resolver,
-            cookie_mode=cookie_mode,
-            output_mode="temp_file",
-        )
-    size_bytes = file_path.stat().st_size
-    max_bytes = settings.max_video_size_mb * 1024 * 1024
-    if size_bytes > max_bytes:
-        shutil.rmtree(job_dir, ignore_errors=True)
-        return extractor_result(
-            platform,
-            info,
-            selected_format,
-            success=False,
-            error_code="media_size_exceeded",
-            safe_error_message="This video is too large for automatic recipe analysis.",
+            candidate.raw,
+            success=True,
+            temp_file_path=str(file_path),
             size_bytes=size_bytes,
             resolver=resolver,
             cookie_mode=cookie_mode,
             output_mode="temp_file",
+            adaptive_attempt_count=index,
+            format_candidate_count=len(build_media_format_candidates(info, settings)),
+            selected_resolution_bucket=candidate.resolution_bucket,
+            estimated_size_bucket=size_bucket(candidate.estimated_size_bytes),
+            actual_size_bucket=size_bucket(size_bytes),
+            size_fallback_used=size_fallback_used,
         )
-    return extractor_result(
+
+    cleanup_job_dir(job_dir)
+    result = extractor_result(
         platform,
         info,
-        selected_format,
-        success=True,
-        temp_file_path=str(file_path),
-        size_bytes=size_bytes,
+        last_candidate.raw if last_candidate else None,
+        success=False,
+        error_code=(
+            "media_size_exceeded"
+            if size_fallback_used or all_candidates_exceed_hard(info, settings)
+            else "unified_extractor_failed"
+        ),
+        safe_error_message=(
+            TERMINAL_SIZE_MESSAGE
+            if size_fallback_used or all_candidates_exceed_hard(info, settings)
+            else "This social video could not be downloaded."
+        ),
+        size_bytes=last_size_bytes,
         resolver=resolver,
         cookie_mode=cookie_mode,
         output_mode="temp_file",
+        adaptive_attempt_count=len(attempts),
+        format_candidate_count=len(build_media_format_candidates(info, settings)),
+        selected_resolution_bucket=(last_candidate.resolution_bucket if last_candidate else None),
+        estimated_size_bucket=(size_bucket(last_candidate.estimated_size_bytes) if last_candidate else None),
+        actual_size_bucket=size_bucket(last_size_bytes),
+        size_fallback_used=size_fallback_used,
     )
+    if (
+        result.get("error_code") != "media_size_exceeded"
+        and technical_exception is not None
+    ):
+        result["_technical_exception"] = technical_exception
+    return result
 
 
 def extract_to_memory(
@@ -328,66 +460,451 @@ def extract_to_memory(
     settings: Settings,
     opts: dict[str, Any],
     info: dict[str, Any],
-    selected_format: dict[str, Any] | None,
+    attempts: list[MediaFormatCandidate],
     *,
     resolver: str,
     cookie_mode: str,
 ) -> dict[str, object]:
     from yt_dlp import YoutubeDL
 
-    writer = InMemoryVideoWriter()
-    original_stdout = sys.stdout
-    max_bytes = settings.max_video_size_mb * 1024 * 1024
-    try:
-        sys.stdout = writer  # type: ignore[assignment]
-        download_opts = {
-            **opts,
-            "outtmpl": "-",
-        }
-        with YoutubeDL(download_opts) as ydl:
-            ydl.download([url])
-    except Exception:
-        writer.buffer.close()
-        return extractor_result(
+    preferred_bytes = min(
+        settings.preferred_video_size_bytes,
+        settings.max_memory_buffer_mb * MIB_BYTES,
+    )
+    hard_bytes = min(
+        settings.max_video_size_bytes,
+        settings.max_memory_buffer_mb * MIB_BYTES,
+    )
+    last_size_bytes: int | None = None
+    last_candidate: MediaFormatCandidate | None = None
+    technical_exception: Exception | None = None
+    size_fallback_used = False
+    if not attempts:
+        return no_candidate_result(
             platform,
             info,
-            selected_format,
-            success=False,
-            error_code="unified_extractor_failed",
-            safe_error_message="This social video could not be downloaded.",
             resolver=resolver,
             cookie_mode=cookie_mode,
             output_mode="memory_buffer",
+            settings=settings,
         )
-    finally:
-        sys.stdout = original_stdout
-    size_bytes = writer.buffer.getbuffer().nbytes
-    if size_bytes > max_bytes:
-        writer.buffer.close()
+
+    for index, candidate in enumerate(attempts, 1):
+        last_candidate = candidate
+        writer = InMemoryVideoWriter()
+        original_stdout = sys.stdout
+        guard = HardByteGuard(hard_bytes)
+        try:
+            sys.stdout = writer  # type: ignore[assignment]
+            download_opts = {
+                **opts,
+                "format": candidate.format_id,
+                "outtmpl": "-",
+                "progress_hooks": [guard],
+            }
+            with YoutubeDL(download_opts) as ydl:
+                ydl.download([url])
+        except Exception as exc:
+            if technical_exception is None and is_unexpected_ytdlp_exception(exc):
+                technical_exception = exc
+            last_size_bytes = guard.observed_bytes or candidate.estimated_size_bytes
+            writer.buffer.close()
+            if guard.exceeded:
+                size_fallback_used = True
+            log_format_fallback(
+                index,
+                candidate,
+                next_candidate(attempts, index),
+                "hard_size_exceeded" if guard.exceeded else "download_failed",
+            )
+            continue
+        finally:
+            sys.stdout = original_stdout
+        size_bytes = writer.buffer.getbuffer().nbytes
+        last_size_bytes = size_bytes
+        if size_bytes > hard_bytes or (
+            size_bytes > preferred_bytes and index < len(attempts)
+        ):
+            size_fallback_used = True
+            writer.buffer.close()
+            log_format_fallback(
+                index,
+                candidate,
+                next_candidate(attempts, index),
+                (
+                    "hard_size_exceeded"
+                    if size_bytes > hard_bytes
+                    else "preferred_size_exceeded"
+                ),
+            )
+            continue
+        writer.buffer.seek(0)
         return extractor_result(
             platform,
             info,
-            selected_format,
-            success=False,
-            error_code="media_size_exceeded",
-            safe_error_message="This video is too large for automatic recipe analysis.",
+            candidate.raw,
+            success=True,
+            video_buffer=writer.buffer,
             size_bytes=size_bytes,
             resolver=resolver,
             cookie_mode=cookie_mode,
             output_mode="memory_buffer",
+            adaptive_attempt_count=index,
+            format_candidate_count=len(build_media_format_candidates(info, settings)),
+            selected_resolution_bucket=candidate.resolution_bucket,
+            estimated_size_bucket=size_bucket(candidate.estimated_size_bytes),
+            actual_size_bucket=size_bucket(size_bytes),
+            size_fallback_used=size_fallback_used,
         )
-    writer.buffer.seek(0)
-    return extractor_result(
+
+    result = extractor_result(
         platform,
         info,
-        selected_format,
-        success=True,
-        video_buffer=writer.buffer,
-        size_bytes=size_bytes,
+        last_candidate.raw if last_candidate else None,
+        success=False,
+        error_code="media_size_exceeded" if size_fallback_used else "unified_extractor_failed",
+        safe_error_message=(
+            TERMINAL_SIZE_MESSAGE
+            if size_fallback_used
+            else "This social video could not be downloaded."
+        ),
+        size_bytes=last_size_bytes,
         resolver=resolver,
         cookie_mode=cookie_mode,
         output_mode="memory_buffer",
+        adaptive_attempt_count=len(attempts),
+        format_candidate_count=len(build_media_format_candidates(info, settings)),
+        selected_resolution_bucket=(last_candidate.resolution_bucket if last_candidate else None),
+        estimated_size_bucket=(size_bucket(last_candidate.estimated_size_bytes) if last_candidate else None),
+        actual_size_bucket=size_bucket(last_size_bytes),
+        size_fallback_used=size_fallback_used,
     )
+    if (
+        result.get("error_code") != "media_size_exceeded"
+        and technical_exception is not None
+    ):
+        result["_technical_exception"] = technical_exception
+    return result
+
+
+def build_media_format_candidates(
+    info: dict[str, Any],
+    settings: Settings,
+) -> list[MediaFormatCandidate]:
+    duration_seconds = safe_float(info.get("duration"))
+    candidates: list[MediaFormatCandidate] = []
+    seen: set[str] = set()
+    for item in collect_candidate_formats(info):
+        format_id = safe_str(item.get("format_id"))
+        if not format_id or format_id in seen:
+            continue
+        seen.add(format_id)
+        ext = (safe_str(item.get("ext")) or "").lower()
+        if ext not in SUPPORTED_VIDEO_EXTENSIONS:
+            continue
+        vcodec = (safe_str(item.get("vcodec")) or "").lower()
+        acodec = (safe_str(item.get("acodec")) or "").lower()
+        has_video = bool(vcodec and vcodec != "none")
+        has_audio = bool(acodec and acodec != "none")
+        if not has_video or not has_audio:
+            continue
+        width = safe_int(item.get("width"))
+        height = safe_int(item.get("height"))
+        quality_height = short_edge_resolution(width, height)
+        if quality_height is None or quality_height < settings.min_video_height:
+            continue
+        filesize = positive_int(item.get("filesize"))
+        filesize_approx = positive_int(item.get("filesize_approx"))
+        total_bitrate = candidate_total_bitrate_kbps(item)
+        estimated, source = estimate_candidate_size(
+            filesize=filesize,
+            filesize_approx=filesize_approx,
+            duration_seconds=duration_seconds,
+            total_bitrate_kbps=total_bitrate,
+        )
+        candidates.append(
+            MediaFormatCandidate(
+                format_id=format_id,
+                width=width,
+                height=height,
+                quality_height=quality_height,
+                total_bitrate_kbps=total_bitrate,
+                fps=safe_float(item.get("fps")),
+                ext=ext,
+                has_audio=has_audio,
+                has_video=has_video,
+                filesize=filesize,
+                filesize_approx=filesize_approx,
+                estimated_size_bytes=estimated,
+                estimate_source=source,
+                raw=item,
+            )
+        )
+    return candidates
+
+
+def build_adaptive_attempts(
+    candidates: list[MediaFormatCandidate],
+    settings: Settings,
+) -> list[MediaFormatCandidate]:
+    preferred_bytes = settings.preferred_video_size_bytes
+    hard_bytes = settings.max_video_size_bytes
+    selected: list[MediaFormatCandidate] = []
+    selected_ids: set[str] = set()
+
+    for height_limit in QUALITY_LADDER:
+        if height_limit > settings.max_video_height or height_limit < settings.min_video_height:
+            continue
+        fitting = [
+            candidate
+            for candidate in candidates
+            if candidate.format_id not in selected_ids
+            and candidate.quality_height is not None
+            and settings.min_video_height <= candidate.quality_height <= height_limit
+            and candidate.estimated_size_bytes is not None
+            and candidate.estimated_size_bytes <= preferred_bytes
+        ]
+        if not fitting:
+            continue
+        chosen = max(fitting, key=quality_rank)
+        selected.append(chosen)
+        selected_ids.add(chosen.format_id)
+        if len(selected) >= settings.media_adaptive_max_attempts:
+            return selected
+
+    hard_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.format_id not in selected_ids
+        and (
+            candidate.quality_height is not None
+            and candidate.quality_height <= settings.max_video_height
+        )
+        and (
+            candidate.estimated_size_bytes is None
+            or candidate.estimated_size_bytes <= hard_bytes
+        )
+    ]
+    if not selected and hard_candidates:
+        # Unknown sizes are bounded by the streaming guard. The final hard-limit
+        # attempt deliberately uses the smallest useful source candidate.
+        chosen = min(hard_candidates, key=smallest_useful_rank)
+        selected.append(chosen)
+    return selected[: settings.media_adaptive_max_attempts]
+
+
+def estimate_candidate_size(
+    *,
+    filesize: int | None,
+    filesize_approx: int | None,
+    duration_seconds: float | None,
+    total_bitrate_kbps: float | None,
+) -> tuple[int | None, str]:
+    if filesize is not None:
+        return filesize, "filesize"
+    if filesize_approx is not None:
+        return filesize_approx, "filesize_approx"
+    if duration_seconds and duration_seconds > 0 and total_bitrate_kbps and total_bitrate_kbps > 0:
+        # yt-dlp bitrate fields are in Kbit/s. Five percent allows for container
+        # overhead while the hard streaming guard remains authoritative.
+        return int(duration_seconds * total_bitrate_kbps * 1000 / 8 * 1.05), "bitrate"
+    return None, "unknown"
+
+
+def candidate_total_bitrate_kbps(item: dict[str, Any]) -> float | None:
+    total = safe_float(item.get("tbr"))
+    if total is not None and total > 0:
+        return total
+    video = safe_float(item.get("vbr")) or 0.0
+    audio = safe_float(item.get("abr")) or 0.0
+    combined = video + audio
+    return combined if combined > 0 else None
+
+
+def quality_rank(candidate: MediaFormatCandidate) -> tuple[int, int, float, float, int]:
+    return (
+        candidate.quality_height or 0,
+        1 if candidate.ext == "mp4" else 0,
+        candidate.total_bitrate_kbps or 0.0,
+        min(candidate.fps or 0.0, 60.0),
+        -(candidate.estimated_size_bytes or 0),
+    )
+
+
+def smallest_useful_rank(candidate: MediaFormatCandidate) -> tuple[int, int, int, float]:
+    return (
+        (
+            candidate.quality_height
+            if candidate.quality_height is not None
+            else settings_unknown_height()
+        ),
+        candidate.estimated_size_bytes if candidate.estimated_size_bytes is not None else 2**63,
+        0 if candidate.ext == "mp4" else 1,
+        -(candidate.total_bitrate_kbps or 0.0),
+    )
+
+
+def settings_unknown_height() -> int:
+    return 10_000
+
+
+def positive_int(value: object) -> int | None:
+    parsed = safe_int(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def no_candidate_result(
+    platform: str,
+    info: dict[str, Any],
+    *,
+    resolver: str,
+    cookie_mode: str,
+    output_mode: str,
+    settings: Settings,
+) -> dict[str, object]:
+    candidates = build_media_format_candidates(info, settings)
+    size_limited = bool(candidates) and all_candidates_exceed_hard(info, settings)
+    diagnostic_candidate = (
+        min(candidates, key=smallest_useful_rank) if size_limited else None
+    )
+    return extractor_result(
+        platform,
+        info,
+        diagnostic_candidate.raw if diagnostic_candidate else None,
+        success=False,
+        error_code="media_size_exceeded" if size_limited else "unified_extractor_failed",
+        safe_error_message=(
+            TERMINAL_SIZE_MESSAGE
+            if size_limited
+            else "This social video did not expose a supported video format with audio."
+        ),
+        resolver=resolver,
+        cookie_mode=cookie_mode,
+        output_mode=output_mode,
+        adaptive_attempt_count=0,
+        format_candidate_count=len(candidates),
+        selected_resolution_bucket=(
+            diagnostic_candidate.resolution_bucket if diagnostic_candidate else None
+        ),
+        estimated_size_bucket=(
+            size_bucket(diagnostic_candidate.estimated_size_bytes)
+            if diagnostic_candidate
+            else None
+        ),
+        size_fallback_used=size_limited,
+    )
+
+
+def all_candidates_exceed_hard(info: dict[str, Any], settings: Settings) -> bool:
+    candidates = [
+        candidate
+        for candidate in build_media_format_candidates(info, settings)
+        if candidate.quality_height is not None
+        and candidate.quality_height <= settings.max_video_height
+    ]
+    return bool(candidates) and all(
+        candidate.estimated_size_bytes is not None
+        and candidate.estimated_size_bytes > settings.max_video_size_bytes
+        for candidate in candidates
+    )
+
+
+def should_retry_with_cookies(result: dict[str, object]) -> bool:
+    return result.get("error_code") not in {
+        "media_size_exceeded",
+        "video_duration_exceeded",
+    }
+
+
+def is_unexpected_ytdlp_exception(exc: Exception) -> bool:
+    # yt-dlp DownloadError represents ordinary access/format/provider failures.
+    # Other exception classes indicate an unexpected technical boundary failure.
+    return type(exc).__name__ not in {
+        "DownloadError",
+        "ExtractorError",
+        "GeoRestrictedError",
+        "HardByteLimitExceeded",
+    }
+
+
+def cleanup_job_dir(job_dir: Path) -> None:
+    if job_dir.exists():
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+
+def next_candidate(
+    attempts: list[MediaFormatCandidate],
+    current_attempt_number: int,
+) -> MediaFormatCandidate | None:
+    return (
+        attempts[current_attempt_number]
+        if current_attempt_number < len(attempts)
+        else None
+    )
+
+
+def log_format_fallback(
+    attempt: int,
+    candidate: MediaFormatCandidate,
+    following: MediaFormatCandidate | None,
+    reason: str,
+) -> None:
+    if following is None:
+        return
+    logger.info(
+        "media_format_fallback",
+        extra={
+            "stage": "unified_extractor",
+            "reason": reason,
+            "attempt": attempt,
+            "from_resolution": candidate.resolution_bucket,
+            "to_resolution": following.resolution_bucket,
+            "terminal": False,
+        },
+    )
+
+
+def resolution_bucket(height: int | None) -> str:
+    if height is None:
+        return "unknown"
+    for boundary in (360, 480, 540, 720, 1080, 1440, 2160):
+        if height <= boundary:
+            return f"{boundary}p"
+    return "over_2160p"
+
+
+def short_edge_resolution(width: int | None, height: int | None) -> int | None:
+    dimensions = [value for value in (width, height) if value is not None and value > 0]
+    return min(dimensions) if dimensions else None
+
+
+def duration_bucket(duration_seconds: int | None) -> str:
+    if duration_seconds is None:
+        return "unknown"
+    if duration_seconds <= 30:
+        return "0_30_seconds"
+    if duration_seconds <= 60:
+        return "30_60_seconds"
+    if duration_seconds <= 90:
+        return "60_90_seconds"
+    if duration_seconds <= 120:
+        return "90_120_seconds"
+    return "over_120_seconds"
+
+
+def size_bucket(size_bytes: int | None) -> str:
+    if size_bytes is None:
+        return "unknown"
+    mib = size_bytes / MIB_BYTES
+    if mib < 20:
+        return "under_20_mib"
+    if mib < 30:
+        return "20_30_mib"
+    if mib < 40:
+        return "30_40_mib"
+    if mib < 50:
+        return "40_50_mib"
+    return "50_mib_or_more"
 
 
 def extractor_failure(
@@ -448,6 +965,12 @@ def extractor_result(
     resolver: str = "ytdlp_stream",
     cookie_mode: str | None = None,
     output_mode: str | None = None,
+    adaptive_attempt_count: int = 0,
+    format_candidate_count: int = 0,
+    selected_resolution_bucket: str | None = None,
+    estimated_size_bucket: str | None = None,
+    actual_size_bucket: str | None = None,
+    size_fallback_used: bool = False,
 ) -> dict[str, object]:
     selected = selected_format or {}
     cdn_url = safe_http_url(selected.get("url")) or safe_http_url(info.get("url"))
@@ -490,6 +1013,13 @@ def extractor_result(
         "cookie_retry_attempted": cookie_mode == "platform_cookie_file",
         "cookie_setup_failed": False,
         "metadata_fallback_attempted": False,
+        "adaptive_attempt_count": adaptive_attempt_count,
+        "format_candidate_count": format_candidate_count,
+        "selected_resolution_bucket": selected_resolution_bucket,
+        "estimated_size_bucket": estimated_size_bucket,
+        "actual_size_bucket": actual_size_bucket,
+        "duration_bucket": duration_bucket(safe_duration_seconds(info.get("duration"))),
+        "size_fallback_used": size_fallback_used,
         "error_code": error_code,
         "safe_error_message": safe_error_message,
     }

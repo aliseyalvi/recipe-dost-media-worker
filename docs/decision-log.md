@@ -13,6 +13,25 @@
 
 Keep this file terse: only durable architecture decisions, not full task history.
 
+## 2026-07-20 — M23.W2 adaptive media and terminal outcomes
+
+- Active queue social extraction uses a 36 MiB preferred target, a 50 MiB hard
+  downloaded-byte/temp-file limit, and at most four combined audio/video source
+  formats across 720p, 540p, 480p, and 360p. The historical `*_MB` names are
+  binary MiB. Gemini's configured Files limit is 2,000,000,000 bytes and is a
+  startup invariant above the worker hard limit.
+- Portrait quality is measured by short edge, fixing the old `height<=720`
+  selector that excluded 720x1280 and fell through to unrestricted 1080p.
+  Exact format IDs are pinned; partials are removed between attempts.
+- Compression is rejected for this milestone because the Docker runtime does
+  not install ffmpeg and Render Free has 0.1 CPU. Smaller source selection is
+  the supported optimization.
+- Terminal `media_size_exceeded` retains the existing database code/message
+  contract, logs one privacy-safe WARNING, and captures one Sentry warning with
+  a stable fingerprint. Intermediate attempts remain Sentry-silent. Build 3
+  ignores the server message for this unmapped code, so improved app copy needs
+  a future mobile release.
+
 ## Completed Decisions
 
 - YouTube remains the stable direct Gemini path: public URL -> video observation -> recipe normalization -> `recipe_cards`.

@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Annotated, Literal, Optional
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from app.runtime_config import worker_config_value
@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     )
     gemini_file_upload_timeout_seconds: int = worker_config_value(
         "gemini_file_upload_timeout_seconds", 120
+    )
+    gemini_file_max_size_bytes: int = worker_config_value(
+        "gemini_file_max_size_bytes", 2_000_000_000
     )
     gemini_file_poll_interval_seconds: int = worker_config_value(
         "gemini_file_poll_interval_seconds", 5
@@ -173,7 +176,13 @@ class Settings(BaseSettings):
         default=worker_config_value("max_video_duration_seconds", 90),
         validation_alias=AliasChoices("MAX_VIDEO_DURATION_SECONDS", "MAX_VIDEO_SECONDS"),
     )
-    max_video_size_mb: int = worker_config_value("max_video_size_mb", 30)
+    preferred_video_size_mb: int = worker_config_value(
+        "preferred_video_size_mb", 36
+    )
+    max_video_size_mb: int = worker_config_value("max_video_size_mb", 50)
+    media_adaptive_max_attempts: int = worker_config_value(
+        "media_adaptive_max_attempts", 4
+    )
     enable_social_video: bool = False
     enable_yt_dlp: bool = False
     cookie_dir: str = "/app/cookies"
@@ -212,7 +221,8 @@ class Settings(BaseSettings):
     ytdlp_enable_impersonation: bool = False
     enable_ytdlp_stdout_fallback: bool = False
     max_memory_buffer_mb: int = 35
-    max_video_height: int = 720
+    max_video_height: int = worker_config_value("max_video_height", 720)
+    min_video_height: int = worker_config_value("min_video_height", 360)
     thumbnail_bucket: str = worker_config_value("thumbnail_bucket", "recipe-thumbnails")
     use_source_thumbnail_first: bool = True
     store_raw_media: bool = False
@@ -290,6 +300,14 @@ class Settings(BaseSettings):
         return self.gemini_api_key is not None
 
     @property
+    def preferred_video_size_bytes(self) -> int:
+        return self.preferred_video_size_mb * 1024 * 1024
+
+    @property
+    def max_video_size_bytes(self) -> int:
+        return self.max_video_size_mb * 1024 * 1024
+
+    @property
     def tikwm_configured(self) -> bool:
         return self.enable_tikwm_resolver and bool(self.tikwm_api_url.strip())
 
@@ -333,6 +351,28 @@ class Settings(BaseSettings):
                     limits[model] = max(0, int(limit))
             return limits
         return value
+
+    @model_validator(mode="after")
+    def validate_media_limits(self) -> "Settings":
+        if self.preferred_video_size_mb <= 0:
+            raise ValueError("preferred_video_size_mb must be greater than 0")
+        if self.max_video_size_mb <= 0:
+            raise ValueError("max_video_size_mb must be greater than 0")
+        if self.preferred_video_size_mb > self.max_video_size_mb:
+            raise ValueError(
+                "preferred_video_size_mb must not exceed max_video_size_mb"
+            )
+        if self.max_video_size_bytes > self.gemini_file_max_size_bytes:
+            raise ValueError(
+                "max_video_size_mb must not exceed gemini_file_max_size_bytes"
+            )
+        if not 1 <= self.media_adaptive_max_attempts <= 4:
+            raise ValueError("media_adaptive_max_attempts must be between 1 and 4")
+        if not 360 <= self.min_video_height <= self.max_video_height <= 720:
+            raise ValueError(
+                "video height limits must satisfy 360 <= min <= max <= 720"
+            )
+        return self
 
     @field_validator("worker_mode", mode="before")
     @classmethod

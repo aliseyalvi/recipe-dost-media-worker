@@ -1079,3 +1079,34 @@ git diff --check
 ```
 
 No Render deploy, live Sentry event, live Supabase/Gemini call, real URL processing, or production action was performed.
+
+## M23.W2 adaptive media and terminal outcomes
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+# passed: 47 tests covering adaptive selection/download guards/cleanup,
+# incident success and terminal fixtures, existing DB failure fields, queue
+# terminal behavior, Sentry policy/grouping/sanitization, and DSN isolation
+
+.venv/bin/python -m pytest -q
+# unavailable: the existing virtual environment has no pytest module; no
+# dependency was installed. Full unittest discovery above is the repository's
+# available suite.
+
+python3 -m compileall app scripts
+.venv/bin/python scripts/check_process_job_queue_mode.py
+.venv/bin/python scripts/check_recipe_tags.py
+.venv/bin/python -m pip check
+git diff --check
+# passed
+
+.venv/bin/python scripts/check_runtime_config.py development
+.venv/bin/python scripts/check_runtime_config.py production
+.venv/bin/python scripts/validate_env.py development --example
+.venv/bin/python scripts/validate_env.py production --example
+make check-dev
+# passed with masked/safe output
+```
+
+No production URL/media, Supabase, Gemini, Sentry transport, Render deployment,
+mobile write, `main` checkout/merge, or live job was used.

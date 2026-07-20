@@ -122,6 +122,29 @@ def _runtime_checks(
         if environment == "production" and max_duration == 90:
             errors.append("production max_video_duration_seconds still matches fallback 90")
 
+    try:
+        preferred_size = int(_effective_value(config, "PREFERRED_VIDEO_SIZE_MB") or 0)
+        hard_size = int(_effective_value(config, "MAX_VIDEO_SIZE_MB") or 0)
+        adaptive_attempts = int(
+            _effective_value(config, "MEDIA_ADAPTIVE_MAX_ATTEMPTS") or 0
+        )
+        min_height = int(_effective_value(config, "MIN_VIDEO_HEIGHT") or 0)
+        max_height = int(_effective_value(config, "MAX_VIDEO_HEIGHT") or 0)
+    except (TypeError, ValueError):
+        checks["media_size_policy"] = "invalid"
+        errors.append("media size policy values must be integers")
+    else:
+        checks["preferred_video_size_mib"] = str(preferred_size)
+        checks["hard_video_size_mib"] = str(hard_size)
+        checks["media_adaptive_max_attempts"] = str(adaptive_attempts)
+        checks["video_height_range"] = f"{min_height}-{max_height}"
+        if not 0 < preferred_size <= hard_size:
+            errors.append("media size limits must satisfy 0 < preferred <= hard")
+        if not 1 <= adaptive_attempts <= 4:
+            errors.append("media_adaptive_max_attempts must be between 1 and 4")
+        if not 360 <= min_height <= max_height <= 720:
+            errors.append("video height limits must satisfy 360 <= min <= max <= 720")
+
     return checks, errors
 
 
@@ -197,6 +220,9 @@ def print_summary(summary: dict[str, object]) -> None:
             "worker_execution_mode",
             "enable_unified_ytdlp_stream_extractor",
             "max_video_duration_seconds",
+            "preferred_video_size_mib",
+            "hard_video_size_mib",
+            "media_adaptive_max_attempts",
             "raw_url_logging_enabled",
         ):
             print(f"  {key}={runtime_checks.get(key)}")

@@ -11,8 +11,8 @@ The worker may extract safe metadata, create temporary server-side media files f
 ## Current Architecture
 
 - Render web service: `recipe-dost-media-worker`
-- Branch to merge: `feature/queue-ytdlp-poc`
-- Production after merge: run the worker from `main`
+- Development branch/service: `develop`
+- Production branch/service: `main`
 - Primary flow: `WORKER_EXECUTION_MODE=queue`
 - Wake/probes: `GET /wake`, `GET /ping`, `GET /health`
 - Legacy/manual/debug: `POST /process-job`
@@ -23,6 +23,9 @@ The worker may extract safe metadata, create temporary server-side media files f
 
 - YouTube: queue job -> oEmbed metadata -> Gemini native URL input when `YOUTUBE_AI_INPUT_MODE=gemini_url` -> structured recipe card.
 - TikTok/Instagram: queue job -> unified extractor -> verified temp file -> Gemini Files API -> structured recipe card -> temp file deleted.
+- Unified social extraction selects combined audio/video formats by estimated
+  size through 720p -> 540p -> 480p -> 360p. Preferred target is 36 MiB and the
+  streaming/temp-file hard limit is 50 MiB; `*_MB` names use binary MiB.
 - Mock fixture mode: `AI_ANALYSIS_MODE=mock_fixture` skips Gemini and saves `app/fixtures/mock_recipe_card.json` through the same recipe-card save path.
 
 ## Production Defaults
@@ -34,6 +37,10 @@ The worker may extract safe metadata, create temporary server-side media files f
 - `YOUTUBE_AI_INPUT_MODE=gemini_url`
 - `ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true`
 - `MEDIA_EXTRACT_OUTPUT_MODE=temp_file`
+- `PREFERRED_VIDEO_SIZE_MB=36`
+- `MAX_VIDEO_SIZE_MB=50`
+- `MEDIA_ADAPTIVE_MAX_ATTEMPTS=4`
+- `MIN_VIDEO_HEIGHT=360`, `MAX_VIDEO_HEIGHT=720`
 - `LOCAL_BRIEF_PARSER_ENABLED=false`
 - `STORE_RAW_MEDIA=false`
 

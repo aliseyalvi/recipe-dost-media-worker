@@ -24,7 +24,7 @@ from app.job_runner import (
     platform_for_job,
     save_mock_recipe_card_for_job,
 )
-from app.observability.sentry import report_worker_error
+from app.observability.sentry import report_terminal_worker_outcome, report_worker_error
 from app.recipe_tags import has_required_recipe_tags, normalize_recipe_tags
 from app.schemas import (
     GeminiRecipeResult,
@@ -431,7 +431,8 @@ def process_queue_job(
                     "Unified yt-dlp extractor failed.",
                     safe_extract_event_metadata(extract_result, error_code=error_code),
                 )
-            raise QueueJobFailure(
+            technical_exception = extract_result.get("_technical_exception")
+            failure = QueueJobFailure(
                 error_code,
                 str(
                     extract_result.get("safe_error_message")
@@ -442,7 +443,16 @@ def process_queue_job(
                     if extract_result.get("metadata_fallback_attempted")
                     else current_stage
                 ),
+                exception_type=(
+                    type(technical_exception).__name__
+                    if isinstance(technical_exception, Exception)
+                    else None
+                ),
+                metadata=terminal_extractor_metadata(extract_result),
             )
+            if isinstance(technical_exception, Exception):
+                raise failure from technical_exception
+            raise failure
         add_event(
             repository,
             job.id,
@@ -540,7 +550,55 @@ def process_queue_job(
             },
         )
     except QueueJobFailure as exc:
-        report_queue_job_failure(exc, platform)
+        if exc.code == "media_size_exceeded":
+            sentry_event_id = report_terminal_worker_outcome(
+                error_code=exc.code,
+                source_platform=platform,
+                duration_bucket=str_or_none(exc.metadata.get("duration_bucket")),
+                size_bucket=str_or_none(exc.metadata.get("size_bucket")),
+                selected_resolution_bucket=str_or_none(
+                    exc.metadata.get("selected_resolution_bucket")
+                ),
+                adaptive_attempt_count=(
+                    safe_int_or_none(exc.metadata.get("adaptive_attempt_count")) or 0
+                ),
+                cookie_retry_used=bool(exc.metadata.get("cookie_retry_used")),
+            )
+            logger.warning(
+                "worker_outcome",
+                extra={
+                    "stage": "unified_extractor",
+                    "error_code": exc.code,
+                    "source_platform": platform,
+                    "attempts": safe_int_or_none(
+                        exc.metadata.get("adaptive_attempt_count")
+                    )
+                    or 0,
+                    "duration_bucket": exc.metadata.get("duration_bucket") or "unknown",
+                    "size_bucket": exc.metadata.get("size_bucket") or "unknown",
+                    "selected_resolution_bucket": (
+                        exc.metadata.get("selected_resolution_bucket") or "unknown"
+                    ),
+                    "terminal": True,
+                    "sentry_event_id": sentry_event_id or "none",
+                },
+            )
+        technical_sentry_event_id = report_queue_job_failure(exc, platform)
+        if exc.__cause__ is not None or exc.exception_type is not None:
+            logger.error(
+                "worker_outcome",
+                extra={
+                    "stage": sentry_stage(exc.stage),
+                    "error_code": exc.code,
+                    "source_platform": platform,
+                    "attempts": safe_int_or_none(
+                        exc.metadata.get("adaptive_attempt_count")
+                    )
+                    or 0,
+                    "terminal": True,
+                    "sentry_event_id": technical_sentry_event_id or "none",
+                },
+            )
         record_queue_failure_with_reporting(
             repository,
             job.id,
@@ -3864,6 +3922,13 @@ def safe_extract_event_metadata(
         "video_bytes_verified": result.get("video_bytes_verified"),
         "output_mode": result.get("output_mode"),
         "cookie_mode": result.get("cookie_mode"),
+        "adaptive_attempt_count": result.get("adaptive_attempt_count"),
+        "format_candidate_count": result.get("format_candidate_count"),
+        "selected_resolution_bucket": result.get("selected_resolution_bucket"),
+        "estimated_size_bucket": result.get("estimated_size_bucket"),
+        "actual_size_bucket": result.get("actual_size_bucket"),
+        "duration_bucket": result.get("duration_bucket"),
+        "size_fallback_used": bool(result.get("size_fallback_used")),
     }
     if error_code is not None:
         metadata["error_code"] = error_code
@@ -4046,12 +4111,15 @@ def sentry_boundary_for_stage(stage: str) -> tuple[str, str]:
     return "worker_loop", "process_job"
 
 
-def report_queue_job_failure(exc: QueueJobFailure, source_platform: str) -> None:
+def report_queue_job_failure(
+    exc: QueueJobFailure,
+    source_platform: str,
+) -> str | None:
     error = exc.__cause__ or exc
     if exc.exception_type is None and exc.__cause__ is None:
-        return
+        return None
     feature, operation = sentry_boundary_for_stage(exc.stage)
-    report_worker_error(
+    return report_worker_error(
         error,
         feature=feature,
         operation=operation,
@@ -4224,8 +4292,29 @@ def safe_terminal_metadata(metadata: dict[str, object]) -> dict[str, object]:
         "fallback_model",
         "fallback_model_used",
         "safe_error_message",
+        "duration_bucket",
+        "size_bucket",
+        "selected_resolution_bucket",
+        "adaptive_attempt_count",
+        "cookie_retry_used",
     }
     return {key: metadata[key] for key in allowed if key in metadata}
+
+
+def terminal_extractor_metadata(result: dict[str, object]) -> dict[str, object]:
+    return {
+        "duration_bucket": result.get("duration_bucket") or "unknown",
+        "size_bucket": (
+            result.get("actual_size_bucket")
+            or result.get("estimated_size_bucket")
+            or "unknown"
+        ),
+        "selected_resolution_bucket": (
+            result.get("selected_resolution_bucket") or "unknown"
+        ),
+        "adaptive_attempt_count": result.get("adaptive_attempt_count") or 0,
+        "cookie_retry_used": bool(result.get("cookie_retry_attempted")),
+    }
 
 
 def delete_temp_media(temp_file_path: str | None) -> bool:

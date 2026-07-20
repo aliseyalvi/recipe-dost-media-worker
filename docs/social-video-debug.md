@@ -32,6 +32,14 @@
 - M22D.5E fixes the config loading layer beneath the resolver path. Production `/health` showed queue-wake code but fallback config values because Docker did not copy `config/`; Render env was clean. After redeploy, first verify `/health.safe_config.config_source.loaded_files` contains `worker.defaults.json` and `worker.production.json` before social smoke tests.
 - M22D.5F completes production worker smoke testing. `/health` confirmed production config was loaded, queue wake compatibility was active, unified extractor/cookie flags were enabled, raw URL logging stayed false, and max duration stayed 120 seconds. Production YouTube, Instagram, and TikTok AI recipe generation all passed end to end.
 - M22E.0B adds branch/env safety checks only; resolver behavior is unchanged. Dev Render tracks `develop`, prod Render tracks `main`, and production deploy checks must be run from `main` unless the one-command `ALLOW_NON_MAIN_PROD_DEPLOY=1` override is deliberately used.
+- M23.W2 fixes the active unified extractor's portrait selection and oversize
+  visibility. The old `best[height<=720]/best` fallback excluded portrait
+  720x1280 and could choose 1080x1920. The queue path now inspects metadata,
+  pins combined audio/video IDs, targets 36 MiB, tries at most four decreasing
+  short-edge buckets (720/540/480/360), and aborts/removes partials beyond 50
+  MiB. Terminal size exhaustion persists `media_size_exceeded`, logs one safe
+  WARNING, and groups one warning occurrence per failed job in worker Sentry;
+  intermediate fallbacks do not capture. See `docs/m23-adaptive-media.md`.
 
 ## TikTok / TikWM Finding
 

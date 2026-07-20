@@ -51,13 +51,25 @@
 | 47 | M22E.0B Worker branch and environment safety | Done | Safe env doctor, branch guard, Make checks, and dev/prod Render branch workflow docs |
 | 48 | M22E.1R-B AI-generated tags end-to-end | In Progress | Pushed to `develop`; active queue Gemini tag contract, normalization, and `recipe_cards.tags_json` persistence; development Render/database smoke awaits authenticated verification |
 | 49 | M22E.2C Privacy-safe worker Sentry monitoring | Done | Explicit active-queue-only Python Sentry capture, fail-closed production/development branch policy, strict sanitizer, and controlled development verification command |
-| 50 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 51 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 52 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 50 | M23.W2 Adaptive media processing and worker outcomes | Done locally | Size-aware 720p-to-360p selection, 36/50 MiB guards, Build 3-compatible failure persistence, safe Render logs, and grouped terminal Sentry warnings; staged Render verification pending |
+| 51 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 52 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 53 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Continue in the app repo with M22C.3 RevenueCat + Google Play billing setup.
+Verify M23.W2 first on the development Render service from `develop`; do not
+promote to the production `main` service until the staged checks in
+`docs/m23-adaptive-media.md` pass.
+
+- M23.W2 is complete locally. Active queue social extraction now pins
+  size-estimated combined audio/video formats through a bounded
+  720p/540p/480p/360p ladder, with a 36 MiB preferred target and 50 MiB hard
+  streaming/temp-file guard. Terminal `media_size_exceeded` persists the
+  existing code/message fields, produces one grouped privacy-safe warning in
+  production Sentry, and emits a searchable Render WARNING. Build 3 still uses
+  generic copy for this code and requires a later mobile update for improved
+  wording. No deployment or mobile change was performed.
 
 - M22E.1R-B is in progress on worker `develop` and commit `d3b29b3` is pushed. The queue structured prompt/schema now requires 5-8 searchable tags and `MediaJobRepository.insert_recipe_card` writes the normalized array to the existing `recipe_cards.tags_json` JSONB field. Local normalization and persistence-mapper smoke tests pass. The Render dashboard is unauthenticated in this workspace, so deployment observation and a disposable development job/card query remain pending. Next: authenticate to the development Render dashboard, verify the `develop` revision, then create one disposable development AI media job and confirm only its linked card's 5-8 compliant `tags_json` shape/count; do not deploy production.
 

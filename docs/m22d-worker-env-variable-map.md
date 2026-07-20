@@ -39,6 +39,7 @@ These moved to committed JSON config. Existing Render env values with the same n
 | `ENABLE_YTDLP_COOKIES` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | optional | moved | Default false. |
 | `GEMINI_EXTRACTION_MODE` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default `single_pass_structured`. |
 | `GEMINI_FALLBACK_MODEL` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default `gemini-2.5-flash`. |
+| `GEMINI_FILE_MAX_SIZE_BYTES` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | provider guard | moved | Default 2,000,000,000 bytes; worker hard limit cannot exceed it. |
 | `GEMINI_FILE_MAX_WAIT_SECONDS` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default 120. |
 | `GEMINI_FILE_POLL_INTERVAL_SECONDS` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default 5. |
 | `GEMINI_FILE_UPLOAD_TIMEOUT_SECONDS` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default 120. |
@@ -59,14 +60,18 @@ These moved to committed JSON config. Existing Render env values with the same n
 | `GEMINI_VIDEO_MODEL` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | optional | moved | Default null; effective model falls back to primary. |
 | `LOCAL_BRIEF_PARSER_ENABLED` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | fallback | moved | Default false. |
 | `MAX_VIDEO_DURATION_SECONDS` | config/default/env override | `app/config.py`, multiple worker paths | no | no | yes | moved | Default 120; validator enforces `<= 120`. |
+| `MAX_VIDEO_HEIGHT` | config/default/env override | `app/config.py`, `app/social/stream_download.py` | no | no | yes | moved | Default 720 short-edge pixels. |
 | `MAX_VIDEO_SECONDS` | env override alias | `app/config.py`, legacy env | no | no | yes | legacy alias | Still accepted as alias for `MAX_VIDEO_DURATION_SECONDS`; do not use in new env files. |
-| `MAX_VIDEO_SIZE_MB` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | yes | moved | Default 30. |
+| `MAX_VIDEO_SIZE_MB` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | yes | moved | Hard default 50 MiB; historical name says MB but conversion is binary MiB. |
+| `MEDIA_ADAPTIVE_MAX_ATTEMPTS` | config/default/env override | `app/config.py`, `app/social/stream_download.py` | no | no | yes | moved | Default and maximum 4 bounded format attempts. |
 | `MEDIA_EXTRACT_OUTPUT_MODE` | config/default/env override | `app/config.py`, `app/social/stream_download.py` | no | no | yes | moved | Default `temp_file`. |
+| `MIN_VIDEO_HEIGHT` | config/default/env override | `app/config.py`, `app/social/stream_download.py` | no | no | yes | moved | Default 360 short-edge pixels. |
 | `MOCK_ANALYSIS_DELAY_MS` | config/default/env override | `app/config.py`, `app/job_runner.py` | no | no | mock/dev | moved | Default 500. |
 | `MOCK_RECIPE_FIXTURE_PATH` | config/default/env override | `app/config.py`, `app/job_runner.py` | no | no | mock/dev | moved | Default `app/fixtures/mock_recipe_card.json`. |
 | `MOCK_VIDEO_PROCESSING_MODE` | config/default/env override | `app/config.py`, `app/job_runner.py`, `app/main.py` | no | no | mock/dev | moved | Default `skip_video_download`. |
 | `QUEUE_EMPTY_SLEEP_SECONDS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default 5. |
 | `QUEUE_POLL_INTERVAL_SECONDS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default 5. |
+| `PREFERRED_VIDEO_SIZE_MB` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | yes | moved | Soft default 36 MiB; historical name says MB but conversion is binary MiB. |
 | `REAL_AI_FALLBACK_TO_MOCK` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | fallback | moved | Default false; production config must keep false. |
 | `RECIPE_BILINGUAL_OUTPUT_ENABLED` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default true. |
 | `RECIPE_CARD_NORMALIZATION_ENABLED` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default true. |
