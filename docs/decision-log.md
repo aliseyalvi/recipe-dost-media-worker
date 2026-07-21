@@ -1,5 +1,19 @@
 # Decision Log
 
+## 2026-07-21 — M23.W3C-R file-based resolver configuration
+
+- Root cause was a partial Settings source: scalar resolver fields read JSON in
+  their defaults, while chains and CDN suffix lists used empty factories. The
+  merged JSON object is now a Pydantic source, so every matching field loads.
+- Canonical file chains are JSON arrays; non-blank env overrides may remain
+  comma-separated, while blank overrides are ignored. Unknown keys/types and
+  adapter IDs fail closed.
+- On Render, `develop` selects development and `main` selects production through
+  existing branch metadata. `APP_ENV` is optional there and must agree when set.
+  Production remains external-disabled and requires no provider credentials.
+- Local tests use Python 3.12 and root `requirements.txt`. No provider call,
+  deployment, Render mutation, mobile/schema change, or main merge occurred.
+
 ## 2026-07-21 — M23.W3C external resolver implementation
 
 - The active queue now receives only provider-neutral resolutions. Instagram

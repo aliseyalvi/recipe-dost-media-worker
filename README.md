@@ -47,6 +47,11 @@ TIKTOK_AKNG_ACCESS_TOKEN=replace-with-rotated-development-token
 
 Non-secret runtime settings live in `config/worker.defaults.json` with environment overrides in `config/worker.development.json` and `config/worker.production.json`. Existing Render env vars still override config during the migration window.
 
+Render can select the file from its existing branch metadata (`develop` ->
+development, `main` -> production), so `APP_ENV` is optional there. If retained,
+it must agree with the branch. Blank environment values are ignored rather than
+erasing file values.
+
 Render export maps `MEDIA_WORKER_SHARED_SECRET` to runtime `WORKER_API_SECRET`. See [docs/m22d-worker-env-variable-map.md](docs/m22d-worker-env-variable-map.md) before removing old Render env keys.
 
 ## Privacy-Safe Worker Sentry
@@ -234,17 +239,25 @@ See [docs/m23-w3-external-media-routing-plan.md](docs/m23-w3-external-media-rout
 ## Validation
 
 ```bash
-python3 -m compileall app scripts
-python3 scripts/check_runtime_config.py development
-python3 scripts/check_environment.py development
+python3.12 -m compileall app scripts
+python3.12 scripts/check_runtime_config.py development
+INSTAGRAM_RAPIDAPI_KEY=dummy-development-key \
+TIKTOK_AKNG_ACCESS_TOKEN=dummy-development-token \
+python3.12 scripts/check_external_resolver_config.py development
+python3.12 scripts/check_environment.py development
 ```
 
 Production preflight from `main`:
 
 ```bash
-python3 scripts/check_runtime_config.py production
-python3 scripts/check_environment.py production
+python3.12 scripts/check_runtime_config.py production
+python3.12 scripts/check_external_resolver_config.py production
+python3.12 scripts/check_environment.py production
 ```
+
+Use `make resolver-config-docker` for the Render-like image check. It passes no
+resolver mode, audience, chain, cookie-fallback, or YouTube-direct environment
+overrides.
 
 ## Deploy Note
 

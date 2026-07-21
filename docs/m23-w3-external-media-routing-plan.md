@@ -972,3 +972,81 @@ Remaining owner verification before live development traffic:
   worker probes regardless)
 - confirm AKNG token/query contract and whether a status/idempotency endpoint
   exists for ambiguous provider timeouts
+
+## 20. M23.W3C-R file-based configuration remediation
+
+The Render startup failure was a partial Settings-source bug, not a missing
+Docker `COPY`. `/service/config/worker.development.json` was loaded, and fields
+whose class defaults called `worker_config_value()`—mode, audience, cookie
+fallback, YouTube direct, and provider endpoints—received file values. The two
+adapter chains and both CDN suffix lists instead used empty Pydantic
+`default_factory` values. The merged JSON dictionary was never supplied as a
+Pydantic settings source, so those four JSON keys could not populate Settings.
+
+The repair adds the merged JSON as a real Pydantic source. Effective Settings
+precedence is now:
+
+1. explicit constructor arguments
+2. non-blank process environment variables
+3. non-blank `.env` values
+4. `worker.<environment>.json` over `worker.defaults.json`
+5. file secrets, when configured by Pydantic
+6. model defaults
+
+Blank environment strings are treated as absent and cannot erase JSON values.
+JSON adapter chains have one canonical representation: arrays of non-empty
+strings. Comma-separated process-environment overrides remain supported for
+backward compatibility. Unknown environment-file keys, wrong list types, and
+unknown adapter identifiers fail closed.
+
+The canonical file keys are uppercase
+`MEDIA_RESOLVER_MODE`, `EXTERNAL_MEDIA_RESOLVER_AUDIENCE`,
+`INSTAGRAM_RESOLVER_CHAIN`, `TIKTOK_RESOLVER_CHAIN`,
+`COOKIE_MEDIA_FALLBACK_ENABLED`, and `YOUTUBE_DIRECT_GEMINI_ENABLED`. Their
+Settings fields are the exact lowercase snake-case equivalents. They have no
+custom aliases; Pydantic Settings supplies the normal case-insensitive
+environment mapping. Chain JSON values are arrays, while only environment
+overrides may be comma-separated strings.
+
+Runtime selection uses `APP_ENV` when explicitly present; otherwise Render's
+existing `RENDER_GIT_BRANCH` maps `develop` to development and `main` to
+production. Conflicting selectors, an unknown/missing Render branch, a missing
+selected file, malformed JSON, or an empty selected file fail startup. Local
+execution without Render identity or `APP_ENV` defaults to development.
+
+Safe diagnostics:
+
+```bash
+INSTAGRAM_RAPIDAPI_KEY=dummy-development-key \
+TIKTOK_AKNG_ACCESS_TOKEN=dummy-development-token \
+python scripts/check_external_resolver_config.py development
+
+python scripts/check_external_resolver_config.py production
+make resolver-config-docker
+```
+
+The diagnostic reports only selected environment/path, normalized non-secret
+resolver values and their sources, secret-presence booleans, and a safe
+pass/fail reason. The Docker target supplies only dummy provider credentials
+for development and relies on `RENDER_GIT_BRANCH`; it passes none of the six
+resolver feature settings. The image includes `/service/app`, `/service/config`,
+and `/service/scripts` and uses the same root `requirements.txt` as local setup.
+
+Canonical local setup is Python 3.12, matching `FROM python:3.12-slim`:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python --version
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+Development Render requires its established worker/Supabase/Gemini secrets plus
+`INSTAGRAM_RAPIDAPI_KEY` and `TIKTOK_AKNG_ACCESS_TOKEN`. It does not require
+environment copies of resolver mode, audience, chains, cookie fallback, or
+YouTube direct routing. `RENDER_GIT_BRANCH=develop` is automatic Render metadata,
+not an owner-managed feature variable. Production remains legacy mode,
+external audience disabled, empty chains, cookie fallback false, and requires
+no provider credentials. The unresolved legacy Instagram selector is parked.

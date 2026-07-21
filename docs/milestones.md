@@ -54,18 +54,27 @@
 | 50 | M23.W2 Adaptive media processing and worker outcomes | Done locally | Size-aware 720p-to-360p selection, 36/50 MiB guards, Build 3-compatible failure persistence, safe Render logs, and grouped terminal Sentry warnings; staged Render verification pending |
 | 51 | M23.W2B Direct Instagram media candidate regression | Done locally | Normalize formats/requested/top-level candidates, preserve unknown audio until bounded post-download probe, and add safe beta outcome telemetry; development verification pending |
 | 52 | M23.W3A External media resolver architecture | Done locally | Audit-only metadata/AI separation, provider-neutral resolver contract, Build 3-compatible routing, security, observability, rollout, and rollback plan |
-| 53 | M23.W3C Feature-flagged external media resolver | Done locally | Instagram Reels13 and TikTok AKNG adapters, guarded download/probe/mux, active-queue routing, no-cookie metadata, quota guard, fixtures, and rollback flags; development live verification pending |
-| 54 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 55 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 56 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 53 | M23.W3C Feature-flagged external media resolver | Committed to develop | Instagram Reels13 and TikTok AKNG adapters, guarded download/probe/mux, active-queue routing, no-cookie metadata, quota guard, fixtures, and rollback flags |
+| 54 | M23.W3C-R File-based resolver config remediation | In progress | Repair partial JSON-to-Settings loading, add safe source diagnostics and Python 3.12/Docker regression validation |
+| 55 | M23.W3D Development resolver verification | Blocked | Wait for Docker config check plus successful development Render startup before any live provider job |
+| 56 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 57 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 58 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Rotate the exposed TikTok token, install separate development-only provider
-secrets in the development Render service, review the committed CDN suffix
-policies, then run the bounded development procedure in
-`docs/m23-w3-external-media-routing-plan.md`. Do not enable production traffic
-until those results and owner plan limits are reviewed.
+Run `make resolver-config-docker` on a Docker-capable host. If both file-based
+diagnostics pass, redeploy the reviewed `develop` revision to the development
+Render service and confirm its one safe startup summary before any provider job.
+M23.W3D remains blocked until both checks succeed. Production stays unchanged.
+
+- M23.W3C-R root cause is repaired locally: mode/audience loaded because their
+  Settings defaults queried JSON, while chains and CDN suffix lists used empty
+  factories and never received the merged file. JSON is now a real Settings
+  source, branch/file mismatches fail closed, and diagnostics/tests cover file
+  arrays, comma env overrides, blank values, missing/malformed files, startup,
+  and production isolation. Python 3.12 tests pass; Docker execution remains
+  pending because this machine has no Docker executable.
 
 - M23.W3C is complete locally. Development config selects external resolution
   for all already-authorized AI jobs; production remains legacy/disabled with

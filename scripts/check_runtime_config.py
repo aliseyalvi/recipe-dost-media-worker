@@ -27,7 +27,10 @@ def _bool_value(value: Any) -> bool:
 
 
 def _effective_value(config: dict[str, Any], key: str) -> Any:
-    return os.environ.get(key, config.get(key))
+    environment_value = os.environ.get(key)
+    if environment_value is None or not environment_value.strip():
+        return config.get(key)
+    return environment_value
 
 
 def _read_environment_config(environment: str) -> dict[str, Any]:

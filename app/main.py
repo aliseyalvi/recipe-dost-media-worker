@@ -375,7 +375,7 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
         "gemini_video_model": settings.effective_gemini_video_model,
         "gemini_text_model": settings.effective_gemini_text_model,
         "raw_url_logging_enabled": settings.allow_raw_url_logs,
-        "config_source": worker_config_report(settings.app_env),
+        "config_source": safe_config_source_summary(settings),
         "mock_fallback": {
             "ai_analysis_mode": settings.ai_analysis_mode,
             "real_ai_fallback_to_mock": settings.real_ai_fallback_to_mock,
@@ -385,6 +385,32 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
             "allow_mock_completion_without_video": (
                 settings.allow_mock_completion_without_video
             ),
+        },
+    }
+
+
+def safe_config_source_summary(settings: Settings) -> dict[str, object]:
+    report = worker_config_report(settings.app_env)
+    all_sources = report.get("field_sources")
+    source_map = all_sources if isinstance(all_sources, dict) else {}
+    resolver_keys = (
+        "MEDIA_RESOLVER_MODE",
+        "EXTERNAL_MEDIA_RESOLVER_AUDIENCE",
+        "INSTAGRAM_RESOLVER_CHAIN",
+        "TIKTOK_RESOLVER_CHAIN",
+        "COOKIE_MEDIA_FALLBACK_ENABLED",
+        "YOUTUBE_DIRECT_GEMINI_ENABLED",
+    )
+    return {
+        "app_env": report.get("app_env"),
+        "environment_selection_source": report.get("environment_selection_source"),
+        "selected_config_display_path": report.get("selected_config_display_path"),
+        "selected_config_exists": report.get("selected_config_exists"),
+        "selected_config_loaded": report.get("selected_config_loaded"),
+        "loaded_files": report.get("loaded_files", []),
+        "missing_files": report.get("missing_files", []),
+        "resolver_field_sources": {
+            key.lower(): source_map.get(key, "model_default") for key in resolver_keys
         },
     }
 

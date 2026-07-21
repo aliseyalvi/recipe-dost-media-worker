@@ -2,6 +2,11 @@
 
 ## Current Status
 
+- M23.W3C-R repairs the development startup failure: the JSON file was loaded,
+  but chain and CDN-suffix Settings fields used empty factories instead of the
+  merged file source. File-based loading now covers all resolver fields and
+  safely reports their sources. The legacy Instagram selector remains
+  unresolved and parked; it is not re-enabled as the development default.
 - M23.W3C supersedes the unresolved legacy Instagram selector for new external
   traffic. `rapidapi_instagram_reels13` and `akng_tiktok` are implemented behind
   environment-specific config, with signed URLs held only in memory, structured

@@ -1187,3 +1187,40 @@ credential. The supplied TikTok token was not written and must be revoked and
 rotated. No provider/media/Gemini/Supabase/Sentry network call, Render action,
 deployment, dependency installation, schema/mobile change, branch switch,
 commit, push, or `main` merge occurred.
+
+## M23.W3C-R file-based resolver configuration
+
+```bash
+uv venv --python 3.12 /private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv
+uv pip install --python /private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv/bin/python -r requirements.txt
+# Python 3.12.13; installed from the same requirements.txt used by Docker
+
+/private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv/bin/python \
+  -m unittest discover -s tests -p "test_*.py" -q
+# passed: 117 tests, 0 failures, 0 errors, 0 skipped, exit 0
+
+/private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv/bin/python -m compileall app scripts
+/private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv/bin/python -m pip check
+/private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv/bin/python scripts/check_process_job_queue_mode.py
+/private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv/bin/python scripts/check_recipe_tags.py
+git diff --check
+# passed
+
+# Development diagnostic: RENDER=true, RENDER_GIT_BRANCH=develop, and dummy
+# provider credentials only. Production diagnostic: main branch metadata and
+# no provider credentials. Both passed and sourced all six resolver controls
+# from the matching config file.
+
+make resolver-config-docker
+# not executed: this Mac has no Docker executable; make exited 1 before build
+
+# A /service layout containing the Dockerfile COPY inputs (app/config/scripts)
+# was exercised with Python 3.12. Both development and production diagnostics
+# passed. This is not recorded as a Docker build pass.
+```
+
+The secret-pattern scan found no token-shaped credential. Signed-URL markers
+matched only deliberate `secret.invalid`/`provider.invalid` sanitizer and SSRF
+test strings. No actual provider secret was read or printed. No provider,
+Gemini, Supabase, or Sentry call, deployment, Render mutation, mobile/schema
+change, branch switch, commit, push, or main merge occurred.

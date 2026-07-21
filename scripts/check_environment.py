@@ -73,7 +73,10 @@ def _host_only(url: str | None) -> str:
 
 
 def _effective_value(config: dict[str, Any], key: str) -> Any:
-    return os.environ.get(key, config.get(key))
+    environment_value = os.environ.get(key)
+    if environment_value is None or not environment_value.strip():
+        return config.get(key)
+    return environment_value
 
 
 def _bool_value(value: Any) -> bool:

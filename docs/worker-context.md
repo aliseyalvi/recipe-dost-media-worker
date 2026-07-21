@@ -63,6 +63,12 @@ adapter `akng_tiktok`. Provider credentials stay only in Render secrets. A
 production canary must first switch to a selected-test-user audience; do not
 copy development credentials to production.
 
+Runtime config selection uses Render's existing branch metadata when `APP_ENV`
+is absent: `develop` loads `config/worker.development.json`, and `main` loads
+`config/worker.production.json`. Conflicts, missing selected files, malformed
+JSON, unknown keys/types, and unknown adapters fail closed. Blank environment
+values do not erase file values.
+
 ## Guardrails
 
 - Preserve Gemini quota guards before every Gemini call.

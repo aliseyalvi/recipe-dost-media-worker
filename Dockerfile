@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY app ./app
 COPY config ./config
+COPY scripts ./scripts
 
 EXPOSE 10000
 

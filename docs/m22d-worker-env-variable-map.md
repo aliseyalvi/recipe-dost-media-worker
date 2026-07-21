@@ -8,7 +8,7 @@ These remain in Render env groups and local `env/*.env` files.
 
 | Variable name | Source | Used by file | Required? | Secret? | Current worker path? | Status | Notes |
 |---|---|---|---:|---:|---:|---|---|
-| `APP_ENV` | env | `app/config.py`, `app/runtime_config.py`, `scripts/validate_env.py` | yes | no | yes | keep | Selects `config/worker.<env>.json`; must be `production` in prod. |
+| `APP_ENV` | env | `app/config.py`, `app/runtime_config.py`, `scripts/validate_env.py` | optional on Render | no | yes | keep if already present | Selects `config/worker.<env>.json`; when absent, Render branch metadata selects `develop` -> development and `main` -> production. If present, it must agree with the branch. |
 | `LOG_LEVEL` | env/config | `scripts/validate_env.py`, `config/worker.*.json` | yes | no | deploy convention | keep | Kept in env as environment identity; mirrored in config docs only. |
 | `SUPABASE_URL` | env | `app/config.py`, `app/supabase_client.py` | yes | no | yes | keep | Environment-specific Supabase URL. |
 | `SUPABASE_SERVICE_ROLE_KEY` | env | `app/config.py`, `app/supabase_client.py` | yes | yes | yes | keep | Server-only key; never reuse across dev/prod. |
@@ -21,6 +21,11 @@ These remain in Render env groups and local `env/*.env` files.
 | `TIKTOK_COOKIES_B64` | env | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | yes | optional | keep if needed | Cookie/private auth value; never commit. |
 | `SENTRY_DSN` | env | `app/observability/sentry.py` | production monitoring | yes | active queue observability | keep | Unset disables Sentry; never print or commit a real value. |
 | `SENTRY_DEV_TEST` | env | `app/observability/sentry.py`, `scripts/validate_env.py` | no | no | controlled verification only | keep false normally | May be `true` only for the one development verification command; production validation requires false. |
+| `INSTAGRAM_RAPIDAPI_KEY` | env | `app/config.py`, `app/media_resolvers/registry.py` | active development Instagram adapter | yes | external AI resolver | keep server-only | Required only when `rapidapi_instagram_reels13` can receive traffic. |
+| `TIKTOK_AKNG_ACCESS_TOKEN` | env | `app/config.py`, `app/media_resolvers/registry.py` | active development TikTok adapter | yes | external AI resolver | keep server-only | Required only when `akng_tiktok` can receive traffic. |
+
+The resolver mode, audience, both adapter chains, cookie fallback, and YouTube
+direct flag are config-only policy. Do not duplicate them in Render.
 
 ## Config Variables
 

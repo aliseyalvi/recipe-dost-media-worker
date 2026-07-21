@@ -4,10 +4,22 @@ from functools import lru_cache
 from typing import Annotated, Literal, Optional
 from urllib.parse import urlparse
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from app.runtime_config import worker_config_value
+from app.runtime_config import (
+    selected_worker_environment,
+    worker_config_report,
+    worker_config_value,
+    worker_settings_file_source,
+)
 
 WorkerMode = Literal[
     "skeleton",
@@ -45,8 +57,20 @@ REGISTERED_EXTERNAL_MEDIA_ADAPTERS = {
 }
 
 
+def _without_blank_values(source: object):
+    def load() -> dict[str, object]:
+        values = source()
+        return {
+            key: value
+            for key, value in values.items()
+            if not (isinstance(value, str) and not value.strip())
+        }
+
+    return load
+
+
 class Settings(BaseSettings):
-    app_env: str = "development"
+    app_env: str = selected_worker_environment()[0]
     runtime_platform: str = "cloud_run_compatible"
     worker_mode: WorkerMode = "skeleton"
     media_pipeline_mode: MediaPipelineMode = "youtube_direct"
@@ -346,7 +370,25 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        populate_by_name=True,
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        return (
+            init_settings,
+            _without_blank_values(env_settings),
+            _without_blank_values(dotenv_settings),
+            worker_settings_file_source,
+            file_secret_settings,
+        )
 
     @property
     def effective_gemini_video_model(self) -> str:
@@ -422,14 +464,20 @@ class Settings(BaseSettings):
 
     @field_validator("instagram_resolver_chain", "tiktok_resolver_chain")
     @classmethod
-    def validate_resolver_chain(cls, value: list[str]) -> list[str]:
+    def validate_resolver_chain(
+        cls,
+        value: list[str],
+        info: ValidationInfo,
+    ) -> list[str]:
         normalized: list[str] = []
         for adapter_id in value:
             item = str(adapter_id).strip().lower()
             if not item or item in normalized:
                 continue
             if item not in REGISTERED_EXTERNAL_MEDIA_ADAPTERS:
-                raise ValueError("resolver chain contains an unknown adapter")
+                raise ValueError(
+                    f"{info.field_name} contains unknown adapter identifier: {item}"
+                )
             normalized.append(item)
         if len(normalized) > 2:
             raise ValueError("resolver chain supports at most primary plus one fallback")
@@ -657,7 +705,13 @@ def validate_external_resolver_runtime_config(settings: Settings) -> None:
     if not settings.external_resolver_enabled:
         return
     if not settings.instagram_resolver_chain and not settings.tiktok_resolver_chain:
-        raise ValueError("external resolver audience requires at least one adapter chain")
+        report = worker_config_report(settings.app_env)
+        selected_path = report.get("selected_config_display_path", "unknown")
+        raise ValueError(
+            f"{settings.app_env.capitalize()} external resolver configuration is enabled, "
+            f"but no social adapter chain was loaded from {selected_path}. Expected at "
+            "least one of INSTAGRAM_RESOLVER_CHAIN or TIKTOK_RESOLVER_CHAIN."
+        )
     if "rapidapi_instagram_reels13" in settings.instagram_resolver_chain:
         if settings.instagram_rapidapi_key is None:
             raise ValueError("active Instagram resolver credentials are missing")

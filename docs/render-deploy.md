@@ -97,3 +97,44 @@ and direct YouTube true. Production secrets are separate. Roll back by setting
 the audience to `disabled`; no mobile release is required. Cookie rollback also
 requires legacy/hybrid mode, `COOKIE_MEDIA_FALLBACK_ENABLED=true`, and the
 existing cookie configuration.
+
+## M23.W3C-R configuration recovery
+
+The development service must load `/service/config/worker.defaults.json` and
+`/service/config/worker.development.json`. Render's automatic branch metadata
+selects `develop` -> development and `main` -> production; `APP_ENV` may remain
+only when it matches that branch. A conflict or missing/unknown Render branch
+fails closed.
+
+Do not add these values to the Render environment group:
+
+```text
+MEDIA_RESOLVER_MODE
+EXTERNAL_MEDIA_RESOLVER_AUDIENCE
+INSTAGRAM_RESOLVER_CHAIN
+TIKTOK_RESOLVER_CHAIN
+COOKIE_MEDIA_FALLBACK_ENABLED
+YOUTUBE_DIRECT_GEMINI_ENABLED
+```
+
+Before redeploy, run `make resolver-config-docker` on a machine with Docker.
+The development image check supplies only dummy provider credentials and branch
+metadata; the production check supplies no provider credentials. Expected safe
+development startup event is `worker_safe_config_summary` with config path
+`config/worker.development.json`, selection source `RENDER_GIT_BRANCH`, mode
+`external`, audience `all_authorized_ai`, adapters
+`rapidapi_instagram_reels13`/`akng_tiktok`, cookie fallback false, YouTube direct
+true, and both credential-presence booleans true.
+
+Owner recovery checklist:
+
+1. Confirm the service tracks `develop`.
+2. Keep the configured values of `INSTAGRAM_RAPIDAPI_KEY` and
+   `TIKTOK_AKNG_ACCESS_TOKEN` hidden and unchanged.
+3. Do not add the six resolver controls above to Render.
+4. Redeploy the latest reviewed `develop` commit manually after the Docker check
+   passes.
+5. Confirm the one safe startup summary before running any media job.
+
+Rollback is config-only: disable the development external audience in
+`worker.development.json` and redeploy. Do not enable cookie fallback.
