@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from pydantic import ValidationError
@@ -62,7 +64,56 @@ def candidates(info: dict[str, object], active: Settings | None = None):
     return stream_download.build_media_format_candidates(info, active or settings())
 
 
+def direct_incident_info(*, size: int | None = 42_996_054) -> dict[str, object]:
+    return {
+        "duration": 63,
+        "formats": [],
+        "requested_formats": [],
+        "url": "https://cdn.invalid/direct-media.mp4",
+        "ext": "mp4",
+        "width": 1080,
+        "height": 1920,
+        "filesize": size,
+        "protocol": "https",
+    }
+
+
 class FormatSelectionTests(unittest.TestCase):
+    def test_incident_top_level_direct_candidate_is_normalized_with_unknown_audio(self) -> None:
+        info = direct_incident_info()
+        normalized = stream_download.normalize_media_candidate_inputs(info)
+        selected = candidates(info)
+        attempts = stream_download.build_adaptive_attempts(selected, settings())
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0].source_type, "top_level_direct")
+        self.assertEqual(selected[0].audio_state, "audio_unknown")
+        self.assertIsNone(selected[0].format_id)
+        self.assertEqual(len(attempts), 1)
+
+    def test_requested_formats_are_normalized_and_top_level_duplicate_is_removed(self) -> None:
+        requested = media_format("requested", 720, size=MIB)
+        info = {
+            "duration": 30,
+            "formats": [],
+            "requested_formats": [requested],
+            **requested,
+        }
+        normalized = stream_download.normalize_media_candidate_inputs(info)
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0].source_type, "requested_formats")
+
+    def test_audio_tri_state(self) -> None:
+        self.assertEqual(
+            stream_download.classify_audio_state({"acodec": "aac"}),
+            "audio_present",
+        )
+        self.assertEqual(
+            stream_download.classify_audio_state({"acodec": "none"}),
+            "audio_absent",
+        )
+        self.assertEqual(stream_download.classify_audio_state({}), "audio_unknown")
+
     def test_1080_above_target_and_720_below_selects_720(self) -> None:
         info = {
             "duration": 63,
@@ -220,6 +271,27 @@ class DownloadError(Exception):
     pass
 
 
+class FakeDirectResponse:
+    def __init__(self, chunks: list[bytes], declared_size: int | None = None) -> None:
+        self.chunks = chunks
+        self.headers = (
+            {"content-length": str(declared_size)} if declared_size is not None else {}
+        )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def iter_content(self, chunk_size: int):
+        del chunk_size
+        yield from self.chunks
+
+
 class AdaptiveDownloadTests(unittest.TestCase):
     def setUp(self) -> None:
         FakeYoutubeDL.selected_formats = []
@@ -352,6 +424,231 @@ class AdaptiveDownloadTests(unittest.TestCase):
             self.assertTrue(result["success"])
             self.assertTrue(result["cookie_retry_attempted"])
             self.assertEqual(result["selected_resolution_bucket"], "720p")
+            stream_download.cleanup_job_dir(Path(temp_dir) / "fixture-job")
+
+    def test_direct_incident_probe_and_optimization_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            active = settings(
+                preferred_video_size_mb=1,
+                max_video_size_mb=50,
+                temp_media_dir=temp_dir,
+            )
+            info = direct_incident_info()
+            attempts = stream_download.build_adaptive_attempts(candidates(info, active), active)
+            probe = stream_download.MediaProbeResult(
+                True,
+                True,
+                True,
+                duration_seconds=63,
+                width=1080,
+                height=1920,
+            )
+            with patch(
+                "app.social.stream_download.requests.get",
+                return_value=FakeDirectResponse([b"x" * MIB, b"y"]),
+            ), patch(
+                "app.social.stream_download.probe_downloaded_media",
+                return_value=probe,
+            ), patch(
+                "app.social.stream_download.optimize_downloaded_media",
+                side_effect=lambda path, _job_dir, _settings: (path, True, True),
+            ):
+                result = stream_download.extract_to_temp_file(
+                    "https://source.invalid/video",
+                    "instagram",
+                    "fixture-job",
+                    active,
+                    stream_download.ytdlp_options("instagram", active, None),
+                    info,
+                    attempts,
+                    resolver="ytdlp_stream_cookies",
+                    cookie_mode="platform_cookie_file",
+                )
+            self.assertTrue(result["success"])
+            self.assertEqual(result["normalized_candidate_count"], 1)
+            self.assertEqual(result["format_candidate_count"], 1)
+            self.assertEqual(result["candidate_source_type"], "top_level_direct")
+            self.assertEqual(result["audio_state"], "audio_unknown")
+            self.assertEqual(result["adaptive_attempt_count"], 1)
+            self.assertTrue(result["probe_performed"])
+            self.assertTrue(result["probe_audio_present"])
+            self.assertTrue(result["probe_video_present"])
+            self.assertTrue(result["optimization_attempted"])
+            self.assertTrue(result["optimization_succeeded"])
+            stream_download.cleanup_job_dir(Path(temp_dir) / "fixture-job")
+
+    def test_direct_candidate_without_filesize_uses_streaming_hard_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            active = settings(
+                preferred_video_size_mb=1,
+                max_video_size_mb=2,
+                temp_media_dir=temp_dir,
+            )
+            info = direct_incident_info(size=None)
+            attempts = stream_download.build_adaptive_attempts(candidates(info, active), active)
+            with patch(
+                "app.social.stream_download.requests.get",
+                return_value=FakeDirectResponse([b"x" * MIB, b"y" * MIB, b"z"]),
+            ):
+                result = stream_download.extract_to_temp_file(
+                    "https://source.invalid/video",
+                    "instagram",
+                    "fixture-job",
+                    active,
+                    stream_download.ytdlp_options("instagram", active, None),
+                    info,
+                    attempts,
+                    resolver="ytdlp_stream_cookies",
+                    cookie_mode="platform_cookie_file",
+                )
+            self.assertFalse(result["success"])
+            self.assertEqual(result["error_code"], "media_size_exceeded")
+            self.assertFalse((Path(temp_dir) / "fixture-job").exists())
+
+    def test_direct_probe_without_audio_uses_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            active = settings(
+                preferred_video_size_mb=1,
+                max_video_size_mb=3,
+                temp_media_dir=temp_dir,
+            )
+            info = direct_incident_info(size=MIB)
+            fallback_raw = media_format("fallback", 480, size=MIB // 2)
+            direct = candidates(info, active)[0]
+            fallback = candidates({"duration": 63, "formats": [fallback_raw]}, active)[0]
+            FakeYoutubeDL.actual_sizes = {"fallback": MIB // 2}
+            with patch(
+                "app.social.stream_download.requests.get",
+                return_value=FakeDirectResponse([b"x" * MIB]),
+            ), patch(
+                "app.social.stream_download.probe_downloaded_media",
+                return_value=stream_download.MediaProbeResult(True, True, False),
+            ), patch("yt_dlp.YoutubeDL", FakeYoutubeDL):
+                result = stream_download.extract_to_temp_file(
+                    "https://source.invalid/video",
+                    "instagram",
+                    "fixture-job",
+                    active,
+                    stream_download.ytdlp_options("instagram", active, None),
+                    info,
+                    [direct, fallback],
+                    resolver="ytdlp_stream_cookies",
+                    cookie_mode="platform_cookie_file",
+                )
+            self.assertTrue(result["success"])
+            self.assertEqual(result["adaptive_attempt_count"], 2)
+            self.assertEqual(FakeYoutubeDL.selected_formats, ["fallback"])
+            stream_download.cleanup_job_dir(Path(temp_dir) / "fixture-job")
+
+    def test_direct_probe_without_audio_has_safe_terminal_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            active = settings(temp_media_dir=temp_dir)
+            info = direct_incident_info(size=MIB)
+            attempts = stream_download.build_adaptive_attempts(candidates(info, active), active)
+            with patch(
+                "app.social.stream_download.requests.get",
+                return_value=FakeDirectResponse([b"x" * MIB]),
+            ), patch(
+                "app.social.stream_download.probe_downloaded_media",
+                return_value=stream_download.MediaProbeResult(True, True, False),
+            ):
+                result = stream_download.extract_to_temp_file(
+                    "https://source.invalid/video",
+                    "instagram",
+                    "fixture-job",
+                    active,
+                    stream_download.ytdlp_options("instagram", active, None),
+                    info,
+                    attempts,
+                    resolver="ytdlp_stream_cookies",
+                    cookie_mode="platform_cookie_file",
+                )
+            self.assertFalse(result["success"])
+            self.assertEqual(result["error_code"], "unified_extractor_failed")
+            self.assertTrue(result["probe_performed"])
+            self.assertFalse(result["probe_audio_present"])
+            self.assertFalse((Path(temp_dir) / "fixture-job").exists())
+
+    def test_direct_candidate_above_hard_limit_is_not_downloaded(self) -> None:
+        active = settings()
+        FakeYoutubeDL.info = direct_incident_info(size=51 * MIB)
+        with patch("yt_dlp.YoutubeDL", FakeYoutubeDL), patch(
+            "app.social.stream_download.requests.get"
+        ) as direct_download:
+            result = stream_download.try_ytdlp_extract(
+                "https://source.invalid/video",
+                "instagram",
+                "fixture-job",
+                active,
+                stream_download.ytdlp_options("instagram", active, None),
+                cookie_mode="platform_cookie_file",
+                resolver="ytdlp_stream_cookies",
+                output_mode="temp_file",
+            )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "media_size_exceeded")
+        self.assertEqual(result["format_candidate_count"], 1)
+        direct_download.assert_not_called()
+
+    def test_ffprobe_unavailable_is_reported_without_executing_a_process(self) -> None:
+        with patch("app.social.stream_download.shutil.which", return_value=None), patch(
+            "app.social.stream_download.subprocess.run"
+        ) as run:
+            result = stream_download.probe_downloaded_media(Path("unused.mp4"), settings())
+        self.assertFalse(result.performed)
+        run.assert_not_called()
+
+    def test_ffprobe_result_uses_only_stream_presence_and_safe_dimensions(self) -> None:
+        output = json.dumps(
+            {
+                "streams": [
+                    {"codec_type": "video", "width": 1080, "height": 1920},
+                    {"codec_type": "audio"},
+                ],
+                "format": {"duration": "63.2"},
+            }
+        )
+        with patch("app.social.stream_download.shutil.which", return_value="ffprobe"), patch(
+            "app.social.stream_download.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stdout=output),
+        ):
+            result = stream_download.probe_downloaded_media(Path("fixture.mp4"), settings())
+        self.assertTrue(result.performed)
+        self.assertTrue(result.video_present)
+        self.assertTrue(result.audio_present)
+        self.assertEqual((result.width, result.height, result.duration_seconds), (1080, 1920, 63))
+
+    def test_cookie_authenticated_direct_candidate_uses_same_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cookie_path = Path(temp_dir) / "cookies.txt"
+            cookie_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+            active = settings(
+                temp_media_dir=temp_dir,
+                enable_ytdlp_cookies=True,
+                enable_instagram_cookies=True,
+                instagram_cookies_file=str(cookie_path),
+            )
+            FakeYoutubeDL.info = direct_incident_info(size=512)
+            probe = stream_download.MediaProbeResult(True, True, True)
+            with patch("yt_dlp.YoutubeDL", FakeYoutubeDL), patch(
+                "app.social.stream_download.requests.get",
+                return_value=FakeDirectResponse([b"x" * 512]),
+            ), patch(
+                "app.social.stream_download.probe_downloaded_media",
+                return_value=probe,
+            ):
+                result = stream_download.extract_social_video(
+                    "https://source.invalid/video",
+                    "instagram",
+                    "fixture-job",
+                    active,
+                )
+            self.assertTrue(result["success"])
+            self.assertTrue(result["cookie_retry_attempted"])
+            self.assertEqual(result["normalized_candidate_count"], 1)
+            self.assertEqual(result["format_candidate_count"], 1)
+            self.assertGreaterEqual(result["adaptive_attempt_count"], 1)
+            self.assertEqual(result["candidate_source_type"], "top_level_direct")
             stream_download.cleanup_job_dir(Path(temp_dir) / "fixture-job")
 
 

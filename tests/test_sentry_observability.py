@@ -124,6 +124,18 @@ def media_size_warning_event() -> dict[str, object]:
     return event
 
 
+def no_supported_media_warning_event() -> dict[str, object]:
+    event = media_size_warning_event()
+    event["message"] = sentry.NO_SUPPORTED_MEDIA_WARNING_MESSAGE
+    event["fingerprint"] = list(sentry.NO_SUPPORTED_MEDIA_FINGERPRINT)
+    tags = dict(event["tags"])
+    tags["error_code"] = "unified_extractor_failed"
+    tags["candidate_source_type"] = "top_level_direct"
+    tags["audio_state"] = "audio_unknown"
+    event["tags"] = tags
+    return event
+
+
 class SentryPolicyTests(unittest.TestCase):
     def setUp(self) -> None:
         sentry._reset_state_for_tests()
@@ -274,6 +286,13 @@ class SentrySanitizerTests(unittest.TestCase):
         self.assertEqual(sanitized["fingerprint"], sentry.MEDIA_SIZE_FINGERPRINT)
         self.assertNotIn("exception", sanitized)
 
+    def test_no_supported_media_warning_is_retained_without_exception(self) -> None:
+        sanitized = sentry.before_send(no_supported_media_warning_event(), {})
+        self.assertIsNotNone(sanitized)
+        assert sanitized is not None
+        self.assertEqual(sanitized["message"], sentry.NO_SUPPORTED_MEDIA_WARNING_MESSAGE)
+        self.assertEqual(sanitized["fingerprint"], sentry.NO_SUPPORTED_MEDIA_FINGERPRINT)
+
     def test_warning_retains_optional_missing_context_and_drops_unsafe_context(self) -> None:
         event = media_size_warning_event()
         event["contexts"] = {"worker": {"terminal": True, "source_url": "https://x"}}
@@ -405,6 +424,39 @@ class SentryReportingTests(unittest.TestCase):
                 cookie_retry_used=False,
             )
         self.assertIsNone(result)
+
+    def test_no_supported_media_uses_beta_warning_fingerprint(self) -> None:
+        manager = MagicMock()
+        scope = MagicMock()
+        manager.__enter__.return_value = scope
+        with patch("app.observability.sentry.initialize_sentry", return_value=True), patch(
+            "app.observability.sentry.sentry_sdk.new_scope", return_value=manager
+        ), patch(
+            "app.observability.sentry.sentry_sdk.capture_message",
+            return_value="e" * 32,
+        ) as capture:
+            result = sentry.report_terminal_worker_outcome(
+                error_code="unified_extractor_failed",
+                source_platform="instagram",
+                duration_bucket="60_90_seconds",
+                size_bucket="40_50_mib",
+                selected_resolution_bucket="1080p",
+                adaptive_attempt_count=1,
+                cookie_retry_used=True,
+                outcome_kind="no_supported_media",
+                normalized_candidate_count=1,
+                candidate_source_type="top_level_direct",
+                audio_state="audio_unknown",
+                probe_performed=True,
+                probe_audio_present=False,
+                probe_video_present=True,
+            )
+        self.assertEqual(result, "e" * 32)
+        capture.assert_called_once_with(
+            sentry.NO_SUPPORTED_MEDIA_WARNING_MESSAGE,
+            level="warning",
+        )
+        self.assertEqual(scope.fingerprint, sentry.NO_SUPPORTED_MEDIA_FINGERPRINT)
 
 
 class ActiveQueueBoundaryTests(unittest.TestCase):

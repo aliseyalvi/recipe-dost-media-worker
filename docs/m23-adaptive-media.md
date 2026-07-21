@@ -5,6 +5,64 @@ Instagram: queue claim -> unified yt-dlp extractor -> verified temporary file ->
 Gemini Files API. YouTube's native Gemini URL path and all legacy/manual paths
 are unchanged.
 
+## M23.W2B direct-candidate regression addendum
+
+The development regression occurred because the shared collector exposed one
+top-level direct URL, while active candidate construction required a non-empty
+`format_id` and explicit non-`none` audio/video codecs. Top-level normalization
+also omitted those fields, and `requested_formats` was not read. Thus thumbnail
+`candidate_count=1` and `has_cdn_url=true` coexisted with
+`format_candidate_count=0` and zero adaptive attempts.
+
+The active extractor now has one normalization layer, used identically with and
+without platform cookies. Priority is `formats`, `requested_formats` (including
+yt-dlp's `requested_downloads` compatibility shape), then `top_level_direct`.
+Duplicates are removed in memory without logging or persisting candidate URLs.
+Top-level candidates may omit format ID, filesize, duration, and codecs when an
+HTTP(S) direct URL plus a supported extension or plausible dimensions exists.
+
+Audio is tri-state: explicit codec/audio-extension/bitrate evidence is
+`audio_present`; explicit `acodec=none` is `audio_absent`; absent or null audio
+metadata is `audio_unknown`. Only explicit absence is rejected during candidate
+construction. Unknown audio receives a hard-byte-guarded temporary download and
+post-download probe before it can reach Gemini.
+
+`ffprobe` and `ffmpeg` remain optional, bounded runtime tools. The supported
+Docker image and the audited local runtime contain neither executable, and this
+milestone does not add them. Therefore an unknown-audio direct candidate is now
+correctly normalized and attempted, but the currently deployed runtime cannot
+confirm its streams; it must fail safely after cleanup until the supported image
+provides `ffprobe`. When available, probing records only stream-presence flags,
+duration, and dimensions. A valid direct file above 36 MiB may use the bounded
+ffmpeg optimization path (720-high H.264/AAC MP4, metadata stripped, output size
+and streams rechecked); a file above 50 MiB is never fully downloaded to
+transcode. If ffmpeg is absent, a verified file below 50 MiB remains usable.
+
+Failure distinctions are unchanged at the app boundary: no candidate uses
+`unified_extractor_failed`; explicit/post-probe no-audio also keeps that existing
+code and safe copy; all candidates above 50 MiB use `media_size_exceeded`;
+malformed probe/download/optimization failures are technical errors. Build 3
+fields and quota behavior are unchanged.
+
+Safe event/log telemetry adds `normalized_candidate_count`,
+`candidate_source_type`, `audio_state`, attempt count, probe presence/results,
+optimization presence/results, resolution/size buckets, and terminal state.
+URLs, paths, codecs, media text, identifiers, and credentials remain excluded.
+Terminal size failure keeps its grouped Sentry warning. During beta, a
+discovered candidate ending in the existing unsupported-media outcome gets one
+grouped `worker_outcome/no_supported_media` warning; intermediate and successful
+fallbacks remain silent. Technical probe/download/optimization failures remain
+single error exceptions.
+
+Development verification: deploy from `develop`, confirm the new safe fields on
+`unified_extractor_completed` or `unified_extractor_failed`, and use only an
+authorized non-production link. For the incident shape, expect normalized and
+format counts of one, source `top_level_direct`, audio `audio_unknown`, and at
+least one adaptive attempt. Before expecting success, verify the image actually
+contains `ffprobe`; otherwise the safe probe-unavailable outcome is expected.
+Rollback remains redeploying the previous development revision or reverting the
+W2B commit. No database, client, quota, or mobile rollback is needed.
+
 ## Audited runtime path
 
 - Render starts `uvicorn app.main:app --host 0.0.0.0 --port $PORT

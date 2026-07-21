@@ -550,7 +550,21 @@ def process_queue_job(
             },
         )
     except QueueJobFailure as exc:
-        if exc.code == "media_size_exceeded":
+        normalized_candidate_count = (
+            safe_int_or_none(exc.metadata.get("normalized_candidate_count")) or 0
+        )
+        no_supported_media = (
+            exc.code == "unified_extractor_failed"
+            and normalized_candidate_count > 0
+            and exc.__cause__ is None
+            and exc.exception_type is None
+        )
+        if exc.code == "media_size_exceeded" or no_supported_media:
+            outcome_kind = (
+                "media_size_exceeded"
+                if exc.code == "media_size_exceeded"
+                else "no_supported_media"
+            )
             sentry_event_id = report_terminal_worker_outcome(
                 error_code=exc.code,
                 source_platform=platform,
@@ -563,6 +577,25 @@ def process_queue_job(
                     safe_int_or_none(exc.metadata.get("adaptive_attempt_count")) or 0
                 ),
                 cookie_retry_used=bool(exc.metadata.get("cookie_retry_used")),
+                outcome_kind=outcome_kind,
+                normalized_candidate_count=normalized_candidate_count,
+                candidate_source_type=str_or_none(
+                    exc.metadata.get("candidate_source_type")
+                ),
+                audio_state=str_or_none(exc.metadata.get("audio_state")),
+                probe_performed=bool(exc.metadata.get("probe_performed")),
+                probe_audio_present=bool_or_none(
+                    exc.metadata.get("probe_audio_present")
+                ),
+                probe_video_present=bool_or_none(
+                    exc.metadata.get("probe_video_present")
+                ),
+                optimization_attempted=bool(
+                    exc.metadata.get("optimization_attempted")
+                ),
+                optimization_succeeded=bool(
+                    exc.metadata.get("optimization_succeeded")
+                ),
             )
             logger.warning(
                 "worker_outcome",
@@ -578,6 +611,20 @@ def process_queue_job(
                     "size_bucket": exc.metadata.get("size_bucket") or "unknown",
                     "selected_resolution_bucket": (
                         exc.metadata.get("selected_resolution_bucket") or "unknown"
+                    ),
+                    "normalized_candidate_count": normalized_candidate_count,
+                    "candidate_source_type": (
+                        exc.metadata.get("candidate_source_type") or "unknown"
+                    ),
+                    "audio_state": exc.metadata.get("audio_state") or "audio_unknown",
+                    "probe_performed": bool(exc.metadata.get("probe_performed")),
+                    "probe_audio_present": exc.metadata.get("probe_audio_present"),
+                    "probe_video_present": exc.metadata.get("probe_video_present"),
+                    "optimization_attempted": bool(
+                        exc.metadata.get("optimization_attempted")
+                    ),
+                    "optimization_succeeded": bool(
+                        exc.metadata.get("optimization_succeeded")
                     ),
                     "terminal": True,
                     "sentry_event_id": sentry_event_id or "none",
@@ -3923,7 +3970,15 @@ def safe_extract_event_metadata(
         "output_mode": result.get("output_mode"),
         "cookie_mode": result.get("cookie_mode"),
         "adaptive_attempt_count": result.get("adaptive_attempt_count"),
+        "normalized_candidate_count": result.get("normalized_candidate_count"),
         "format_candidate_count": result.get("format_candidate_count"),
+        "candidate_source_type": result.get("candidate_source_type"),
+        "audio_state": result.get("audio_state"),
+        "probe_performed": bool(result.get("probe_performed")),
+        "probe_audio_present": result.get("probe_audio_present"),
+        "probe_video_present": result.get("probe_video_present"),
+        "optimization_attempted": bool(result.get("optimization_attempted")),
+        "optimization_succeeded": bool(result.get("optimization_succeeded")),
         "selected_resolution_bucket": result.get("selected_resolution_bucket"),
         "estimated_size_bucket": result.get("estimated_size_bucket"),
         "actual_size_bucket": result.get("actual_size_bucket"),
@@ -4297,6 +4352,14 @@ def safe_terminal_metadata(metadata: dict[str, object]) -> dict[str, object]:
         "selected_resolution_bucket",
         "adaptive_attempt_count",
         "cookie_retry_used",
+        "normalized_candidate_count",
+        "candidate_source_type",
+        "audio_state",
+        "probe_performed",
+        "probe_audio_present",
+        "probe_video_present",
+        "optimization_attempted",
+        "optimization_succeeded",
     }
     return {key: metadata[key] for key in allowed if key in metadata}
 
@@ -4314,6 +4377,14 @@ def terminal_extractor_metadata(result: dict[str, object]) -> dict[str, object]:
         ),
         "adaptive_attempt_count": result.get("adaptive_attempt_count") or 0,
         "cookie_retry_used": bool(result.get("cookie_retry_attempted")),
+        "normalized_candidate_count": result.get("normalized_candidate_count") or 0,
+        "candidate_source_type": result.get("candidate_source_type") or "unknown",
+        "audio_state": result.get("audio_state") or "audio_unknown",
+        "probe_performed": bool(result.get("probe_performed")),
+        "probe_audio_present": result.get("probe_audio_present"),
+        "probe_video_present": result.get("probe_video_present"),
+        "optimization_attempted": bool(result.get("optimization_attempted")),
+        "optimization_succeeded": bool(result.get("optimization_succeeded")),
     }
 
 
@@ -4374,6 +4445,10 @@ def add_event_safely(
 
 def str_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def bool_or_none(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
 
 
 def safe_int_or_none(value: object) -> int | None:

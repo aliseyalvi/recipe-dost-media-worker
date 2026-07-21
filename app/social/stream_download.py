@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import requests
 
@@ -17,7 +19,6 @@ from app.config import Settings
 from app.social.models import SocialResolverError, SocialVideoInfo
 from app.social.thumbnail_selection import platform_thumbnail, select_ytdlp_thumbnail
 from app.social.yt_dlp_resolver import (
-    collect_candidate_formats,
     platform_headers,
     safe_float,
     safe_http_url,
@@ -30,6 +31,9 @@ logger = logging.getLogger("recipe_dost.worker")
 MIB_BYTES = 1024 * 1024
 QUALITY_LADDER = (720, 540, 480, 360)
 SUPPORTED_VIDEO_EXTENSIONS = {"mp4", "m4v", "mov", "webm"}
+SUPPORTED_DIRECT_PROTOCOLS = {"http", "https"}
+CandidateSourceType = Literal["formats", "requested_formats", "top_level_direct"]
+AudioState = Literal["audio_present", "audio_absent", "audio_unknown"]
 TERMINAL_SIZE_MESSAGE = (
     "Recipe Dost tried a smaller video version, but this video is still too "
     "large for automatic recipe analysis. Try a shorter video or another recipe link."
@@ -46,14 +50,16 @@ class VideoBuffer:
 
 @dataclass(frozen=True)
 class MediaFormatCandidate:
-    format_id: str
+    candidate_id: str
+    format_id: str | None
+    source_type: CandidateSourceType
+    audio_state: AudioState
     width: int | None
     height: int | None
     quality_height: int | None
     total_bitrate_kbps: float | None
     fps: float | None
     ext: str
-    has_audio: bool
     has_video: bool
     filesize: int | None
     filesize_approx: int | None
@@ -65,8 +71,41 @@ class MediaFormatCandidate:
     def resolution_bucket(self) -> str:
         return resolution_bucket(self.quality_height)
 
+    @property
+    def has_audio(self) -> bool:
+        return self.audio_state == "audio_present"
+
+
+@dataclass(frozen=True)
+class NormalizedCandidateInput:
+    candidate_id: str
+    source_type: CandidateSourceType
+    raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class MediaProbeResult:
+    performed: bool
+    video_present: bool | None
+    audio_present: bool | None
+    duration_seconds: int | None = None
+    width: int | None = None
+    height: int | None = None
+
 
 class HardByteLimitExceeded(Exception):
+    pass
+
+
+class DirectMediaDownloadError(Exception):
+    pass
+
+
+class MediaProbeError(Exception):
+    pass
+
+
+class MediaOptimizationError(Exception):
     pass
 
 
@@ -299,6 +338,185 @@ def ytdlp_options(
     return opts
 
 
+def download_direct_candidate(
+    candidate: MediaFormatCandidate,
+    job_dir: Path,
+    settings: Settings,
+    guard: HardByteGuard,
+) -> Path:
+    direct_url = safe_http_url(candidate.raw.get("url"))
+    direct_protocol = (safe_str(candidate.raw.get("protocol")) or "").strip().lower()
+    if (
+        not direct_url
+        or direct_url.split(":", 1)[0].lower() not in SUPPORTED_DIRECT_PROTOCOLS
+        or (direct_protocol and direct_protocol not in SUPPORTED_DIRECT_PROTOCOLS)
+    ):
+        raise DirectMediaDownloadError("direct_media_unavailable")
+    output = job_dir / f"video.{candidate.ext}"
+    headers = candidate.raw.get("http_headers")
+    request_headers = (
+        {
+            str(key): str(value)
+            for key, value in headers.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+        if isinstance(headers, dict)
+        else {}
+    )
+    try:
+        with requests.get(
+            direct_url,
+            stream=True,
+            timeout=(10, settings.ytdlp_socket_timeout_seconds),
+            headers=request_headers,
+            allow_redirects=True,
+        ) as response:
+            response.raise_for_status()
+            declared_size = positive_int(response.headers.get("content-length"))
+            if declared_size is not None and declared_size > guard.hard_limit_bytes:
+                guard.observed_bytes = declared_size
+                guard.exceeded = True
+                raise HardByteLimitExceeded("media_size_exceeded")
+            with output.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=MIB_BYTES):
+                    if not chunk:
+                        continue
+                    guard({"downloaded_bytes": guard.observed_bytes + len(chunk)})
+                    handle.write(chunk)
+    except HardByteLimitExceeded:
+        raise
+    except requests.RequestException as exc:
+        raise DirectMediaDownloadError("direct_media_download_failed") from exc
+    return output
+
+
+def probe_downloaded_media(
+    file_path: Path,
+    settings: Settings,
+) -> MediaProbeResult:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return MediaProbeResult(False, None, None)
+    try:
+        completed = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type,width,height:format=duration",
+                "-of",
+                "json",
+                str(file_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=max(1, settings.ytdlp_extract_timeout_seconds),
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise MediaProbeError("media_probe_failed")
+        payload = json.loads(completed.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError) as exc:
+        raise MediaProbeError("media_probe_failed") from exc
+    streams = payload.get("streams") if isinstance(payload, dict) else None
+    streams = streams if isinstance(streams, list) else []
+    video_stream = next(
+        (
+            item
+            for item in streams
+            if isinstance(item, dict) and item.get("codec_type") == "video"
+        ),
+        None,
+    )
+    audio_present = any(
+        isinstance(item, dict) and item.get("codec_type") == "audio"
+        for item in streams
+    )
+    format_data = payload.get("format") if isinstance(payload, dict) else None
+    duration = (
+        safe_duration_seconds(format_data.get("duration"))
+        if isinstance(format_data, dict)
+        else None
+    )
+    return MediaProbeResult(
+        True,
+        video_stream is not None,
+        audio_present,
+        duration_seconds=duration,
+        width=(safe_int(video_stream.get("width")) if video_stream else None),
+        height=(safe_int(video_stream.get("height")) if video_stream else None),
+    )
+
+
+def optimize_downloaded_media(
+    file_path: Path,
+    job_dir: Path,
+    settings: Settings,
+) -> tuple[Path, bool, bool]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return file_path, False, False
+    output = job_dir / "optimized.mp4"
+    try:
+        completed = subprocess.run(
+            [
+                ffmpeg,
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                str(file_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0",
+                "-vf",
+                "scale=-2:720:force_original_aspect_ratio=decrease",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "25",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-map_metadata",
+                "-1",
+                "-movflags",
+                "+faststart",
+                str(output),
+            ],
+            capture_output=True,
+            timeout=max(1, min(settings.max_job_runtime_seconds, 120)),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise MediaOptimizationError("media_optimization_failed") from exc
+    if completed.returncode != 0 or not output.exists() or output.stat().st_size <= 0:
+        output.unlink(missing_ok=True)
+        raise MediaOptimizationError("media_optimization_failed")
+    output_size = output.stat().st_size
+    if (
+        output_size > settings.max_video_size_bytes
+        or output_size >= file_path.stat().st_size
+    ):
+        output.unlink(missing_ok=True)
+        return file_path, True, False
+    optimized_probe = probe_downloaded_media(output, settings)
+    if not (
+        optimized_probe.performed
+        and optimized_probe.video_present
+        and optimized_probe.audio_present
+    ):
+        output.unlink(missing_ok=True)
+        raise MediaOptimizationError("media_optimization_failed")
+    file_path.unlink(missing_ok=True)
+    return output, True, True
+
+
 def extract_to_temp_file(
     url: str,
     platform: str,
@@ -316,10 +534,16 @@ def extract_to_temp_file(
     job_dir = Path(settings.temp_media_dir) / safe_path_segment(job_id)
     preferred_bytes = settings.preferred_video_size_bytes
     hard_bytes = settings.max_video_size_bytes
+    normalized_candidate_count = len(normalize_media_candidate_inputs(info))
+    format_candidate_count = len(build_media_format_candidates(info, settings))
     last_size_bytes: int | None = None
     last_candidate: MediaFormatCandidate | None = None
     technical_exception: Exception | None = None
     size_fallback_used = False
+    unsupported_media_seen = False
+    last_probe = MediaProbeResult(False, None, None)
+    optimization_attempted = False
+    optimization_succeeded = False
 
     if not attempts:
         return no_candidate_result(
@@ -338,13 +562,23 @@ def extract_to_temp_file(
         guard = HardByteGuard(hard_bytes)
         download_opts = {
             **opts,
-            "format": candidate.format_id,
             "outtmpl": str(job_dir / "video.%(ext)s"),
             "progress_hooks": [guard],
         }
         try:
-            with YoutubeDL(download_opts) as ydl:
-                ydl.download([url])
+            if candidate.source_type == "top_level_direct" or not candidate.format_id:
+                file_path = download_direct_candidate(
+                    candidate,
+                    job_dir,
+                    settings,
+                    guard,
+                )
+            else:
+                if not candidate.format_id:
+                    raise DirectMediaDownloadError("format_id_missing")
+                with YoutubeDL({**download_opts, "format": candidate.format_id}) as ydl:
+                    ydl.download([url])
+                file_path = locate_downloaded_file(job_dir)
         except Exception as exc:
             if technical_exception is None and is_unexpected_ytdlp_exception(exc):
                 technical_exception = exc
@@ -367,7 +601,6 @@ def extract_to_temp_file(
             )
             continue
 
-        file_path = locate_downloaded_file(job_dir)
         if file_path is None:
             cleanup_job_dir(job_dir)
             log_format_fallback(
@@ -400,6 +633,76 @@ def extract_to_temp_file(
                 "preferred_size_exceeded",
             )
             continue
+        last_probe = MediaProbeResult(False, None, None)
+        if candidate.audio_state == "audio_unknown":
+            try:
+                last_probe = probe_downloaded_media(file_path, settings)
+            except MediaProbeError as exc:
+                technical_exception = technical_exception or exc
+                cleanup_job_dir(job_dir)
+                log_format_fallback(
+                    index,
+                    candidate,
+                    next_candidate(attempts, index),
+                    "probe_failed",
+                )
+                continue
+            if not last_probe.performed:
+                unsupported_media_seen = True
+                cleanup_job_dir(job_dir)
+                log_format_fallback(
+                    index,
+                    candidate,
+                    next_candidate(attempts, index),
+                    "probe_unavailable",
+                )
+                continue
+            if last_probe.video_present is not True:
+                technical_exception = technical_exception or MediaProbeError(
+                    "media_video_stream_missing"
+                )
+                cleanup_job_dir(job_dir)
+                log_format_fallback(
+                    index,
+                    candidate,
+                    next_candidate(attempts, index),
+                    "probe_video_missing",
+                )
+                continue
+            if last_probe.audio_present is not True:
+                unsupported_media_seen = True
+                cleanup_job_dir(job_dir)
+                log_format_fallback(
+                    index,
+                    candidate,
+                    next_candidate(attempts, index),
+                    "probe_audio_missing",
+                )
+                continue
+        if (
+            candidate.source_type == "top_level_direct"
+            and size_bytes > preferred_bytes
+        ):
+            try:
+                file_path, attempted, succeeded = optimize_downloaded_media(
+                    file_path,
+                    job_dir,
+                    settings,
+                )
+                optimization_attempted = optimization_attempted or attempted
+                optimization_succeeded = optimization_succeeded or succeeded
+                size_bytes = file_path.stat().st_size
+                last_size_bytes = size_bytes
+            except MediaOptimizationError as exc:
+                technical_exception = technical_exception or exc
+                cleanup_job_dir(job_dir)
+                log_format_fallback(
+                    index,
+                    candidate,
+                    next_candidate(attempts, index),
+                    "optimization_failed",
+                )
+                continue
         return extractor_result(
             platform,
             info,
@@ -411,7 +714,15 @@ def extract_to_temp_file(
             cookie_mode=cookie_mode,
             output_mode="temp_file",
             adaptive_attempt_count=index,
-            format_candidate_count=len(build_media_format_candidates(info, settings)),
+            normalized_candidate_count=normalized_candidate_count,
+            format_candidate_count=format_candidate_count,
+            candidate_source_type=candidate.source_type,
+            audio_state=candidate.audio_state,
+            probe_performed=last_probe.performed,
+            probe_audio_present=last_probe.audio_present,
+            probe_video_present=last_probe.video_present,
+            optimization_attempted=optimization_attempted,
+            optimization_succeeded=optimization_succeeded,
             selected_resolution_bucket=candidate.resolution_bucket,
             estimated_size_bucket=size_bucket(candidate.estimated_size_bytes),
             actual_size_bucket=size_bucket(size_bytes),
@@ -432,14 +743,26 @@ def extract_to_temp_file(
         safe_error_message=(
             TERMINAL_SIZE_MESSAGE
             if size_fallback_used or all_candidates_exceed_hard(info, settings)
-            else "This social video could not be downloaded."
+            else (
+                "This social video did not expose a supported video format with audio."
+                if unsupported_media_seen
+                else "This social video could not be downloaded."
+            )
         ),
         size_bytes=last_size_bytes,
         resolver=resolver,
         cookie_mode=cookie_mode,
         output_mode="temp_file",
         adaptive_attempt_count=len(attempts),
-        format_candidate_count=len(build_media_format_candidates(info, settings)),
+        normalized_candidate_count=normalized_candidate_count,
+        format_candidate_count=format_candidate_count,
+        candidate_source_type=(last_candidate.source_type if last_candidate else None),
+        audio_state=(last_candidate.audio_state if last_candidate else None),
+        probe_performed=last_probe.performed,
+        probe_audio_present=last_probe.audio_present,
+        probe_video_present=last_probe.video_present,
+        optimization_attempted=optimization_attempted,
+        optimization_succeeded=optimization_succeeded,
         selected_resolution_bucket=(last_candidate.resolution_bucket if last_candidate else None),
         estimated_size_bucket=(size_bucket(last_candidate.estimated_size_bytes) if last_candidate else None),
         actual_size_bucket=size_bucket(last_size_bytes),
@@ -593,20 +916,27 @@ def build_media_format_candidates(
 ) -> list[MediaFormatCandidate]:
     duration_seconds = safe_float(info.get("duration"))
     candidates: list[MediaFormatCandidate] = []
-    seen: set[str] = set()
-    for item in collect_candidate_formats(info):
+    for normalized in normalize_media_candidate_inputs(info):
+        item = normalized.raw
         format_id = safe_str(item.get("format_id"))
-        if not format_id or format_id in seen:
-            continue
-        seen.add(format_id)
         ext = (safe_str(item.get("ext")) or "").lower()
-        if ext not in SUPPORTED_VIDEO_EXTENSIONS:
+        if ext and ext not in SUPPORTED_VIDEO_EXTENSIONS:
             continue
+        if not ext and not (
+            normalized.source_type == "top_level_direct"
+            and plausible_video_dimensions(item)
+        ):
+            continue
+        if not direct_protocol_allowed(item, normalized.source_type):
+            continue
+        if not ext:
+            ext = "mp4"
         vcodec = (safe_str(item.get("vcodec")) or "").lower()
-        acodec = (safe_str(item.get("acodec")) or "").lower()
-        has_video = bool(vcodec and vcodec != "none")
-        has_audio = bool(acodec and acodec != "none")
-        if not has_video or not has_audio:
+        has_video = vcodec != "none" and (
+            bool(vcodec) or plausible_video_dimensions(item) or ext in SUPPORTED_VIDEO_EXTENSIONS
+        )
+        audio_state = classify_audio_state(item)
+        if not has_video or audio_state == "audio_absent":
             continue
         width = safe_int(item.get("width"))
         height = safe_int(item.get("height"))
@@ -624,14 +954,16 @@ def build_media_format_candidates(
         )
         candidates.append(
             MediaFormatCandidate(
+                candidate_id=normalized.candidate_id,
                 format_id=format_id,
+                source_type=normalized.source_type,
+                audio_state=audio_state,
                 width=width,
                 height=height,
                 quality_height=quality_height,
                 total_bitrate_kbps=total_bitrate,
                 fps=safe_float(item.get("fps")),
                 ext=ext,
-                has_audio=has_audio,
                 has_video=has_video,
                 filesize=filesize,
                 filesize_approx=filesize_approx,
@@ -641,6 +973,126 @@ def build_media_format_candidates(
             )
         )
     return candidates
+
+
+def normalize_media_candidate_inputs(
+    info: dict[str, Any],
+) -> list[NormalizedCandidateInput]:
+    normalized: list[NormalizedCandidateInput] = []
+    seen: set[tuple[object, ...]] = set()
+    seen_urls: set[str] = set()
+
+    def add(raw: dict[str, Any], source_type: CandidateSourceType) -> None:
+        direct_url = safe_http_url(raw.get("url"))
+        if source_type != "formats" and direct_url and direct_url in seen_urls:
+            return
+        identity = media_candidate_identity(raw)
+        if identity is None or identity in seen:
+            return
+        seen.add(identity)
+        if direct_url:
+            seen_urls.add(direct_url)
+        normalized.append(
+            NormalizedCandidateInput(
+                candidate_id=f"{source_type}:{len(normalized) + 1}",
+                source_type=source_type,
+                raw=dict(raw),
+            )
+        )
+
+    formats = info.get("formats")
+    if isinstance(formats, list):
+        for item in formats:
+            if isinstance(item, dict):
+                add(item, "formats")
+
+    for key in ("requested_formats", "requested_downloads"):
+        requested = info.get(key)
+        if isinstance(requested, list):
+            for item in requested:
+                if isinstance(item, dict):
+                    add(item, "requested_formats")
+
+    direct_url = safe_http_url(info.get("url"))
+    if direct_url and (
+        plausible_video_dimensions(info)
+        or (safe_str(info.get("ext")) or "").lower()
+        in SUPPORTED_VIDEO_EXTENSIONS
+    ):
+        direct_keys = {
+            "url",
+            "http_headers",
+            "width",
+            "height",
+            "ext",
+            "format_id",
+            "filesize",
+            "filesize_approx",
+            "tbr",
+            "vbr",
+            "abr",
+            "fps",
+            "duration",
+            "acodec",
+            "vcodec",
+            "protocol",
+            "mime_type",
+        }
+        add({key: info.get(key) for key in direct_keys}, "top_level_direct")
+    return normalized
+
+
+def media_candidate_identity(item: dict[str, Any]) -> tuple[object, ...] | None:
+    format_id = safe_str(item.get("format_id"))
+    if format_id:
+        return (
+            "format",
+            format_id,
+            safe_int(item.get("width")),
+            safe_int(item.get("height")),
+            safe_str(item.get("ext")),
+        )
+    direct_url = safe_http_url(item.get("url"))
+    if direct_url:
+        return ("url", direct_url)
+    return None
+
+
+def classify_audio_state(item: dict[str, Any]) -> AudioState:
+    acodec = (safe_str(item.get("acodec")) or "").strip().lower()
+    if acodec == "none":
+        return "audio_absent"
+    if acodec:
+        return "audio_present"
+    audio_ext = (safe_str(item.get("audio_ext")) or "").strip().lower()
+    if audio_ext == "none":
+        return "audio_absent"
+    if audio_ext:
+        return "audio_present"
+    if (safe_float(item.get("abr")) or 0) > 0:
+        return "audio_present"
+    return "audio_unknown"
+
+
+def plausible_video_dimensions(item: dict[str, Any]) -> bool:
+    width = safe_int(item.get("width")) or 0
+    height = safe_int(item.get("height")) or 0
+    return width > 0 and height > 0
+
+
+def direct_protocol_allowed(
+    item: dict[str, Any],
+    source_type: CandidateSourceType,
+) -> bool:
+    if source_type != "top_level_direct":
+        return True
+    url = safe_http_url(item.get("url"))
+    if not url:
+        return False
+    protocol = (safe_str(item.get("protocol")) or "").strip().lower()
+    if protocol and protocol not in SUPPORTED_DIRECT_PROTOCOLS:
+        return False
+    return url.split(":", 1)[0].lower() in SUPPORTED_DIRECT_PROTOCOLS
 
 
 def build_adaptive_attempts(
@@ -658,7 +1110,7 @@ def build_adaptive_attempts(
         fitting = [
             candidate
             for candidate in candidates
-            if candidate.format_id not in selected_ids
+            if candidate.candidate_id not in selected_ids
             and candidate.quality_height is not None
             and settings.min_video_height <= candidate.quality_height <= height_limit
             and candidate.estimated_size_bytes is not None
@@ -668,17 +1120,20 @@ def build_adaptive_attempts(
             continue
         chosen = max(fitting, key=quality_rank)
         selected.append(chosen)
-        selected_ids.add(chosen.format_id)
+        selected_ids.add(chosen.candidate_id)
         if len(selected) >= settings.media_adaptive_max_attempts:
             return selected
 
     hard_candidates = [
         candidate
         for candidate in candidates
-        if candidate.format_id not in selected_ids
+        if candidate.candidate_id not in selected_ids
         and (
-            candidate.quality_height is not None
-            and candidate.quality_height <= settings.max_video_height
+            candidate.source_type == "top_level_direct"
+            or (
+                candidate.quality_height is not None
+                and candidate.quality_height <= settings.max_video_height
+            )
         )
         and (
             candidate.estimated_size_bytes is None
@@ -762,6 +1217,7 @@ def no_candidate_result(
     output_mode: str,
     settings: Settings,
 ) -> dict[str, object]:
+    normalized_candidate_count = len(normalize_media_candidate_inputs(info))
     candidates = build_media_format_candidates(info, settings)
     size_limited = bool(candidates) and all_candidates_exceed_hard(info, settings)
     diagnostic_candidate = (
@@ -782,7 +1238,12 @@ def no_candidate_result(
         cookie_mode=cookie_mode,
         output_mode=output_mode,
         adaptive_attempt_count=0,
+        normalized_candidate_count=normalized_candidate_count,
         format_candidate_count=len(candidates),
+        candidate_source_type=(
+            diagnostic_candidate.source_type if diagnostic_candidate else None
+        ),
+        audio_state=(diagnostic_candidate.audio_state if diagnostic_candidate else None),
         selected_resolution_bucket=(
             diagnostic_candidate.resolution_bucket if diagnostic_candidate else None
         ),
@@ -799,8 +1260,11 @@ def all_candidates_exceed_hard(info: dict[str, Any], settings: Settings) -> bool
     candidates = [
         candidate
         for candidate in build_media_format_candidates(info, settings)
-        if candidate.quality_height is not None
-        and candidate.quality_height <= settings.max_video_height
+        if candidate.source_type == "top_level_direct"
+        or (
+            candidate.quality_height is not None
+            and candidate.quality_height <= settings.max_video_height
+        )
     ]
     return bool(candidates) and all(
         candidate.estimated_size_bytes is not None
@@ -824,6 +1288,7 @@ def is_unexpected_ytdlp_exception(exc: Exception) -> bool:
         "ExtractorError",
         "GeoRestrictedError",
         "HardByteLimitExceeded",
+        "DirectMediaDownloadError",
     }
 
 
@@ -966,7 +1431,15 @@ def extractor_result(
     cookie_mode: str | None = None,
     output_mode: str | None = None,
     adaptive_attempt_count: int = 0,
+    normalized_candidate_count: int = 0,
     format_candidate_count: int = 0,
+    candidate_source_type: str | None = None,
+    audio_state: str | None = None,
+    probe_performed: bool = False,
+    probe_audio_present: bool | None = None,
+    probe_video_present: bool | None = None,
+    optimization_attempted: bool = False,
+    optimization_succeeded: bool = False,
     selected_resolution_bucket: str | None = None,
     estimated_size_bucket: str | None = None,
     actual_size_bucket: str | None = None,
@@ -1014,7 +1487,15 @@ def extractor_result(
         "cookie_setup_failed": False,
         "metadata_fallback_attempted": False,
         "adaptive_attempt_count": adaptive_attempt_count,
+        "normalized_candidate_count": normalized_candidate_count,
         "format_candidate_count": format_candidate_count,
+        "candidate_source_type": candidate_source_type,
+        "audio_state": audio_state,
+        "probe_performed": probe_performed,
+        "probe_audio_present": probe_audio_present,
+        "probe_video_present": probe_video_present,
+        "optimization_attempted": optimization_attempted,
+        "optimization_succeeded": optimization_succeeded,
         "selected_resolution_bucket": selected_resolution_bucket,
         "estimated_size_bucket": estimated_size_bucket,
         "actual_size_bucket": actual_size_bucket,

@@ -1110,3 +1110,28 @@ make check-dev
 
 No production URL/media, Supabase, Gemini, Sentry transport, Render deployment,
 mobile write, `main` checkout/merge, or live job was used.
+
+## M23.W2B direct Instagram candidate regression
+
+```bash
+.venv/bin/python -m unittest tests.test_adaptive_media -v
+.venv/bin/python -m unittest tests.test_queue_failure_contract -q
+# focused candidate/direct/cookie/probe/size/contract tests passed
+
+.venv/bin/python -m unittest discover -s tests -v
+# passed: 61 tests
+
+python3 -m compileall app scripts
+.venv/bin/python scripts/check_process_job_queue_mode.py
+git diff --check
+# passed
+
+.venv/bin/python -m pytest -q
+# not rerun: pytest is not installed in the existing repository virtualenv;
+# unittest discovery is the available repository suite
+```
+
+`command -v ffprobe` and `command -v ffmpeg` returned no executable. Dockerfile
+inspection also confirmed neither dependency is installed. No live media,
+Instagram, Supabase, Gemini, Sentry transport, Render deployment, mobile write,
+or `main` operation occurred.

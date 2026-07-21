@@ -81,22 +81,14 @@ class FrontendFailureContractTests(unittest.TestCase):
         active = settings()
         incident_info = {
             "duration": 63,
-            "formats": [
-                {
-                    "format_id": bucket,
-                    "ext": "mp4",
-                    "width": height,
-                    "height": int(height * 16 / 9),
-                    "vcodec": "h264",
-                    "acodec": "aac",
-                    "filesize": size_mib * 1024 * 1024,
-                }
-                for bucket, height, size_mib in (
-                    ("720", 720, 60),
-                    ("540", 540, 55),
-                    ("480", 480, 51),
-                )
-            ],
+            "formats": [],
+            "requested_formats": [],
+            "url": "https://cdn.invalid/direct-media.mp4",
+            "ext": "mp4",
+            "width": 1080,
+            "height": 1920,
+            "filesize": 51 * 1024 * 1024,
+            "protocol": "https",
         }
         extractor_result = stream_download.no_candidate_result(
             "instagram",
@@ -117,9 +109,18 @@ class FrontendFailureContractTests(unittest.TestCase):
             source_platform="instagram",
             duration_bucket="60_90_seconds",
             size_bucket="50_mib_or_more",
-            selected_resolution_bucket="480p",
+            selected_resolution_bucket="1080p",
             adaptive_attempt_count=0,
             cookie_retry_used=True,
+            outcome_kind="media_size_exceeded",
+            normalized_candidate_count=1,
+            candidate_source_type="top_level_direct",
+            audio_state="audio_unknown",
+            probe_performed=False,
+            probe_audio_present=None,
+            probe_video_present=None,
+            optimization_attempted=False,
+            optimization_succeeded=False,
         )
         technical.assert_not_called()
         failed_updates = [
@@ -131,6 +132,48 @@ class FrontendFailureContractTests(unittest.TestCase):
         self.assertEqual(failed_updates[0].kwargs["error_code"], "media_size_exceeded")
         self.assertEqual(failed_updates[0].kwargs["error_message"], TERMINAL_SIZE_MESSAGE)
         repository.insert_recipe_card.assert_not_called()
+
+    def test_discovered_direct_candidate_without_supported_audio_captures_beta_warning(self) -> None:
+        repository = repository_for(job())
+        extractor_result = {
+            "success": False,
+            "platform": "instagram",
+            "resolver": "ytdlp_stream_cookies",
+            "error_code": "unified_extractor_failed",
+            "safe_error_message": (
+                "This social video did not expose a supported video format with audio."
+            ),
+            "metadata_fallback_attempted": False,
+            "cookie_retry_attempted": True,
+            "adaptive_attempt_count": 1,
+            "normalized_candidate_count": 1,
+            "format_candidate_count": 1,
+            "candidate_source_type": "top_level_direct",
+            "audio_state": "audio_unknown",
+            "probe_performed": True,
+            "probe_audio_present": False,
+            "probe_video_present": True,
+            "optimization_attempted": False,
+            "optimization_succeeded": False,
+            "duration_bucket": "60_90_seconds",
+            "actual_size_bucket": "40_50_mib",
+            "selected_resolution_bucket": "1080p",
+        }
+        with patch("app.queue_worker.extract_social_video", return_value=extractor_result), patch(
+            "app.queue_worker.report_terminal_worker_outcome", return_value="f" * 32
+        ) as warning, patch("app.queue_worker.report_worker_error") as technical:
+            process_queue_job(repository, settings(), job())
+        warning.assert_called_once()
+        self.assertEqual(warning.call_args.kwargs["outcome_kind"], "no_supported_media")
+        self.assertEqual(
+            warning.call_args.kwargs["candidate_source_type"], "top_level_direct"
+        )
+        technical.assert_not_called()
+        failed = [
+            call for call in repository.update_job.call_args_list
+            if call.kwargs.get("status") == "failed"
+        ]
+        self.assertEqual(failed[0].kwargs["error_code"], "unified_extractor_failed")
 
     def test_unexpected_extractor_exception_is_reported_once_as_error(self) -> None:
         repository = repository_for(job())

@@ -13,6 +13,18 @@
 
 Keep this file terse: only durable architecture decisions, not full task history.
 
+## 2026-07-20 — M23.W2B direct Instagram candidate normalization
+
+- The active queue extractor normalizes `formats`, `requested_formats`/
+  `requested_downloads`, and top-level direct media through one deduplicating
+  layer shared by normal and cookie-authenticated metadata extraction.
+- Missing audio metadata is unknown, not absent. Unknown audio may be downloaded
+  under the 50 MiB guard but must be confirmed after download before Gemini.
+- `ffprobe`/`ffmpeg` support is optional and bounded; neither exists in the
+  supported Docker image, so no dependency or unconditional transcoding was
+  added. Probe-unavailable direct media fails safely and is visible as one beta
+  grouped warning rather than being discarded as zero candidates.
+
 ## 2026-07-20 — M23.W2 adaptive media and terminal outcomes
 
 - Active queue social extraction uses a 36 MiB preferred target, a 50 MiB hard

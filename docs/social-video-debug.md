@@ -40,6 +40,14 @@
   MiB. Terminal size exhaustion persists `media_size_exceeded`, logs one safe
   WARNING, and groups one warning occurrence per failed job in worker Sentry;
   intermediate fallbacks do not capture. See `docs/m23-adaptive-media.md`.
+- M23.W2B fixes the post-W2 direct-candidate regression. The active normalizer
+  now reads `formats`, `requested_formats`/`requested_downloads`, and top-level
+  direct media, deduplicates them, and treats missing audio metadata as unknown.
+  The sanitized Instagram shape now produces one `top_level_direct` candidate
+  and at least one bounded attempt. Docker currently provides neither ffprobe
+  nor ffmpeg, so unknown-audio verification/optimization remains blocked until
+  the supported image supplies them; probe-unavailable and no-audio terminal
+  outcomes are safely cleaned up and grouped as a beta warning.
 
 ## TikTok / TikWM Finding
 

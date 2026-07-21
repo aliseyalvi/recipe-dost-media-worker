@@ -52,15 +52,22 @@
 | 48 | M22E.1R-B AI-generated tags end-to-end | In Progress | Pushed to `develop`; active queue Gemini tag contract, normalization, and `recipe_cards.tags_json` persistence; development Render/database smoke awaits authenticated verification |
 | 49 | M22E.2C Privacy-safe worker Sentry monitoring | Done | Explicit active-queue-only Python Sentry capture, fail-closed production/development branch policy, strict sanitizer, and controlled development verification command |
 | 50 | M23.W2 Adaptive media processing and worker outcomes | Done locally | Size-aware 720p-to-360p selection, 36/50 MiB guards, Build 3-compatible failure persistence, safe Render logs, and grouped terminal Sentry warnings; staged Render verification pending |
-| 51 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 52 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 53 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 51 | M23.W2B Direct Instagram media candidate regression | Done locally | Normalize formats/requested/top-level candidates, preserve unknown audio until bounded post-download probe, and add safe beta outcome telemetry; development verification pending |
+| 52 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 53 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 54 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Verify M23.W2 first on the development Render service from `develop`; do not
+Verify M23.W2B first on the development Render service from `develop`; do not
 promote to the production `main` service until the staged checks in
 `docs/m23-adaptive-media.md` pass.
+
+- M23.W2B is complete locally. The confirmed top-level Instagram candidate now
+  normalizes as one `top_level_direct/audio_unknown` format and receives a
+  bounded attempt. The current Docker image lacks ffprobe/ffmpeg, so unknown
+  audio cannot yet be confirmed or optimized in Render; this remains an
+  explicit development verification blocker, not a zero-candidate regression.
 
 - M23.W2 is complete locally. Active queue social extraction now pins
   size-estimated combined audio/video formats through a bounded

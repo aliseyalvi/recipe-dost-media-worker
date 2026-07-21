@@ -71,6 +71,8 @@ ALLOWED_ERROR_CODES = {
     "media_size_exceeded",
 }
 ALLOWED_PLATFORMS = {"instagram", "tiktok", "youtube", "unknown"}
+ALLOWED_CANDIDATE_SOURCES = {"formats", "requested_formats", "top_level_direct", "unknown"}
+ALLOWED_AUDIO_STATES = {"audio_present", "audio_absent", "audio_unknown"}
 EXPECTED_PRODUCT_ERROR_CODES = {
     "invalid_url",
     "invalid_tiktok_url",
@@ -129,6 +131,8 @@ ALLOWED_TAG_KEYS = {
     "stage",
     "error_code",
     "source_platform",
+    "candidate_source_type",
+    "audio_state",
 }
 ALLOWED_CONTEXT_KEYS = {
     "retry_attempt",
@@ -141,9 +145,17 @@ ALLOWED_CONTEXT_KEYS = {
     "selected_resolution_bucket",
     "adaptive_attempt_count",
     "cookie_retry_used",
+    "normalized_candidate_count",
+    "probe_performed",
+    "probe_audio_present",
+    "probe_video_present",
+    "optimization_attempted",
+    "optimization_succeeded",
 }
 MEDIA_SIZE_WARNING_MESSAGE = "worker_outcome:media_size_exceeded"
 MEDIA_SIZE_FINGERPRINT = ["worker_outcome", "media_size_exceeded"]
+NO_SUPPORTED_MEDIA_WARNING_MESSAGE = "worker_outcome:no_supported_media"
+NO_SUPPORTED_MEDIA_FINGERPRINT = ["worker_outcome", "no_supported_media"]
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 SAFE_RELEASE = re.compile(r"^recipe-dost-media-worker@[A-Za-z0-9._-]{7,64}$")
 
@@ -364,6 +376,10 @@ def _sanitize_tags(event: Mapping[str, Any]) -> dict[str, str] | None:
         return None
     if tags.get("source_platform", "unknown") not in ALLOWED_PLATFORMS:
         return None
+    if tags.get("candidate_source_type", "unknown") not in ALLOWED_CANDIDATE_SOURCES:
+        tags.pop("candidate_source_type", None)
+    if tags.get("audio_state", "audio_unknown") not in ALLOWED_AUDIO_STATES:
+        tags.pop("audio_state", None)
     if tags.get("flow") == "process" and tags.get("feature") != "worker_runtime":
         return None
     return tags
@@ -382,12 +398,18 @@ def _sanitize_worker_context(event: Mapping[str, Any]) -> dict[str, object] | No
             "recoverable",
             "terminal",
             "cookie_retry_used",
+            "probe_performed",
+            "probe_audio_present",
+            "probe_video_present",
+            "optimization_attempted",
+            "optimization_succeeded",
         } and isinstance(value, bool):
             sanitized[key] = value
         elif key in {
             "retry_attempt",
             "safe_http_status",
             "adaptive_attempt_count",
+            "normalized_candidate_count",
         } and isinstance(value, int) and 0 <= value <= 1000:
             sanitized[key] = value
         elif key in {
@@ -407,6 +429,12 @@ def _sanitize_message(event: Mapping[str, Any], error_code: str) -> str | None:
         and event.get("level") == "warning"
     ):
         return MEDIA_SIZE_WARNING_MESSAGE
+    if (
+        error_code == "unified_extractor_failed"
+        and message == NO_SUPPORTED_MEDIA_WARNING_MESSAGE
+        and event.get("level") == "warning"
+    ):
+        return NO_SUPPORTED_MEDIA_WARNING_MESSAGE
     return None
 
 
@@ -428,8 +456,13 @@ def before_send(event: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any] 
         sanitized["exception"] = exception
     if message is not None:
         sanitized["message"] = message
-        if event.get("fingerprint") == MEDIA_SIZE_FINGERPRINT:
-            sanitized["fingerprint"] = list(MEDIA_SIZE_FINGERPRINT)
+        fingerprint = event.get("fingerprint")
+        normalized_fingerprint = tuple(fingerprint) if isinstance(fingerprint, list) else ()
+        if normalized_fingerprint in {
+            tuple(MEDIA_SIZE_FINGERPRINT),
+            tuple(NO_SUPPORTED_MEDIA_FINGERPRINT),
+        }:
+            sanitized["fingerprint"] = list(normalized_fingerprint)
     event_id = event.get("event_id")
     if isinstance(event_id, str) and re.fullmatch(r"[a-fA-F0-9]{32}", event_id):
         sanitized["event_id"] = event_id
@@ -558,20 +591,46 @@ def report_terminal_worker_outcome(
     selected_resolution_bucket: str | None,
     adaptive_attempt_count: int,
     cookie_retry_used: bool,
+    outcome_kind: str = "media_size_exceeded",
+    normalized_candidate_count: int = 0,
+    candidate_source_type: str | None = None,
+    audio_state: str | None = None,
+    probe_performed: bool = False,
+    probe_audio_present: bool | None = None,
+    probe_video_present: bool | None = None,
+    optimization_attempted: bool = False,
+    optimization_succeeded: bool = False,
 ) -> str | None:
-    if error_code != "media_size_exceeded" or not initialize_sentry():
+    is_size_outcome = (
+        outcome_kind == "media_size_exceeded" and error_code == "media_size_exceeded"
+    )
+    is_media_outcome = (
+        outcome_kind == "no_supported_media"
+        and error_code == "unified_extractor_failed"
+    )
+    if not (is_size_outcome or is_media_outcome) or not initialize_sentry():
         return None
     platform = (source_platform or "unknown").strip().lower()
     if platform not in ALLOWED_PLATFORMS:
         platform = "unknown"
+    normalized_source = (
+        candidate_source_type
+        if candidate_source_type in ALLOWED_CANDIDATE_SOURCES
+        else "unknown"
+    )
+    normalized_audio = (
+        audio_state if audio_state in ALLOWED_AUDIO_STATES else "audio_unknown"
+    )
     tags = {
         "service": SERVICE_NAME,
         "flow": "current",
         "feature": "metadata",
         "operation": "extract_metadata",
         "stage": "unified_extractor",
-        "error_code": "media_size_exceeded",
+        "error_code": error_code,
         "source_platform": platform,
+        "candidate_source_type": normalized_source,
+        "audio_state": normalized_audio,
     }
     worker_context = {
         "duration_bucket": duration_bucket or "unknown",
@@ -579,15 +638,31 @@ def report_terminal_worker_outcome(
         "selected_resolution_bucket": selected_resolution_bucket or "unknown",
         "adaptive_attempt_count": max(0, min(adaptive_attempt_count, 4)),
         "cookie_retry_used": bool(cookie_retry_used),
+        "normalized_candidate_count": max(0, min(normalized_candidate_count, 100)),
+        "probe_performed": bool(probe_performed),
+        "probe_audio_present": probe_audio_present,
+        "probe_video_present": probe_video_present,
+        "optimization_attempted": bool(optimization_attempted),
+        "optimization_succeeded": bool(optimization_succeeded),
         "terminal": True,
     }
+    message = (
+        MEDIA_SIZE_WARNING_MESSAGE
+        if is_size_outcome
+        else NO_SUPPORTED_MEDIA_WARNING_MESSAGE
+    )
+    fingerprint = (
+        MEDIA_SIZE_FINGERPRINT
+        if is_size_outcome
+        else NO_SUPPORTED_MEDIA_FINGERPRINT
+    )
     try:
         with sentry_sdk.new_scope() as scope:
             scope.set_tags(tags)
             scope.set_context("worker", worker_context)
-            scope.fingerprint = list(MEDIA_SIZE_FINGERPRINT)
+            scope.fingerprint = list(fingerprint)
             event_id = sentry_sdk.capture_message(
-                MEDIA_SIZE_WARNING_MESSAGE,
+                message,
                 level="warning",
             )
         return str(event_id) if event_id else None
