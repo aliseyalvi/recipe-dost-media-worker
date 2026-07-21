@@ -2,6 +2,22 @@
 
 ## Current Status
 
+- M23.W3C supersedes the unresolved legacy Instagram selector for new external
+  traffic. `rapidapi_instagram_reels13` and `akng_tiktok` are implemented behind
+  environment-specific config, with signed URLs held only in memory, structured
+  candidate selection, guarded URL alternatives, ffprobe, conditional ffmpeg
+  muxing, and final A/V validation. Development is configured for externally
+  routed already-authorized jobs once rotated secrets are installed; production
+  remains external-disabled. No live provider or Render verification has run.
+- M23.W3A confirms the latest Instagram failure occurs before adaptive work:
+  one raw candidate expands to ten normalized entries but yields zero eligible
+  format candidates, so download, probe, optimization, byte verification, and
+  Gemini never run. The active eligibility gate rejects unsupported
+  extension/protocol, missing video evidence, explicit no-audio, or short edge
+  below 360; safe telemetry cannot identify which live field failed without a
+  prohibited provider-body inspection. The target plan replaces default social
+  cookie extraction with disabled provider adapters and preserves yt-dlp only
+  as a separately flagged emergency rollback. No runtime change was made.
 - YouTube worker pipeline works.
 - Instagram works through self-hosted Cobalt.
 - TikTok failed on Cloud Run through yt-dlp and Cobalt.

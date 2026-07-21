@@ -25,7 +25,10 @@ ENV_ONLY_OPTIONAL_KEYS = [
     "YOUTUBE_COOKIES_B64",
     "FACEBOOK_COOKIES_B64",
     "TIKTOK_COOKIES_B64",
+    "INSTAGRAM_RAPIDAPI_KEY",
+    "TIKTOK_AKNG_ACCESS_TOKEN",
     "SENTRY_DSN",
+    "SENTRY_DEV_CANARY",
     "SENTRY_DEV_TEST",
 ]
 ENV_ONLY_EXPORT_KEYS = sorted(set(ENV_ONLY_REQUIRED_KEYS + ENV_ONLY_OPTIONAL_KEYS))
@@ -198,12 +201,20 @@ def validate_values(
             errors.append("production env must not contain the known dev Supabase ref")
         if values.get("SENTRY_DEV_TEST", "").strip().lower() not in {"", "false"}:
             errors.append("SENTRY_DEV_TEST must be false in production")
+        if values.get("SENTRY_DEV_CANARY", "").strip().lower() not in {"", "false"}:
+            errors.append("SENTRY_DEV_CANARY must be false in production")
 
     sentry_dev_test = values.get("SENTRY_DEV_TEST", "").strip().lower()
     if sentry_dev_test not in {"", "true", "false"}:
         errors.append("SENTRY_DEV_TEST must be true or false")
     if sentry_dev_test == "true" and not values.get("SENTRY_DSN", "").strip():
         errors.append("SENTRY_DEV_TEST=true requires SENTRY_DSN")
+
+    sentry_dev_canary = values.get("SENTRY_DEV_CANARY", "").strip().lower()
+    if sentry_dev_canary not in {"", "true", "false"}:
+        errors.append("SENTRY_DEV_CANARY must be true or false")
+    if sentry_dev_canary == "true" and not values.get("SENTRY_DSN", "").strip():
+        errors.append("SENTRY_DEV_CANARY=true requires SENTRY_DSN")
 
     worker_api_secret = values.get("WORKER_API_SECRET", "").strip()
     media_secret = values.get("MEDIA_WORKER_SHARED_SECRET", "").strip()
@@ -282,10 +293,8 @@ def validate_config(environment: str) -> dict[str, Any]:
             if actual != expected:
                 errors.append(f"production config {key} must be {expected}")
         required_true = [
-            "ENABLE_INSTAGRAM_COOKIES",
             "ENABLE_RENDER_INSTAGRAM_RESOLVER",
             "ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR",
-            "ENABLE_YTDLP_COOKIES",
             "GEMINI_STRUCTURED_OUTPUT_ENABLED",
             "RECIPE_QUALITY_GATE_ENABLED",
             "RECIPE_REPAIR_ENABLED",
@@ -294,15 +303,23 @@ def validate_config(environment: str) -> dict[str, Any]:
             if not _config_bool(config.get(key, False)):
                 errors.append(f"production config {key} must be true")
         fallback_false_keys = [
-            "ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR",
+            "COOKIE_MEDIA_FALLBACK_ENABLED",
             "ENABLE_INSTAGRAM_COOKIES",
             "ENABLE_YTDLP_COOKIES",
         ]
         for key in fallback_false_keys:
-            if _config_bool(config.get(key, False)) is False:
-                errors.append(
-                    f"production effective config still has {key}=false"
-                )
+            if _config_bool(config.get(key, False)):
+                errors.append(f"production config {key} must be false")
+        required_resolver_strings = {
+            "MEDIA_RESOLVER_MODE": "legacy",
+            "EXTERNAL_MEDIA_RESOLVER_AUDIENCE": "disabled",
+        }
+        for key, expected in required_resolver_strings.items():
+            actual = str(config.get(key, "")).strip().lower()
+            if actual != expected:
+                errors.append(f"production config {key} must be {expected}")
+        if not _config_bool(config.get("YOUTUBE_DIRECT_GEMINI_ENABLED", False)):
+            errors.append("production config YOUTUBE_DIRECT_GEMINI_ENABLED must be true")
         if _config_bool(config.get("LOCAL_BRIEF_PARSER_ENABLED", False)):
             errors.append("production config LOCAL_BRIEF_PARSER_ENABLED must be false")
         if _config_bool(config.get("REAL_AI_FALLBACK_TO_MOCK", False)):

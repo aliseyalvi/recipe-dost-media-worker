@@ -42,6 +42,63 @@ class MediaJobRepository:
             return None
         return MediaJobRecord.model_validate(response.data[0])
 
+    def claim_oldest_queued_job(self) -> MediaJobRecord | None:
+        candidate = self.get_oldest_queued_job()
+        if candidate is None:
+            return None
+        response = (
+            self._client.table("media_jobs")
+            .update(
+                {
+                    "status": "resolving",
+                    "progress": 20,
+                    "error_code": None,
+                    "error_message": None,
+                    "started_at": candidate.started_at or datetime.utcnow().isoformat() + "Z",
+                }
+            )
+            .eq("id", str(candidate.id))
+            .eq("status", "queued")
+            .select(MEDIA_JOB_SELECT)
+            .execute()
+        )
+        if not response.data:
+            return None
+        return MediaJobRecord.model_validate(response.data[0])
+
+    def get_ai_access_context(self, media_job_id: UUID) -> dict[str, Any] | None:
+        response = (
+            self._client.table("media_job_events")
+            .select("metadata")
+            .eq("media_job_id", str(media_job_id))
+            .eq("event_type", "media_job_created")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not response.data:
+            return None
+        metadata = response.data[0].get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+        access = metadata.get("ai_generation_access")
+        return access if isinstance(access, dict) else None
+
+    def has_external_resolver_attempt(
+        self,
+        media_job_id: UUID,
+        adapter_id: str,
+    ) -> bool:
+        response = (
+            self._client.table("media_job_events")
+            .select("id", count="exact", head=True)
+            .eq("media_job_id", str(media_job_id))
+            .eq("event_type", "external_resolver_started")
+            .contains("metadata", {"resolver_adapter": adapter_id})
+            .execute()
+        )
+        return int(response.count or 0) > 0
+
     def update_job(
         self,
         media_job_id: UUID,

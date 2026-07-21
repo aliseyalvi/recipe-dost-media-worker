@@ -62,13 +62,29 @@ def check_runtime_config(environment: str) -> dict[str, object]:
             if actual != expected:
                 errors.append(f"{key} effective value must be {expected}")
 
+        for key in ("ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR",):
+            if not _bool_value(_effective_value(config, key)):
+                errors.append(f"{key} effective value must be true")
+
         for key in (
-            "ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR",
+            "COOKIE_MEDIA_FALLBACK_ENABLED",
             "ENABLE_INSTAGRAM_COOKIES",
             "ENABLE_YTDLP_COOKIES",
         ):
-            if not _bool_value(_effective_value(config, key)):
-                errors.append(f"{key} effective value must be true")
+            if _bool_value(_effective_value(config, key)):
+                errors.append(f"{key} effective value must be false")
+
+        expected_resolver_strings = {
+            "MEDIA_RESOLVER_MODE": "legacy",
+            "EXTERNAL_MEDIA_RESOLVER_AUDIENCE": "disabled",
+        }
+        for key, expected in expected_resolver_strings.items():
+            actual = str(_effective_value(config, key) or "").strip().lower()
+            if actual != expected:
+                errors.append(f"{key} effective value must be {expected}")
+
+        if not _bool_value(_effective_value(config, "YOUTUBE_DIRECT_GEMINI_ENABLED")):
+            errors.append("YOUTUBE_DIRECT_GEMINI_ENABLED effective value must be true")
 
         if _bool_value(_effective_value(config, "ALLOW_RAW_URL_LOGS")):
             errors.append("ALLOW_RAW_URL_LOGS effective value must be false")

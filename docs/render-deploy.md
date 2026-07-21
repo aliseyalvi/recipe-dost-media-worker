@@ -66,3 +66,34 @@ Set `WORKER_API_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `GEMIN
 - Do not log full source URLs, stream URLs, cookies, Gemini prompts, raw Gemini responses, ingredients, or steps.
 - TikTok uses TikWM metadata plus Gemini text-first analysis only in W-M14R1.
 - Instagram/Facebook remain disabled until their Render resolver paths are separately validated.
+
+# M23.W3C external resolver canary
+
+Non-secret resolver mode, audience, adapter chains, provider hosts, CDN suffix
+policies, size limits, and timeouts belong in `config/worker.<environment>.json`,
+not Render environment variables. Render holds only credentials:
+
+```text
+INSTAGRAM_RAPIDAPI_KEY
+TIKTOK_AKNG_ACCESS_TOKEN
+```
+
+Development config currently selects `external`, `all_authorized_ai`,
+`rapidapi_instagram_reels13`, and `akng_tiktok`, with cookie fallback false and
+YouTube direct Gemini true. Rotate the token that appeared in user-provided
+input before installing it. Use separate development and production provider
+applications/keys.
+
+After an offline green test run, deploy only `develop`, confirm safe health
+configuration/credential booleans, and process one authorized test-user job per
+social platform. Provider URLs, bodies, credentials, source URLs, titles, user
+IDs, and recipe content must be absent from Render/Sentry/events. Optional
+development Sentry requires `SENTRY_DEV_CANARY=true` plus the development DSN;
+turn it off after the bounded test.
+
+The first production canary uses production config `external` plus
+`test_users`, the verified provider chains/host policies, cookie fallback false,
+and direct YouTube true. Production secrets are separate. Roll back by setting
+the audience to `disabled`; no mobile release is required. Cookie rollback also
+requires legacy/hybrid mode, `COOKIE_MEDIA_FALLBACK_ENABLED=true`, and the
+existing cookie configuration.

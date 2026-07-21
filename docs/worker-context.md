@@ -22,10 +22,18 @@ The worker may extract safe metadata, create temporary server-side media files f
 ## Working Paths
 
 - YouTube: queue job -> oEmbed metadata -> Gemini native URL input when `YOUTUBE_AI_INPUT_MODE=gemini_url` -> structured recipe card.
-- TikTok/Instagram: queue job -> unified extractor -> verified temp file -> Gemini Files API -> structured recipe card -> temp file deleted.
-- Unified social extraction selects combined audio/video formats by estimated
-  size through 720p -> 540p -> 480p -> 360p. Preferred target is 36 MiB and the
-  streaming/temp-file hard limit is 50 MiB; `*_MB` names use binary MiB.
+- Development TikTok/Instagram AI: server-authorized queue job -> registered
+  external provider adapter -> deterministic candidate selection -> guarded
+  HTTPS download -> ffprobe -> optional A/V mux -> Gemini Files API -> unchanged
+  recipe-card save -> temp files deleted.
+- Metadata preview remains a separate public/no-cookie, download-free path and
+  never reserves AI quota or calls an external media provider.
+- External selection prefers H.264/AVC MP4 at or below 720p and 36 MiB. The
+  streaming/temp-file hard limit is 50 MiB and duration limit is 120 seconds;
+  `*_MB` names use binary MiB.
+- Production is still external-disabled. Its legacy extractor is retained only
+  as rollback code, while cookie use requires the separate fallback flag and is
+  false by default.
 - Mock fixture mode: `AI_ANALYSIS_MODE=mock_fixture` skips Gemini and saves `app/fixtures/mock_recipe_card.json` through the same recipe-card save path.
 
 ## Production Defaults
@@ -35,6 +43,11 @@ The worker may extract safe metadata, create temporary server-side media files f
 - `GEMINI_EXTRACTION_MODE=single_pass_structured`
 - `GEMINI_PRIMARY_MODEL=gemini-3.1-flash-lite`
 - `YOUTUBE_AI_INPUT_MODE=gemini_url`
+- `YOUTUBE_DIRECT_GEMINI_ENABLED=true`
+- `MEDIA_RESOLVER_MODE=legacy`
+- `EXTERNAL_MEDIA_RESOLVER_AUDIENCE=disabled`
+- `INSTAGRAM_RESOLVER_CHAIN=[]`, `TIKTOK_RESOLVER_CHAIN=[]`
+- `COOKIE_MEDIA_FALLBACK_ENABLED=false`
 - `ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true`
 - `MEDIA_EXTRACT_OUTPUT_MODE=temp_file`
 - `PREFERRED_VIDEO_SIZE_MB=36`
@@ -44,7 +57,11 @@ The worker may extract safe metadata, create temporary server-side media files f
 - `LOCAL_BRIEF_PARSER_ENABLED=false`
 - `STORE_RAW_MEDIA=false`
 
-Suspend the old webhook Render service only after the main-branch service validates TikTok, Instagram, and YouTube end to end.
+Development uses `MEDIA_RESOLVER_MODE=external`, audience
+`all_authorized_ai`, Instagram adapter `rapidapi_instagram_reels13`, and TikTok
+adapter `akng_tiktok`. Provider credentials stay only in Render secrets. A
+production canary must first switch to a selected-test-user audience; do not
+copy development credentials to production.
 
 ## Guardrails
 

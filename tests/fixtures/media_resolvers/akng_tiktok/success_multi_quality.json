@@ -1,0 +1,26 @@
+{
+  "success": true,
+  "message": "ok",
+  "data": {
+    "download_urls": [],
+    "itemInfo": {
+      "itemStruct": {
+        "desc": "fixture-title",
+        "video": {
+          "duration": 120,
+          "cover": "https://provider.invalid/media/thumbnail.jpg",
+          "bitrateInfo": [
+            {"Bitrate": 2238945, "BitrateFPS": 60, "GearName": "adapt-lowest-1080", "PlayAddr": {"DataSize": "47587094", "Width": 1080, "Height": 1920, "UrlList": ["https://provider.invalid/media/video-1080"]}, "CodecType": "h265_hvc1", "Format": "dash"},
+            {"Bitrate": 2124349, "BitrateFPS": 30, "GearName": "normal-540-large", "PlayAddr": {"DataSize": "47886554", "Width": 576, "Height": 1024, "UrlList": ["https://provider.invalid/media/video-540-large"]}, "CodecType": "h264", "Format": "mp4"},
+            {"Bitrate": 1250180, "BitrateFPS": 30, "GearName": "adapt-lower-720", "PlayAddr": {"DataSize": "25106354", "Width": 720, "Height": 1280, "UrlList": ["https://provider.invalid/media/video-720"]}, "CodecType": "h265_hvc1", "Format": "dash"},
+            {"Bitrate": 1101445, "BitrateFPS": 30, "GearName": "lower-540", "PlayAddr": {"DataSize": "24828499", "Width": 576, "Height": 1024, "UrlList": ["https://provider.invalid/media/video-540"]}, "CodecType": "h264", "Format": "mp4"},
+            {"Bitrate": 926731, "BitrateFPS": 30, "GearName": "adapt-540", "PlayAddr": {"DataSize": "20115795", "Width": 576, "Height": 1024, "UrlList": ["https://provider.invalid/media/video-540-small"]}, "CodecType": "h265_hvc1", "Format": "dash"}
+          ],
+          "bitrateAudioInfo": [
+            {"Bitrate": 64979, "AudioDataSize": "1463815", "UrlList": {"MainUrl": "https://provider.invalid/media/audio", "BackupUrl": "https://provider.invalid/media/audio-backup", "FallbackUrl": ""}, "CodecType": "aac", "Format": "dash", "AudioFormat": "m4a", "FileId": "audio-main"}
+          ]
+        }
+      }
+    }
+  }
+}

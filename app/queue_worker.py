@@ -6,6 +6,7 @@ import logging
 import re
 import shutil
 import time
+from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -24,7 +25,13 @@ from app.job_runner import (
     platform_for_job,
     save_mock_recipe_card_for_job,
 )
-from app.observability.sentry import report_terminal_worker_outcome, report_worker_error
+from app.observability.sentry import (
+    report_external_resolver_outcome,
+    report_terminal_worker_outcome,
+    report_worker_error,
+)
+from app.media_resolvers.contracts import ResolverError
+from app.media_resolvers.pipeline import resolve_external_media
 from app.recipe_tags import has_required_recipe_tags, normalize_recipe_tags
 from app.schemas import (
     GeminiRecipeResult,
@@ -46,6 +53,10 @@ from app.social.thumbnail_upload import (
 from app.supabase_client import MediaJobRepository, create_repository
 
 logger = logging.getLogger("recipe_dost.worker")
+
+_GEMINI_CALL_CONTEXT: ContextVar[
+    tuple[MediaJobRepository, MediaJobRecord, Settings] | None
+] = ContextVar("queue_gemini_call_context", default=None)
 
 PROMPT_VERSION = "m22e_recipe_tags_v1"
 TWO_STEP_PROMPT_VERSION = "m20_recipe_video_v1"
@@ -298,10 +309,10 @@ async def run_queue_loop(_build_job_runner: Callable[[Settings], object]) -> Non
 def process_next_queued_job() -> bool:
     settings = get_settings()
     repository = create_repository(settings)
-    job = repository.get_oldest_queued_job()
+    job = repository.claim_oldest_queued_job()
     if job is None:
         return False
-    process_queue_job(repository, settings, job)
+    process_queue_job(repository, settings, job, already_claimed=True)
     return True
 
 
@@ -314,6 +325,7 @@ def should_use_youtube_gemini_url(
         platform == "youtube"
         and settings.ai_analysis_mode == "gemini_video_poc"
         and settings.youtube_ai_input_mode == "gemini_url"
+        and settings.youtube_direct_gemini_enabled
     )
 
 
@@ -321,6 +333,8 @@ def process_queue_job(
     repository: MediaJobRepository,
     settings: Settings,
     job: MediaJobRecord,
+    *,
+    already_claimed: bool = False,
 ) -> None:
     extract_result: dict[str, object] | None = None
     video_buffer: io.BytesIO | None = None
@@ -328,16 +342,20 @@ def process_queue_job(
     started_at = perf_counter()
     current_stage = "queue_claim"
     platform = job.platform or "unknown"
+    gemini_context_token: Token[tuple[MediaJobRepository, MediaJobRecord, Settings] | None] = (
+        _GEMINI_CALL_CONTEXT.set((repository, job, settings))
+    )
     try:
-        previous_status = job.status
-        job = repository.update_job(
-            job.id,
-            status="resolving",
-            progress=20,
-            error_code=None,
-            error_message=None,
-            started_at=job.started_at or datetime.now(timezone.utc).isoformat(),
-        )
+        previous_status = "queued" if already_claimed else job.status
+        if not already_claimed:
+            job = repository.update_job(
+                job.id,
+                status="resolving",
+                progress=20,
+                error_code=None,
+                error_message=None,
+                started_at=job.started_at or datetime.now(timezone.utc).isoformat(),
+            )
         add_event(
             repository,
             job.id,
@@ -358,6 +376,17 @@ def process_queue_job(
         )
 
         platform = platform_for_job(job)
+        if (
+            platform == "youtube"
+            and settings.ai_analysis_mode == "gemini_video_poc"
+            and settings.youtube_ai_input_mode == "gemini_url"
+            and not settings.youtube_direct_gemini_enabled
+        ):
+            raise QueueJobFailure(
+                "youtube_processing_failed",
+                "YouTube AI processing is temporarily unavailable.",
+                stage="youtube_gemini_url",
+            )
         if should_use_youtube_gemini_url(job, settings, platform):
             current_stage = "youtube_gemini_url"
             job = process_youtube_gemini_url_job(
@@ -380,33 +409,6 @@ def process_queue_job(
             )
             return
 
-        if not settings.enable_unified_ytdlp_stream_extractor:
-            current_stage = "unified_extractor"
-            add_event(
-                repository,
-                job.id,
-                "unified_extractor_failed",
-                "Unified yt-dlp extractor is disabled.",
-                {
-                    "platform": platform_for_job(job),
-                    "resolver": "ytdlp_stream",
-                    "error_code": "unified_extractor_failed",
-                },
-            )
-            raise QueueJobFailure(
-                "unified_extractor_failed",
-                "Unified social video extraction is not enabled.",
-                stage=current_stage,
-            )
-
-        current_stage = "unified_extractor"
-        add_event(
-            repository,
-            job.id,
-            "unified_extractor_started",
-            "Unified yt-dlp extractor started.",
-            {"platform": platform, "resolver": "ytdlp_stream"},
-        )
         job = repository.update_job(
             job.id,
             status="downloading",
@@ -414,51 +416,12 @@ def process_queue_job(
             error_code=None,
             error_message=None,
         )
-        extract_result = extract_social_video(
-            job.source_url,
-            platform,
-            str(job.id),
-            settings,
-        )
-        emit_extractor_progress_events(repository, job.id, extract_result)
-        if not extract_result.get("success"):
-            error_code = str(extract_result.get("error_code") or "unified_extractor_failed")
-            if not extract_result.get("metadata_fallback_attempted"):
-                add_event(
-                    repository,
-                    job.id,
-                    "unified_extractor_failed",
-                    "Unified yt-dlp extractor failed.",
-                    safe_extract_event_metadata(extract_result, error_code=error_code),
-                )
-            technical_exception = extract_result.get("_technical_exception")
-            failure = QueueJobFailure(
-                error_code,
-                str(
-                    extract_result.get("safe_error_message")
-                    or "This social video could not be processed."
-                ),
-                stage=(
-                    "metadata_fallback"
-                    if extract_result.get("metadata_fallback_attempted")
-                    else current_stage
-                ),
-                exception_type=(
-                    type(technical_exception).__name__
-                    if isinstance(technical_exception, Exception)
-                    else None
-                ),
-                metadata=terminal_extractor_metadata(extract_result),
-            )
-            if isinstance(technical_exception, Exception):
-                raise failure from technical_exception
-            raise failure
-        add_event(
-            repository,
-            job.id,
-            "unified_extractor_completed",
-            "Unified yt-dlp extractor completed.",
-            safe_extract_event_metadata(extract_result),
+        current_stage = "external_resolver" if platform in {"instagram", "tiktok"} else "unified_extractor"
+        extract_result = resolve_queue_media(
+            repository=repository,
+            settings=settings,
+            job=job,
+            platform=platform,
         )
 
         video_buffer = extract_result.get("video_buffer")  # type: ignore[assignment]
@@ -471,6 +434,10 @@ def process_queue_job(
             str_or_none(extract_result.get("thumbnail_source")),
             safe_int_or_none(extract_result.get("duration_seconds")),
         )
+        if str(extract_result.get("resolver_strategy") or "") == "external":
+            # Provider-signed thumbnails may be fetched/uploaded in memory but are
+            # never persisted as source URLs.
+            extract_result["thumbnail_url"] = None
         if uploaded_thumbnail_url is None and not extract_result.get("thumbnail_url"):
             uploaded_thumbnail_url = sample_thumbnail_best_effort(
                 repository,
@@ -550,6 +517,14 @@ def process_queue_job(
             },
         )
     except QueueJobFailure as exc:
+        if exc.stage == "external_resolver":
+            report_external_resolver_outcome(
+                error_code=exc.code,
+                source_platform=platform,
+                resolver_adapter=str(exc.metadata.get("resolver_adapter") or "unknown"),
+                route_audience=str(exc.metadata.get("route_audience") or "unknown"),
+                fallback_used=bool(exc.metadata.get("fallback_used")),
+            )
         normalized_candidate_count = (
             safe_int_or_none(exc.metadata.get("normalized_candidate_count")) or 0
         )
@@ -683,6 +658,7 @@ def process_queue_job(
             source_platform=platform,
         )
     finally:
+        _GEMINI_CALL_CONTEXT.reset(gemini_context_token)
         if video_buffer is not None:
             video_buffer.close()
         deleted = delete_temp_media(temp_file_path)
@@ -695,6 +671,176 @@ def process_queue_job(
                 {"stage": "queue_cleanup"},
             )
         extract_result = None
+
+
+def resolve_queue_media(
+    *,
+    repository: MediaJobRepository,
+    settings: Settings,
+    job: MediaJobRecord,
+    platform: str,
+) -> dict[str, object]:
+    external_route = external_audience_route(repository, settings, job)
+    should_external = (
+        platform in {"instagram", "tiktok"}
+        and settings.ai_analysis_mode == "gemini_video_poc"
+        and settings.media_resolver_mode in {"external", "hybrid"}
+        and external_route is not None
+    )
+    add_event(
+        repository,
+        job.id,
+        "resolver_route_selected",
+        "Media resolver route selected.",
+        {
+            "platform": platform,
+            "resolver_strategy": "external" if should_external else "legacy",
+            "route_audience": external_route or "not_enabled",
+            "cookie_fallback_enabled": settings.legacy_cookie_media_enabled,
+        },
+    )
+    if should_external:
+        try:
+            result = resolve_external_media(
+                repository=repository,
+                settings=settings,
+                media_job_id=job.id,
+                source_url=job.source_url,
+                platform=platform,
+                audience_route=external_route or "authorized",
+            )
+            result["resolver_strategy"] = "external"
+            return result
+        except ResolverError as exc:
+            if not (
+                settings.media_resolver_mode == "hybrid"
+                and settings.cookie_media_fallback_enabled
+                and exc.fallback_allowed
+            ):
+                raise QueueJobFailure(
+                    exc.code,
+                    exc.safe_message,
+                    stage="external_resolver",
+                    exception_type=type(exc).__name__ if exc.technical else None,
+                    metadata={
+                        "resolver_strategy": "external",
+                        "route_audience": external_route or "authorized",
+                        "retryable": exc.retryable,
+                        "provider_status_class": exc.http_status_class or "unknown",
+                        "resolver_adapter": getattr(exc, "adapter_id", "unknown"),
+                    },
+                ) from (exc if exc.technical else None)
+            add_event(
+                repository,
+                job.id,
+                "resolver_route_selected",
+                "Emergency legacy resolver fallback selected.",
+                {
+                    "platform": platform,
+                    "resolver_strategy": "legacy_cookie_fallback",
+                    "route_audience": external_route or "authorized",
+                    "normalized_error_code": exc.code,
+                    "fallback_used": True,
+                },
+            )
+    elif settings.media_resolver_mode == "external" and platform in {"instagram", "tiktok"}:
+        raise QueueJobFailure(
+            "resolver_configuration_error",
+            "External media processing is not enabled for this authorized job.",
+            stage="external_resolver",
+        )
+
+    if not settings.enable_unified_ytdlp_stream_extractor:
+        raise QueueJobFailure(
+            "unified_extractor_failed",
+            "Unified social video extraction is not enabled.",
+            stage="unified_extractor",
+        )
+    legacy_settings = settings
+    if not settings.legacy_cookie_media_enabled:
+        legacy_settings = settings.model_copy(
+            update={
+                "enable_ytdlp_cookies": False,
+                "enable_instagram_cookies": False,
+                "enable_youtube_cookies": False,
+                "enable_tiktok_cookies": False,
+                "enable_facebook_cookies": False,
+            }
+        )
+    add_event(
+        repository,
+        job.id,
+        "unified_extractor_started",
+        "Unified yt-dlp extractor started.",
+        {"platform": platform, "resolver": "ytdlp_stream"},
+    )
+    result = extract_social_video(
+        job.source_url,
+        platform,
+        str(job.id),
+        legacy_settings,
+    )
+    emit_extractor_progress_events(repository, job.id, result)
+    if not result.get("success"):
+        error_code = str(result.get("error_code") or "unified_extractor_failed")
+        if not result.get("metadata_fallback_attempted"):
+            add_event(
+                repository,
+                job.id,
+                "unified_extractor_failed",
+                "Unified yt-dlp extractor failed.",
+                safe_extract_event_metadata(result, error_code=error_code),
+            )
+        technical_exception = result.get("_technical_exception")
+        failure = QueueJobFailure(
+            error_code,
+            str(result.get("safe_error_message") or "This social video could not be processed."),
+            stage="metadata_fallback" if result.get("metadata_fallback_attempted") else "unified_extractor",
+            exception_type=(
+                type(technical_exception).__name__
+                if isinstance(technical_exception, Exception)
+                else None
+            ),
+            metadata=terminal_extractor_metadata(result),
+        )
+        if isinstance(technical_exception, Exception):
+            raise failure from technical_exception
+        raise failure
+    add_event(
+        repository,
+        job.id,
+        "unified_extractor_completed",
+        "Unified yt-dlp extractor completed.",
+        safe_extract_event_metadata(result),
+    )
+    result["resolver_strategy"] = "legacy"
+    return result
+
+
+def external_audience_route(
+    repository: MediaJobRepository,
+    settings: Settings,
+    job: MediaJobRecord,
+) -> str | None:
+    if settings.external_media_resolver_audience == "disabled":
+        return None
+    context = repository.get_ai_access_context(job.id)
+    if not isinstance(context, dict) or context.get("allowed") is not True:
+        return None
+    reason = str(context.get("reason") or "").strip().lower()
+    role = str(context.get("role") or "").strip().lower()
+    is_test_user = context.get("is_test_user") is True or context.get("isTestUser") is True
+    if settings.external_media_resolver_audience == "test_users":
+        if not (is_test_user or role in {"admin", "tester"}):
+            return None
+        return "test"
+    if reason == "free_credit_available":
+        return "free_credit"
+    if reason in {"tester_override", "admin_override"}:
+        return "test"
+    if reason == "premium_active":
+        return "premium"
+    return "authorized"
 
 
 def save_metadata(
@@ -1543,6 +1689,82 @@ def build_gemini_generation_config(
     return config
 
 
+def guarded_generate_content(
+    client: object,
+    *,
+    model: str,
+    contents: list[object],
+    config: dict[str, object] | None = None,
+    stage: str,
+) -> object:
+    """Reserve the active queue's bounded Gemini call immediately before use."""
+    context = _GEMINI_CALL_CONTEXT.get()
+    if context is not None:
+        repository, job, settings = context
+        if model in settings.gemini_disabled_models:
+            raise QueueJobFailure(
+                "gemini_model_disabled",
+                "This AI model is temporarily disabled.",
+                stage=stage,
+            )
+        try:
+            job_count = repository.count_job_gemini_calls(job.id)
+            if job_count >= settings.gemini_max_calls_per_job:
+                raise QueueJobFailure(
+                    "gemini_job_call_limit_reached",
+                    "Gemini call limit reached for this job.",
+                    stage=stage,
+                    metadata={
+                        "call_count": job_count,
+                        "max_calls_per_job": settings.gemini_max_calls_per_job,
+                    },
+                )
+            day_start = datetime.now(timezone.utc).replace(
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            daily_count = repository.count_daily_gemini_calls(day_start, model=model)
+            model_limit = settings.gemini_daily_dev_model_limits.get(model)
+            daily_limit = (
+                model_limit
+                if model_limit is not None
+                else settings.gemini_daily_dev_call_limit
+            )
+            if settings.app_env == "development" and daily_count >= daily_limit:
+                raise QueueJobFailure(
+                    "gemini_daily_dev_limit_reached",
+                    "Daily development Gemini limit reached.",
+                    stage=stage,
+                    metadata={"call_count": daily_count, "daily_dev_limit": daily_limit},
+                )
+            repository.insert_event(
+                job.id,
+                event_type="gemini_api_call_started",
+                message="Gemini API call started.",
+                metadata={
+                    "model": model,
+                    "stage": stage,
+                    "call_number": job_count + 1,
+                    "max_calls_per_job": settings.gemini_max_calls_per_job,
+                },
+            )
+        except QueueJobFailure:
+            raise
+        except Exception as exc:
+            raise QueueJobFailure(
+                "gemini_call_guard_failed",
+                "Gemini quota guard could not be verified.",
+                stage=stage,
+                exception_type=type(exc).__name__,
+            ) from exc
+    generate = getattr(getattr(client, "models"), "generate_content")
+    if config is None:
+        return generate(model=model, contents=contents)
+    return generate(model=model, contents=contents, config=config)
+
+
 def generate_content_json(
     *,
     client: object,
@@ -1563,10 +1785,12 @@ def generate_content_json(
     last_exc: Exception | None = None
     for config in attempts:
         try:
-            response = client.models.generate_content(
+            response = guarded_generate_content(
+                client,
                 model=model,
                 contents=contents,
                 config=config,
+                stage="gemini_structured_extraction",
             )
             text = extract_gemini_text(response)
             if not text:
@@ -1589,7 +1813,12 @@ def generate_content_json(
         except Exception:
             raise
     if last_exc is not None:
-        response = client.models.generate_content(model=model, contents=contents)
+        response = guarded_generate_content(
+            client,
+            model=model,
+            contents=contents,
+            stage="gemini_structured_extraction",
+        )
         text = extract_gemini_text(response)
         if not text:
             category = empty_structured_response_category(response)
@@ -2351,7 +2580,8 @@ def generate_video_brief(
 ) -> str:
     settings = get_settings()
     try:
-        response = client.models.generate_content(
+        response = guarded_generate_content(
+            client,
             model=model,
             contents=[uploaded_file, VIDEO_BRIEF_PROMPT],
             config={
@@ -2361,6 +2591,7 @@ def generate_video_brief(
                     settings.gemini_max_output_tokens,
                 ),
             },
+            stage="gemini_video_brief",
         )
     except Exception as exc:
         raise QueueJobFailure(
@@ -2412,13 +2643,15 @@ def generate_video_brief(
             },
         )
         try:
-            response = client.models.generate_content(
+            response = guarded_generate_content(
+                client,
                 model=model,
                 contents=[uploaded_file, VIDEO_BRIEF_RETRY_PROMPT],
                 config={
                     "temperature": 0.2,
                     "max_output_tokens": max(128, settings.gemini_max_output_tokens),
                 },
+                stage="gemini_video_brief",
             )
             retry_text = extract_gemini_text(response)
         except Exception as exc:
@@ -2459,7 +2692,8 @@ def generate_youtube_url_brief(
 
         uri_kwargs = {"file" + "_uri": youtube_url, "mime_type": "video/mp4"}
         video_part = types.Part.from_uri(**uri_kwargs)
-        response = client.models.generate_content(
+        response = guarded_generate_content(
+            client,
             model=model,
             contents=[video_part, VIDEO_BRIEF_PROMPT],
             config={
@@ -2469,6 +2703,7 @@ def generate_youtube_url_brief(
                     settings.gemini_max_output_tokens,
                 ),
             },
+            stage="youtube_gemini_url",
         )
     except Exception as exc:
         raise QueueJobFailure(
@@ -2523,13 +2758,15 @@ def generate_youtube_url_brief(
             },
         )
         try:
-            response = client.models.generate_content(
+            response = guarded_generate_content(
+                client,
                 model=model,
                 contents=[video_part, VIDEO_BRIEF_RETRY_PROMPT],
                 config={
                     "temperature": 0.2,
                     "max_output_tokens": max(128, settings.gemini_max_output_tokens),
                 },
+                stage="youtube_gemini_url",
             )
             retry_text = extract_gemini_text(response)
         except Exception as exc:
@@ -2564,7 +2801,8 @@ def generate_recipe_json(
 ) -> dict:
     prompt = f"{RECIPE_JSON_PROMPT}{brief}"
     try:
-        response = client.models.generate_content(
+        response = guarded_generate_content(
+            client,
             model=model,
             contents=[prompt],
             config={
@@ -2572,9 +2810,15 @@ def generate_recipe_json(
                 "temperature": 0.1,
                 "max_output_tokens": max(512, max_output_tokens),
             },
+            stage="gemini_recipe_json",
         )
     except TypeError:
-        response = client.models.generate_content(model=model, contents=[prompt])
+        response = guarded_generate_content(
+            client,
+            model=model,
+            contents=[prompt],
+            stage="gemini_recipe_json",
+        )
     text = extract_gemini_text(response)
     if not text:
         raise QueueJobFailure(
@@ -3568,7 +3812,8 @@ def repair_recipe_card_with_gemini(
         f"Recipe brief:\n{truncate_brief_for_json(brief_text, settings.gemini_recipe_brief_max_chars)}"
     )
     try:
-        response = client.models.generate_content(
+        response = guarded_generate_content(
+            client,
             model=model,
             contents=[prompt],
             config={
@@ -3576,9 +3821,15 @@ def repair_recipe_card_with_gemini(
                 "temperature": 0.1,
                 "max_output_tokens": max(512, settings.gemini_max_output_tokens),
             },
+            stage="gemini_recipe_json",
         )
     except TypeError:
-        response = client.models.generate_content(model=model, contents=[prompt])
+        response = guarded_generate_content(
+            client,
+            model=model,
+            contents=[prompt],
+            stage="gemini_recipe_json",
+        )
     text = extract_gemini_text(response)
     if not text:
         raise QueueJobFailure(
@@ -3649,7 +3900,8 @@ def maybe_translate_urdu_fields(
     }
     prompt = f"{URDU_TRANSLATION_PROMPT}\n\nJSON:\n{json.dumps(payload, ensure_ascii=False)}"
     try:
-        response = client.models.generate_content(
+        response = guarded_generate_content(
+            client,
             model=model,
             contents=[prompt],
             config={
@@ -3657,6 +3909,7 @@ def maybe_translate_urdu_fields(
                 "temperature": 0.1,
                 "max_output_tokens": 2048,
             },
+            stage="gemini_recipe_json",
         )
         parsed = _extract_json_object(extract_gemini_text(response))
         return apply_urdu_translation(result, parsed)
@@ -4143,6 +4396,10 @@ def sentry_stage(stage: str) -> str:
         "recipe_card_saving",
         "job_completion_update",
         "terminal_failure",
+        "external_resolver",
+        "external_media_download",
+        "media_probe",
+        "media_merge",
     }
     return normalized if normalized in allowed else "terminal_failure"
 
@@ -4151,6 +4408,12 @@ def sentry_boundary_for_stage(stage: str) -> tuple[str, str]:
     normalized = sentry_stage(stage)
     if normalized in {"unified_extractor", "youtube_metadata"}:
         return "metadata", "extract_metadata"
+    if normalized == "external_resolver":
+        return "media_resolution", "resolve_media"
+    if normalized in {"external_media_download", "media_probe"}:
+        return "media_resolution", "download_media"
+    if normalized == "media_merge":
+        return "media_resolution", "merge_media"
     if normalized in {
         "youtube_gemini_url",
         "gemini_file_upload",

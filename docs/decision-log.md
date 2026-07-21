@@ -1,5 +1,43 @@
 # Decision Log
 
+## 2026-07-21 — M23.W3C external resolver implementation
+
+- The active queue now receives only provider-neutral resolutions. Instagram
+  uses `rapidapi_instagram_reels13`; TikTok uses structured AKNG `bitrateInfo`
+  through `akng_tiktok`; YouTube remains direct to Gemini.
+- Development config enables external routing for all jobs that already passed
+  server access. Production remains external-disabled. No flag grants access:
+  the worker requires the server-written AI-access event before provider work.
+- H.264 MP4 within 36 MiB and at most 720p is preferred; the hard final/download
+  limit is 50 MiB and duration remains 120 seconds. Video is probed and separate
+  audio is muxed only when needed. Explicit H.265/DASH remains unsupported.
+- External URL handling is HTTPS/host-policy/SSRF/redirect/byte/signature/probe
+  guarded. Direct URLs never enter events/tables. Cookie metadata is removed;
+  cookie media requires both a legacy/hybrid strategy and its independent flag.
+- Queue claim is conditional, paid adapter attempts are ledgered/bounded, the
+  circuit breaker is local, and every active Gemini call now uses the existing
+  repository-backed call ceiling. No live provider/deployment/mobile/schema or
+  `main` action occurred.
+
+## 2026-07-21 — M23.W3A external media resolver architecture
+
+- Saved-link metadata and AI generation are separate pipelines: metadata is
+  public/no-cookie, download-free, quota-free, bounded, deduplicated, and able
+  to retain the existing minimal Build 3 record.
+- Social AI resolution will use a provider-neutral contract behind disabled,
+  fail-closed flags. Instagram and TikTok use independently testable adapters;
+  YouTube keeps its public URL-to-Gemini route. Cookie yt-dlp is not a default
+  and any temporary emergency fallback requires a separate false-by-default
+  flag.
+- The first production external canary is server-authorized selected test users,
+  followed by Premium and only then `all_ai`, which includes free users' three
+  existing successful generations. Known-failing social routes must reject
+  before job creation instead of consuming an active reservation.
+- Before rollout, the active queue must gain an atomic claim, a shared
+  repository-backed guard before every Gemini call, SSRF-safe bounded media
+  fetching, and one sanitized authoritative Sentry capture after retries are
+  exhausted. This milestone added no integration or runtime behavior.
+
 ## 2026-07-16 — M22E.2E observability QA freeze
 
 - Worker Sentry now fails closed unless execution is on Render with the exact
@@ -48,7 +86,9 @@ Keep this file terse: only durable architecture decisions, not full task history
 
 - YouTube remains the stable direct Gemini path: public URL -> video observation -> recipe normalization -> `recipe_cards`.
 - Gemini free-tier guardrails stay enabled for development: max 2 calls/job, low retry count, repair/fallback chains disabled unless explicitly enabled.
-- Social video uses resolver metadata plus bounded in-memory bytes. Raw video is never written to disk, uploaded to Supabase/Drive, or exposed as a download.
+- Social AI media uses isolated, bounded temporary files that are removed after
+  processing. Raw video is never retained, uploaded to Supabase/Drive, or
+  exposed as a download.
 - yt-dlp is still retained for social metadata/direct stream discovery. Use platform-specific cookies only; Facebook cookies must not be used for TikTok.
 - M14G-4R1 TikTok parser: select direct non-HLS MP4 from `formats[]`, preserve selected `http_headers`, and stream with those headers.
 - M14G-4TWM0 adds TikWM as a protected debug-only probe path. It does not call Gemini, process jobs, save recipe cards, store video, or expose TikWM video URLs.

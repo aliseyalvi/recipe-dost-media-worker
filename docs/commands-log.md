@@ -1135,3 +1135,55 @@ git diff --check
 inspection also confirmed neither dependency is installed. No live media,
 Instagram, Supabase, Gemini, Sentry transport, Render deployment, mobile write,
 or `main` operation occurred.
+
+## M23.W3A external media resolver architecture audit
+
+```bash
+python3 -m compileall app
+.venv/bin/python scripts/check_runtime_config.py development
+.venv/bin/python scripts/check_runtime_config.py production
+.venv/bin/python scripts/check_process_job_queue_mode.py
+git diff --check
+# passed; the queue-mode check emitted only the existing local LibreSSL warning
+
+git status --short
+# documentation files only: the consolidated M23.W3A plan and the required
+# decision, milestone, command, and social-debug tracking updates
+```
+
+The audit used targeted source searches and limited ranges in the worker and
+read-only Build 3 repositories. It did not call a provider, process a URL or
+media file, inspect secrets, contact Supabase/Gemini/Sentry/Render, modify the
+mobile repository, deploy, change schema/runtime configuration, switch or merge
+`main`, or install dependencies.
+
+## M23.W3C feature-flagged external resolver
+
+```bash
+python3 -m compileall app scripts
+# passed
+
+.venv/bin/python -m unittest discover -s tests -v
+# passed: 96 tests
+
+.venv/bin/python -m pytest -q
+# unavailable: pytest is not installed in the existing virtual environment;
+# no dependency was added
+
+.venv/bin/python scripts/check_runtime_config.py development
+.venv/bin/python scripts/check_runtime_config.py production
+.venv/bin/python scripts/validate_env.py development --example
+.venv/bin/python scripts/validate_env.py production --example
+.venv/bin/python scripts/check_process_job_queue_mode.py
+.venv/bin/python scripts/check_recipe_tags.py
+.venv/bin/python -m pip check
+git diff --check
+# passed; env output was masked and the queue check emitted only the existing
+# local LibreSSL warning
+```
+
+Sanitized fixture scans found no live provider URL, signed URL, or token-shaped
+credential. The supplied TikTok token was not written and must be revoked and
+rotated. No provider/media/Gemini/Supabase/Sentry network call, Render action,
+deployment, dependency installation, schema/mobile change, branch switch,
+commit, push, or `main` merge occurred.

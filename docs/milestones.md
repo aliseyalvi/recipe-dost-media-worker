@@ -53,15 +53,33 @@
 | 49 | M22E.2C Privacy-safe worker Sentry monitoring | Done | Explicit active-queue-only Python Sentry capture, fail-closed production/development branch policy, strict sanitizer, and controlled development verification command |
 | 50 | M23.W2 Adaptive media processing and worker outcomes | Done locally | Size-aware 720p-to-360p selection, 36/50 MiB guards, Build 3-compatible failure persistence, safe Render logs, and grouped terminal Sentry warnings; staged Render verification pending |
 | 51 | M23.W2B Direct Instagram media candidate regression | Done locally | Normalize formats/requested/top-level candidates, preserve unknown audio until bounded post-download probe, and add safe beta outcome telemetry; development verification pending |
-| 52 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 53 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 54 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 52 | M23.W3A External media resolver architecture | Done locally | Audit-only metadata/AI separation, provider-neutral resolver contract, Build 3-compatible routing, security, observability, rollout, and rollback plan |
+| 53 | M23.W3C Feature-flagged external media resolver | Done locally | Instagram Reels13 and TikTok AKNG adapters, guarded download/probe/mux, active-queue routing, no-cookie metadata, quota guard, fixtures, and rollback flags; development live verification pending |
+| 54 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 55 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 56 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Verify M23.W2B first on the development Render service from `develop`; do not
-promote to the production `main` service until the staged checks in
-`docs/m23-adaptive-media.md` pass.
+Rotate the exposed TikTok token, install separate development-only provider
+secrets in the development Render service, review the committed CDN suffix
+policies, then run the bounded development procedure in
+`docs/m23-w3-external-media-routing-plan.md`. Do not enable production traffic
+until those results and owner plan limits are reviewed.
+
+- M23.W3C is complete locally. Development config selects external resolution
+  for all already-authorized AI jobs; production remains legacy/disabled with
+  cookie fallback false. Instagram and TikTok adapters, safe media preparation,
+  Build 3-compatible errors/events, atomic claim, Gemini call guard, and tests
+  are implemented without a provider call or deployment.
+
+- M23.W3A is complete locally as an audit-only milestone. The active metadata
+  preview is download-free but still cookie-capable, while active social AI
+  extraction remains coupled to yt-dlp/cookies and temp-file download. The
+  target separates public/no-cookie metadata from AI resolution, keeps YouTube
+  direct to Gemini, and starts external social routing with selected server-side
+  test users behind fail-closed flags. No runtime, provider, secret, schema,
+  Render, or mobile change was made.
 
 - M23.W2B is complete locally. The confirmed top-level Instagram candidate now
   normalizes as one `top_level_direct/audio_unknown` format and receives a

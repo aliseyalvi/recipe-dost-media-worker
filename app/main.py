@@ -14,13 +14,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.ai.gemini_recipe import GeminiRecipeAnalyzer
-from app.config import Settings, get_settings
+from app.config import Settings, get_settings, validate_external_resolver_runtime_config
 from app.job_runner import JobNotFoundError, JobRunner, WorkerProcessingError
 from app.metadata_preview import (
     MetadataPreviewError,
     SUPPORTED_METADATA_PLATFORMS,
     fetch_metadata_preview,
 )
+from app.media_resolvers.media_fetch import sweep_stale_job_directories
 from app.observability.sentry import flush_sentry, initialize_sentry, report_worker_error
 from app.queue_worker import run_queue_loop
 from app.runtime_config import worker_config_report
@@ -80,6 +81,13 @@ class JsonFormatter(logging.Formatter):
             "optimization_succeeded",
             "terminal",
             "sentry_event_id",
+            "resolver_adapter",
+            "route_audience",
+            "fallback_used",
+            "provider_status_class",
+            "media_mode",
+            "latency_bucket",
+            "stale_directories_removed",
         ):
             value = getattr(record, field, None)
             if value is not None:
@@ -351,6 +359,16 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
         "preferred_video_size_mb": settings.preferred_video_size_mb,
         "max_video_size_mb": settings.max_video_size_mb,
         "media_adaptive_max_attempts": settings.media_adaptive_max_attempts,
+        "media_resolver_mode": settings.media_resolver_mode,
+        "external_media_resolver_audience": settings.external_media_resolver_audience,
+        "instagram_resolver_chain": settings.instagram_resolver_chain,
+        "tiktok_resolver_chain": settings.tiktok_resolver_chain,
+        "cookie_media_fallback_enabled": settings.cookie_media_fallback_enabled,
+        "youtube_direct_gemini_enabled": settings.youtube_direct_gemini_enabled,
+        "external_provider_credentials_configured": {
+            "rapidapi_instagram_reels13": settings.instagram_rapidapi_key is not None,
+            "akng_tiktok": settings.tiktok_akng_access_token is not None,
+        },
         "min_video_height": settings.min_video_height,
         "max_video_height": settings.max_video_height,
         "gemini_file_max_size_bytes": settings.gemini_file_max_size_bytes,
@@ -438,9 +456,17 @@ async def wake(settings: Settings = Depends(get_settings)) -> dict[str, object]:
 async def start_queue_worker() -> None:
     try:
         settings = get_settings()
+        validate_external_resolver_runtime_config(settings)
+        stale_directories_removed = sweep_stale_job_directories(
+            settings.temp_media_dir,
+            older_than_seconds=settings.max_job_runtime_seconds + 120,
+        )
         logger.info(
             "worker_safe_config_summary",
-            extra={"safe_config": safe_config_summary(settings)},
+            extra={
+                "safe_config": safe_config_summary(settings),
+                "stale_directories_removed": stale_directories_removed,
+            },
         )
         ensure_queue_worker_started(settings)
     except Exception as exc:

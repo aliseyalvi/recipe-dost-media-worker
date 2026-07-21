@@ -159,6 +159,15 @@ class SentryPolicyTests(unittest.TestCase):
         self.assertFalse(config.enabled)
         self.assertEqual(config.reason, "runtime_requires_production")
 
+    def test_development_canary_requires_explicit_flag_and_develop(self) -> None:
+        values = render_env("development", "develop")
+        values["SENTRY_DEV_CANARY"] = "true"
+        config = sentry.compute_sentry_config(environment=values)
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.environment, "development-canary")
+        values["RENDER_GIT_BRANCH"] = "main"
+        self.assertFalse(sentry.compute_sentry_config(environment=values).enabled)
+
     def test_development_flag_and_develop_enable_controlled_test(self) -> None:
         config = sentry.compute_sentry_config(
             controlled_test=True,
@@ -292,6 +301,32 @@ class SentrySanitizerTests(unittest.TestCase):
         assert sanitized is not None
         self.assertEqual(sanitized["message"], sentry.NO_SUPPORTED_MEDIA_WARNING_MESSAGE)
         self.assertEqual(sanitized["fingerprint"], sentry.NO_SUPPORTED_MEDIA_FINGERPRINT)
+
+    def test_external_resolver_warning_is_retained_and_redacted(self) -> None:
+        event = {
+            "level": "warning",
+            "message": "worker_outcome:resolver_rate_limited",
+            "fingerprint": ["external_resolver", "resolver_rate_limited"],
+            "tags": {
+                "service": sentry.SERVICE_NAME,
+                "flow": "current",
+                "feature": "media_resolution",
+                "operation": "resolve_media",
+                "stage": "external_resolver",
+                "error_code": "resolver_rate_limited",
+                "source_platform": "tiktok",
+                "resolver_adapter": "akng_tiktok",
+                "route_audience": "free_credit",
+                "unsafe": "https://secret.invalid/?token=x",
+            },
+            "contexts": {"worker": {"fallback_used": True, "terminal": True}},
+        }
+        sanitized = sentry.before_send(event, {})
+        self.assertIsNotNone(sanitized)
+        text = str(sanitized)
+        self.assertNotIn("secret.invalid", text)
+        self.assertNotIn("token=", text)
+        self.assertEqual(sanitized["tags"]["resolver_adapter"], "akng_tiktok")
 
     def test_warning_retains_optional_missing_context_and_drops_unsafe_context(self) -> None:
         event = media_size_warning_event()

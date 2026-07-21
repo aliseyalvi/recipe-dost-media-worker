@@ -12,7 +12,6 @@ from app.config import Settings
 from app.social.platforms import detect_social_platform
 from app.social.stream_download import (
     extract_opengraph_metadata,
-    get_platform_cookie_file,
 )
 from app.social.thumbnail_selection import (
     platform_thumbnail,
@@ -211,7 +210,6 @@ def fetch_ytdlp_preview(
             503,
         ) from exc
 
-    cookie_file, _cookie_setup_failed = get_platform_cookie_file(platform, settings)
     opts: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
@@ -228,8 +226,6 @@ def fetch_ytdlp_preview(
             **platform_headers(platform),
             "User-Agent": settings.ytdlp_user_agent,
         }
-    if cookie_file:
-        opts["cookiefile"] = cookie_file
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)

@@ -26,6 +26,10 @@ def settings() -> Settings:
         preferred_video_size_mb=36,
         max_video_size_mb=50,
         gemini_file_max_size_bytes=2_000_000_000,
+        media_resolver_mode="legacy",
+        external_media_resolver_audience="disabled",
+        instagram_resolver_chain=[],
+        tiktok_resolver_chain=[],
     )
 
 
