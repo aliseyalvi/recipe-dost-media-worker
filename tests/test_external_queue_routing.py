@@ -5,7 +5,8 @@ from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 from app.config import Settings
-from app.queue_worker import resolve_queue_media
+from app.media_resolvers.contracts import ResolverError
+from app.queue_worker import QueueJobFailure, resolve_queue_media
 from app.schemas import MediaJobRecord
 
 
@@ -105,6 +106,29 @@ class ExternalQueueRoutingTests(unittest.TestCase):
         ):
             resolve_queue_media(repository=repository, settings=active, job=job("youtube"), platform="youtube")
         external.assert_not_called()
+
+    def test_external_contract_failure_retains_attempt_and_status_class(self) -> None:
+        repository = self.repository()
+        error = ResolverError(
+            "resolver_contract_error",
+            "The TikTok resolver returned an unexpected media contract.",
+            http_status_class="2xx",
+            technical=True,
+        )
+        error.adapter_id = "akng_tiktok"
+        error.provider_attempt = 1
+        with patch("app.queue_worker.resolve_external_media", side_effect=error):
+            with self.assertRaises(QueueJobFailure) as captured:
+                resolve_queue_media(
+                    repository=repository,
+                    settings=settings(),
+                    job=job("tiktok"),
+                    platform="tiktok",
+                )
+        self.assertEqual(captured.exception.code, "resolver_contract_error")
+        self.assertEqual(captured.exception.metadata["provider_attempt"], 1)
+        self.assertEqual(captured.exception.metadata["provider_status_class"], "2xx")
+        self.assertEqual(captured.exception.metadata["resolver_adapter"], "akng_tiktok")
 
 
 if __name__ == "__main__":

@@ -84,6 +84,7 @@ ALLOWED_ERROR_CODES = {
     "resolver_rate_limited",
     "resolver_temporarily_unavailable",
     "resolver_configuration_error",
+    "resolver_contract_error",
     "media_download_failed",
     "media_validation_failed",
     "media_merge_failed",
@@ -571,6 +572,11 @@ def report_worker_error(
     recoverable: bool | None = None,
     terminal: bool | None = None,
     safe_http_status: int | None = None,
+    resolver_adapter: str | None = None,
+    route_audience: str | None = None,
+    fallback_used: bool | None = None,
+    provider_attempt: int | None = None,
+    provider_status_class: str | None = None,
 ) -> str | None:
     if feature not in ALLOWED_FEATURES:
         return None
@@ -614,6 +620,10 @@ def report_worker_error(
         "error_code": normalized_error_code,
         "source_platform": platform,
     }
+    if resolver_adapter:
+        tags["resolver_adapter"] = _safe_identifier(resolver_adapter, "unknown")
+    if route_audience:
+        tags["route_audience"] = _safe_identifier(route_audience, "unknown")
     worker_context = {
         key: value
         for key, value in {
@@ -622,6 +632,9 @@ def report_worker_error(
             "recoverable": recoverable,
             "terminal": terminal,
             "safe_http_status": status,
+            "fallback_used": fallback_used,
+            "provider_attempt": provider_attempt,
+            "provider_status_class": provider_status_class,
         }.items()
         if value is not None
     }
@@ -738,6 +751,8 @@ def report_external_resolver_outcome(
     resolver_adapter: str,
     route_audience: str,
     fallback_used: bool,
+    provider_attempt: int = 0,
+    provider_status_class: str | None = None,
 ) -> str | None:
     if error_code not in EXTERNAL_WARNING_CODES or not initialize_sentry():
         return None
@@ -760,7 +775,12 @@ def report_external_resolver_outcome(
             scope.set_tags(tags)
             scope.set_context(
                 "worker",
-                {"fallback_used": bool(fallback_used), "terminal": True},
+                {
+                    "fallback_used": bool(fallback_used),
+                    "provider_attempt": max(0, min(provider_attempt, 2)),
+                    "provider_status_class": provider_status_class or "unknown",
+                    "terminal": True,
+                },
             )
             scope.fingerprint = ["external_resolver", error_code]
             event_id = sentry_sdk.capture_message(

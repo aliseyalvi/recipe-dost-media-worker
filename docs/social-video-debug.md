@@ -2,6 +2,16 @@
 
 ## Current Status
 
+- M23.W3D-IG passed in development end to end. The separate
+  `private_metadata_save_failed` event remains open and nonblocking; the working
+  Instagram media/Gemini route is unchanged.
+- M23.W3D-TK found two distinct pre-download outcomes. The historical worker
+  error proves a 2xx/success payload lacked list-shaped `bitrateInfo`; the
+  separately observed `INPUT_NOT_VALID` proves request input rejection. Long
+  TikTok URLs now submit their numeric video ID, short `vt`/`vm` links remain
+  normalized URLs, and safe contract/candidate telemetry will distinguish the
+  next live result without logging any URL or body.
+
 - M23.W3C-R repairs the development startup failure: the JSON file was loaded,
   but chain and CDN-suffix Settings fields used empty factories instead of the
   merged file source. File-based loading now covers all resolver fields and

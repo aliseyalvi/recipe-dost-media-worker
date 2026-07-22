@@ -55,18 +55,28 @@
 | 51 | M23.W2B Direct Instagram media candidate regression | Done locally | Normalize formats/requested/top-level candidates, preserve unknown audio until bounded post-download probe, and add safe beta outcome telemetry; development verification pending |
 | 52 | M23.W3A External media resolver architecture | Done locally | Audit-only metadata/AI separation, provider-neutral resolver contract, Build 3-compatible routing, security, observability, rollout, and rollback plan |
 | 53 | M23.W3C Feature-flagged external media resolver | Committed to develop | Instagram Reels13 and TikTok AKNG adapters, guarded download/probe/mux, active-queue routing, no-cookie metadata, quota guard, fixtures, and rollback flags |
-| 54 | M23.W3C-R File-based resolver config remediation | In progress | Repair partial JSON-to-Settings loading, add safe source diagnostics and Python 3.12/Docker regression validation |
-| 55 | M23.W3D Development resolver verification | Blocked | Wait for Docker config check plus successful development Render startup before any live provider job |
-| 56 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 57 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 58 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 54 | M23.W3C-R File-based resolver config remediation | Done | File Settings source, safe source diagnostics, Python 3.12 tests, and healthy development Render startup |
+| 55 | M23.W3D-IG Development Instagram resolver verification | Passed | External route, guarded media preparation, Gemini extraction, recipe save, and temp cleanup completed |
+| 56 | M23.W3D-TK AKNG TikTok contract repair | In progress | Normalize expanded links to video IDs, classify INPUT_NOT_VALID, retain 2xx contract telemetry, and validate live-shape candidates offline |
+| 57 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 58 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 59 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Run `make resolver-config-docker` on a Docker-capable host. If both file-based
-diagnostics pass, redeploy the reviewed `develop` revision to the development
-Render service and confirm its one safe startup summary before any provider job.
-M23.W3D remains blocked until both checks succeed. Production stays unchanged.
+Complete the offline M23.W3D-TK suite, then redeploy only reviewed `develop` and
+run one authorized TikTok development job. Confirm safe contract/candidate
+events before download and the normal validated-media/Gemini sequence after it.
+Production stays unchanged.
+
+- M23.W3D-IG passed in development. `private_metadata_save_failed` remains an
+  open nonblocking metadata issue outside the working Instagram media/Gemini
+  path. The legacy Instagram selector remains parked.
+- M23.W3D-TK distinguishes the historical 2xx missing-`bitrateInfo` contract
+  failure from the separately observed `INPUT_NOT_VALID` request rejection.
+  Expanded `/video/<id>` URLs now submit the documented numeric ID; short links
+  remain normalized URLs. The next Render test must prove the live response via
+  safe shape/count telemetry, not provider-body logging.
 
 - M23.W3C-R root cause is repaired locally: mode/audience loaded because their
   Settings defaults queried JSON, while chains and CDN suffix lists used empty

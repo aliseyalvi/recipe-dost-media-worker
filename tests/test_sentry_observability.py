@@ -400,6 +400,34 @@ class SentryReportingTests(unittest.TestCase):
         self.assertIsNone(second)
         capture.assert_called_once_with(error)
 
+    def test_malformed_resolver_contract_is_a_single_technical_capture(self) -> None:
+        error = RuntimeError("unsafe provider body https://secret.invalid/?token=x")
+        scope = MagicMock()
+        scope.__enter__.return_value = MagicMock()
+        with patch("app.observability.sentry.initialize_sentry", return_value=True), patch(
+            "app.observability.sentry.sentry_sdk.new_scope", return_value=scope
+        ), patch(
+            "app.observability.sentry.sentry_sdk.capture_exception",
+            return_value="c" * 32,
+        ) as capture:
+            first = self._report(
+                error,
+                feature="media_resolution",
+                operation="resolve_media",
+                stage="external_resolver",
+                error_code="resolver_contract_error",
+            )
+            second = self._report(
+                error,
+                feature="media_resolution",
+                operation="resolve_media",
+                stage="external_resolver",
+                error_code="resolver_contract_error",
+            )
+        self.assertEqual(first, "c" * 32)
+        self.assertIsNone(second)
+        capture.assert_called_once_with(error)
+
     def test_controlled_test_refuses_production(self) -> None:
         values = render_env("production", "main", dev_test="true")
         with patch.dict(os.environ, values, clear=True), patch(

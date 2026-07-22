@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import logging
+from collections import Counter
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID
@@ -16,7 +17,11 @@ from app.media_resolvers.media_processing import (
     validate_final_media,
 )
 from app.media_resolvers.registry import build_resolver
-from app.media_resolvers.selection import select_audio_candidate, select_video_candidate
+from app.media_resolvers.selection import (
+    evaluate_video_candidates,
+    select_audio_candidate,
+    select_video_candidate,
+)
 
 logger = logging.getLogger("recipe_dost.worker")
 
@@ -102,8 +107,16 @@ def resolve_external_media(
         logger.info("external_resolver_started", extra=base_event)
         started = time.monotonic()
         job_directory: Path | None = None
+        tiktok_diagnostics_emitted = False
         try:
             resolution = build_resolver(adapter_id, settings).resolve(request)
+            if platform == "tiktok":
+                _emit_tiktok_contract_diagnostic(
+                    repository,
+                    media_job_id,
+                    base_event,
+                    resolution.contract_diagnostic,
+                )
             repository.insert_event(
                 media_job_id,
                 event_type="external_resolver_completed",
@@ -124,22 +137,45 @@ def resolve_external_media(
                 },
             )
             provider_circuit_breaker.record_success(adapter_id)
+            suffixes = tuple(
+                settings.instagram_media_host_suffixes
+                if platform == "instagram"
+                else settings.tiktok_media_host_suffixes
+            )
+            eligible_videos, selection_rejections = evaluate_video_candidates(
+                resolution.candidates,
+                hard_limit_bytes=settings.max_video_size_bytes,
+                max_short_edge=settings.max_video_height,
+                allowed_host_suffixes=suffixes,
+            )
+            if platform == "tiktok":
+                combined_rejections = Counter(resolution.normalization_rejection_counts)
+                combined_rejections.update(selection_rejections)
+                _emit_tiktok_candidate_summary(
+                    repository,
+                    media_job_id,
+                    base_event,
+                    raw_video_candidates=resolution.raw_video_candidate_count,
+                    eligible_video_candidates=len(eligible_videos),
+                    raw_audio_candidates=resolution.raw_audio_candidate_count,
+                    eligible_audio_candidates=sum(
+                        1 for candidate in resolution.candidates if candidate.media_type == "audio"
+                    ),
+                    rejection_counts=dict(combined_rejections),
+                )
+                tiktok_diagnostics_emitted = True
             video = select_video_candidate(
                 resolution.candidates,
                 preferred_bytes=settings.preferred_video_size_bytes,
                 hard_limit_bytes=settings.max_video_size_bytes,
                 max_short_edge=settings.max_video_height,
+                allowed_host_suffixes=suffixes,
             )
             repository.insert_event(
                 media_job_id,
                 event_type="media_candidate_selected",
                 message="External media candidate selected.",
                 metadata={**base_event, **_candidate_event(video), "media_mode": resolution.media_mode},
-            )
-            suffixes = tuple(
-                settings.instagram_media_host_suffixes
-                if platform == "instagram"
-                else settings.tiktok_media_host_suffixes
             )
             downloader = SecureMediaDownloader(
                 temp_root=settings.temp_media_dir,
@@ -256,6 +292,21 @@ def resolve_external_media(
                     ),
                 },
             )
+            source_context = resolution.source_context.to_prompt_dict()
+            if platform == "tiktok":
+                safe_context = resolution.source_context.safe_to_dict()
+                repository.insert_event(
+                    media_job_id,
+                    event_type="gemini_source_context_prepared",
+                    message="Provider source context prepared for Gemini.",
+                    metadata={
+                        **base_event,
+                        **safe_context,
+                        "caption_length_bucket": _text_length_bucket(
+                            int(safe_context.get("caption_length") or 0)
+                        ),
+                    },
+                )
             return {
                 "success": True,
                 "platform": platform,
@@ -280,10 +331,36 @@ def resolve_external_media(
                 "cookie_mode": "none",
                 "provider_attempt": attempt,
                 "fallback_used": fallback_used,
+                "source_context": source_context,
             }
         except ResolverError as exc:
             exc.adapter_id = adapter_id
+            exc.provider_attempt = attempt
             last_error = exc
+            if platform == "tiktok" and not tiktok_diagnostics_emitted:
+                _emit_tiktok_contract_diagnostic(
+                    repository,
+                    media_job_id,
+                    base_event,
+                    getattr(exc, "contract_diagnostic", {}),
+                )
+                if (
+                    getattr(exc, "raw_video_candidate_count", 0)
+                    or getattr(exc, "raw_audio_candidate_count", 0)
+                    or getattr(exc, "normalization_rejection_counts", {})
+                ):
+                    _emit_tiktok_candidate_summary(
+                        repository,
+                        media_job_id,
+                        base_event,
+                        raw_video_candidates=getattr(exc, "raw_video_candidate_count", 0),
+                        eligible_video_candidates=0,
+                        raw_audio_candidates=getattr(exc, "raw_audio_candidate_count", 0),
+                        eligible_audio_candidates=0,
+                        rejection_counts=getattr(
+                            exc, "normalization_rejection_counts", {}
+                        ),
+                    )
             if exc.code in {
                 "resolver_rate_limited",
                 "resolver_temporarily_unavailable",
@@ -291,6 +368,7 @@ def resolve_external_media(
                 "media_validation_failed",
                 "media_merge_failed",
                 "resolver_configuration_error",
+                "resolver_contract_error",
             }:
                 provider_circuit_breaker.record_failure(
                     adapter_id,
@@ -324,6 +402,75 @@ def resolve_external_media(
         "External media resolution failed.",
         retryable=True,
     )
+
+
+def _emit_tiktok_contract_diagnostic(
+    repository: EventRepository,
+    media_job_id: UUID,
+    base_event: dict[str, object],
+    diagnostic: dict[str, object],
+) -> None:
+    if not diagnostic:
+        return
+    repository.insert_event(
+        media_job_id,
+        event_type="tiktok_provider_contract_inspected",
+        message="TikTok provider contract shape inspected.",
+        metadata={**base_event, **diagnostic},
+    )
+    logger.info(
+        "tiktok_provider_contract_inspected",
+        extra={**base_event, **diagnostic},
+    )
+
+
+def _emit_tiktok_candidate_summary(
+    repository: EventRepository,
+    media_job_id: UUID,
+    base_event: dict[str, object],
+    *,
+    raw_video_candidates: int,
+    eligible_video_candidates: int,
+    raw_audio_candidates: int,
+    eligible_audio_candidates: int,
+    rejection_counts: dict[str, int],
+) -> None:
+    safe_rejections = {
+        key: max(0, int(value))
+        for key, value in rejection_counts.items()
+        if key
+        in {
+            "missing_play_addr",
+            "empty_url_list",
+            "invalid_url_type",
+            "non_https_url",
+            "disallowed_initial_host",
+            "unsupported_format",
+            "unsupported_codec",
+            "invalid_size",
+            "exceeds_hard_limit",
+            "invalid_dimensions",
+            "below_minimum_resolution",
+            "exceeds_resolution_limit",
+            "audio_state_unacceptable",
+            "malformed_candidate",
+        }
+    }
+    metadata = {
+        **base_event,
+        "raw_video_candidates": max(0, raw_video_candidates),
+        "eligible_video_candidates": max(0, eligible_video_candidates),
+        "raw_audio_candidates": max(0, raw_audio_candidates),
+        "eligible_audio_candidates": max(0, eligible_audio_candidates),
+        "rejection_counts": safe_rejections,
+    }
+    repository.insert_event(
+        media_job_id,
+        event_type="tiktok_candidate_normalization_summary",
+        message="TikTok media candidates normalized.",
+        metadata=metadata,
+    )
+    logger.info("tiktok_candidate_normalization_summary", extra=metadata)
 
 
 def _candidate_event(candidate) -> dict[str, object]:
@@ -367,6 +514,16 @@ def _duration_bucket(value: int | None) -> str:
     if value <= 120:
         return "60_120_seconds"
     return "over_120_seconds"
+
+
+def _text_length_bucket(value: int) -> str:
+    if value <= 0:
+        return "none"
+    if value <= 250:
+        return "up_to_250_chars"
+    if value <= 750:
+        return "251_750_chars"
+    return "751_1500_chars"
 
 
 def _resolution_bucket(width: int | None, height: int | None) -> str:

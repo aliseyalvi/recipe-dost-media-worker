@@ -64,8 +64,9 @@ class ProviderHttpClientTests(unittest.TestCase):
             active._session.get.return_value = fake
             with self.assertRaises(ResolverError) as captured:
                 self.call(active)
-            self.assertEqual(captured.exception.code, "resolver_configuration_error")
+            self.assertEqual(captured.exception.code, "resolver_contract_error")
             self.assertTrue(captured.exception.technical)
+            self.assertEqual(captured.exception.http_status_class, "2xx")
 
     def test_timeout_does_not_expose_request_url(self) -> None:
         active = self.client()

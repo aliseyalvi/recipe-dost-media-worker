@@ -113,11 +113,15 @@ class SafeProviderHttpClient:
             ).lower()
             if "json" not in content_type:
                 raise ResolverError(
-                    "resolver_configuration_error",
+                    "resolver_contract_error",
                     "The media resolver returned an unsupported response.",
                     fallback_allowed=True,
                     http_status_class=status_class,
                     technical=True,
+                    contract_diagnostic={
+                        "provider_status_class": status_class,
+                        "json_parsed": False,
+                    },
                 )
             body = bytearray()
             for chunk in response.iter_content(chunk_size=64 * 1024):
@@ -126,29 +130,42 @@ class SafeProviderHttpClient:
                 body.extend(chunk)
                 if len(body) > self._response_max_bytes:
                     raise ResolverError(
-                        "resolver_configuration_error",
+                        "resolver_contract_error",
                         "The media resolver response exceeded the safe limit.",
                         fallback_allowed=True,
                         http_status_class=status_class,
                         technical=True,
+                        contract_diagnostic={
+                            "provider_status_class": status_class,
+                            "json_parsed": False,
+                        },
                     )
             try:
                 payload = json.loads(bytes(body))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise ResolverError(
-                    "resolver_configuration_error",
+                    "resolver_contract_error",
                     "The media resolver returned an invalid response.",
                     fallback_allowed=True,
                     http_status_class=status_class,
                     technical=True,
+                    contract_diagnostic={
+                        "provider_status_class": status_class,
+                        "json_parsed": False,
+                    },
                 ) from exc
             if not isinstance(payload, dict):
                 raise ResolverError(
-                    "resolver_configuration_error",
+                    "resolver_contract_error",
                     "The media resolver returned an invalid response.",
                     fallback_allowed=True,
                     http_status_class=status_class,
                     technical=True,
+                    contract_diagnostic={
+                        "provider_status_class": status_class,
+                        "json_parsed": True,
+                        "data_type": type(payload).__name__,
+                    },
                 )
             return payload, status_class, retry_after
 

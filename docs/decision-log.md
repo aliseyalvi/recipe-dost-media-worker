@@ -1,5 +1,22 @@
 # Decision Log
 
+## 2026-07-22 — M23.W3D-TK AKNG TikTok request and contract repair
+
+- Expanded TikTok links normalize to the numeric `/video/<id>` for AKNG's
+  documented URL-or-ID input. Valid `vt`/`vm` short links remain URLs; the
+  worker performs no preliminary redirect request and no speculative retry.
+- `INPUT_NOT_VALID` is terminal `media_unavailable`. A malformed 2xx provider
+  schema is technical `resolver_contract_error`, not a configuration error, and
+  retains the 2xx status plus actual attempt count.
+- Candidate eligibility uses structured provider metadata, never a URL suffix.
+  H.264 MP4 stays the compatibility gate; downloaded bytes remain
+  SSRF/redirect/byte/signature/ffprobe guarded, with audio muxed only when the
+  video probe proves it absent.
+- Optional TikTok context is bounded, sanitized, memory-only, marked untrusted
+  in the Gemini instruction, and observed only through counts/buckets. No live
+  provider call, deploy, Render mutation, mobile/schema change, or main merge
+  was performed by Codex.
+
 ## 2026-07-21 — M23.W3C-R file-based resolver configuration
 
 - Root cause was a partial Settings source: scalar resolver fields read JSON in

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from app.media_resolvers.contracts import MediaCandidate, ResolverError
 from app.media_resolvers.media_fetch import (
+    DownloadedMedia,
     SecureMediaDownloader,
     host_allowed,
     is_public_ip,
@@ -87,6 +88,45 @@ class ExternalMediaSecurityTests(unittest.TestCase):
                     )
             self.assertEqual(captured.exception.code, "media_size_exceeded")
             self.assertFalse((Path(job_dir) / "partial.mp4").exists())
+
+    def test_candidate_url_alternatives_are_tried_in_order_and_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            downloader = SecureMediaDownloader(
+                temp_root=directory,
+                allowed_host_suffixes=("provider.invalid",),
+                byte_limit=1024,
+                connect_timeout_seconds=1,
+                read_timeout_seconds=1,
+                total_timeout_seconds=10,
+                max_redirects=1,
+            )
+            job_dir = downloader.create_job_directory("job")
+            output = job_dir / "video.mp4"
+            output.write_bytes(b"fixture")
+            candidate = MediaCandidate(
+                media_type="video",
+                _urls=(
+                    "https://provider.invalid/tiktok/download?file=first",
+                    "https://provider.invalid/tiktok/download?file=second",
+                ),
+            )
+            first_failure = ResolverError(
+                "media_download_failed",
+                "Resolved media could not be downloaded.",
+            )
+            success = DownloadedMedia(output, 7, "video/mp4")
+            with patch.object(
+                downloader,
+                "_download_url",
+                side_effect=[first_failure, success],
+            ) as download:
+                result = downloader.download_candidate(
+                    candidate,
+                    job_directory=job_dir,
+                    filename="video.mp4",
+                )
+            self.assertEqual(result, success)
+            self.assertEqual(download.call_count, 2)
 
     def test_startup_sweep_is_limited_to_stale_external_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

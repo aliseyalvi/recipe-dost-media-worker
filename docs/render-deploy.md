@@ -138,3 +138,38 @@ Owner recovery checklist:
 
 Rollback is config-only: disable the development external audience in
 `worker.development.json` and redeploy. Do not enable cookie fallback.
+
+## M23.W3D-TK development retest
+
+AKNG accepts a TikTok URL or video ID. The worker now sends the numeric ID from
+an expanded `www.tiktok.com/@.../video/<id>` URL; it keeps a validated `vt`/`vm`
+short URL only when no ID is locally present. `INPUT_NOT_VALID` is a terminal
+input outcome and must not be retried as an outage.
+
+After the offline Python 3.12 suite passes, the owner may run the safe one-shot
+diagnostic from a development shell:
+
+```bash
+APP_ENV=development python scripts/check_tiktok_media_candidate.py
+```
+
+The input is read through a hidden prompt. Output contains only safe host,
+status, redirect, content category/size bucket, signature, and incomplete-body
+fields. It never displays a token or URL. Then redeploy the reviewed `develop`
+commit and run one already-authorized TikTok AI job. Expected early events are:
+
+```text
+external_resolver_started
+tiktok_provider_contract_inspected
+external_resolver_completed
+tiktok_candidate_normalization_summary
+media_candidate_selected
+```
+
+A successful job continues through bounded download, probe, optional merge,
+final validation, `gemini_source_context_prepared`, Gemini extraction, recipe
+save, queue completion, and temp deletion. On failure, retain only safe
+shape/count fields, normalized code, `provider_attempt=1`, and status class.
+Do not copy a provider body or URL from Render/Supabase. Roll back by setting the
+development JSON audience to `disabled` and redeploying `develop`; keep cookie
+fallback false. Production remains legacy/external-disabled.

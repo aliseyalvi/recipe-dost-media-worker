@@ -1224,3 +1224,48 @@ matched only deliberate `secret.invalid`/`provider.invalid` sanitizer and SSRF
 test strings. No actual provider secret was read or printed. No provider,
 Gemini, Supabase, or Sentry call, deployment, Render mutation, mobile/schema
 change, branch switch, commit, push, or main merge occurred.
+
+## M23.W3D-TK AKNG TikTok contract repair
+
+```bash
+uv venv --python 3.12 /private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv
+uv pip install --python /private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  -r requirements.txt
+# Python 3.12.13; dependencies came from the same requirements.txt used by Docker
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m unittest -q \
+  tests.test_media_resolver_adapters tests.test_provider_http_client \
+  tests.test_external_media_security tests.test_external_media_processing \
+  tests.test_external_queue_routing tests.test_queue_claim \
+  tests.test_queue_failure_contract tests.test_queue_gemini_guard \
+  tests.test_metadata_preview_no_cookies tests.test_sentry_observability \
+  tests.test_external_resolver_config tests.test_external_circuit_breaker \
+  tests.test_tiktok_source_context
+# passed: 78 focused tests
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  -m unittest discover -s tests -p "test_*.py" -q
+# passed after final regression pass: 134 tests, 0 failures, 0 errors, 0 skipped, exit 0
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m compileall -q app scripts
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m pip check
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python scripts/check_process_job_queue_mode.py
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python scripts/check_recipe_tags.py
+git diff --check
+# passed
+
+# Development config diagnostic used only dummy provider credentials plus
+# RENDER=true and RENDER_GIT_BRANCH=develop. Production used branch main and no
+# provider credentials. Both passed with resolver controls sourced from the
+# matching repository JSON file.
+
+# Privacy scan: no worktree match for the owner-provided token, real TikTok ID,
+# or short-link code. Generic credential-name matches were limited to config
+# identifiers and example/documentation placeholders; no value was read.
+```
+
+`scripts/check_tiktok_media_candidate.py` was compile-checked but deliberately
+not executed because it is an owner-only live development diagnostic. No AKNG,
+Instagram, Gemini, Supabase, Sentry, or Render request was made. No deployment,
+Render mutation, mobile/schema change, branch switch, commit, push, or main
+merge occurred.

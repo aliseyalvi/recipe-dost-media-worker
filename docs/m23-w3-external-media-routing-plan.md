@@ -1050,3 +1050,77 @@ YouTube direct routing. `RENDER_GIT_BRANCH=develop` is automatic Render metadata
 not an owner-managed feature variable. Production remains legacy mode,
 external audience disabled, empty chains, cookie fallback false, and requires
 no provider credentials. The unresolved legacy Instagram selector is parked.
+
+## 21. M23.W3D-TK AKNG contract and input repair
+
+Development configuration and the common external-media path are proven by an
+end-to-end Instagram success. The TikTok job stopped inside
+`TikTokAkngResolver.resolve()` before download: the deployed code raised only
+when `data.itemInfo.itemStruct.video.bitrateInfo` was not a list. Because the
+adapter discarded the HTTP client's returned status class, that technical
+contract error was incorrectly persisted as `resolver_configuration_error`
+with `provider_status_class=null`. The historical payload was not retained, so
+its missing shape cannot be reconstructed after the fact.
+
+A separately observed AKNG response was `success=false` with
+`message=INPUT_NOT_VALID`. This is request-input rejection, not the malformed
+success-contract path and not a retryable outage. AKNG documents `input` as a
+TikTok URL or ID. Expanded links contain `/video/<numeric id>`; the adapter now
+submits that numeric ID. A validated `vt.tiktok.com` or `vm.tiktok.com` short
+link remains a normalized URL when no ID is locally available. The worker does
+not resolve the short link itself, manufacture a short URL, or make a second
+paid request. `INPUT_NOT_VALID` maps to terminal `media_unavailable` through
+the existing Build 3 fields.
+
+The saved successful response was inspected only through privacy-safe shape
+queries. It matches `data.itemInfo.itemStruct.video`, with five `bitrateInfo`
+candidates, three `bitrateAudioInfo` candidates, numeric-string `DataSize`, and
+AKNG proxy URLs whose paths have no media suffix. The sanitized fixture mirrors
+that structure. Provider `Format`, `CodecType`, dimensions, and size determine
+candidacy; URL suffixes do not. Current compatibility remains H.264 MP4. At the
+36 MiB preferred/50 MiB hard limits, the 576x1024 H.264 MP4 candidate of
+24,828,499 bytes outranks the 47+ MB candidates and H.265/DASH candidates.
+Portrait resolution is evaluated by short edge.
+
+Every parsed AKNG response now produces a safe
+`tiktok_provider_contract_inspected` shape fingerprint. Candidate processing
+produces `tiktok_candidate_normalization_summary` with raw/eligible counts and
+aggregate rejection counts only. Neither event contains a source/media URL,
+ID, caption, provider body, token, or user identity. A malformed 2xx schema is
+technical `resolver_contract_error`, retains `provider_status_class=2xx`, and
+is captured once by Sentry only when the established development canary policy
+is enabled. Configuration errors remain reserved for invalid runtime config.
+Terminal reporting retains the actual provider attempt.
+
+Video candidates remain bounded-download, signature, ffprobe, duration, size,
+and dimension gated. Embedded audio continues directly. A video-only candidate
+selects one bounded audio candidate, muxes with an argv-only ffmpeg call, and
+final-probes for both streams before Gemini. Direct URLs remain memory-only.
+
+AKNG caption, public display name, language, deduplicated hashtags,
+on-screen text, music label, and duration may be prepared as bounded in-memory
+source context. URLs, emails, phone-like strings, provider/user IDs, stats, and
+raw nested objects are excluded. Gemini is explicitly told the metadata is
+untrusted, must not supply instructions, and is secondary to the verified
+video. Events record only presence/count/length buckets.
+
+Owner-only development diagnostic, after offline validation:
+
+```bash
+APP_ENV=development python scripts/check_tiktok_media_candidate.py
+```
+
+The script reads the URL or ID through a hidden prompt, uses the existing token
+without printing it, and performs a guarded 64-byte GET of the selected media.
+It reports only host category, status class, redirect count, matched final
+suffix, content-type/length buckets, signature validity, and
+`body_download_completed=false`. Codex must not run this live diagnostic.
+
+Expected success sequence is `external_resolver_started`,
+`tiktok_provider_contract_inspected`, `external_resolver_completed`,
+`tiktok_candidate_normalization_summary`, `media_candidate_selected`, bounded
+download/probe, optional merge, `external_media_validated`,
+`gemini_source_context_prepared`, Gemini upload/extraction, recipe save, queue
+completion, and temp deletion. Roll back without a mobile build by changing the
+development file audience to `disabled` and redeploying `develop`; cookie
+fallback stays false. Production configuration remains unchanged.
