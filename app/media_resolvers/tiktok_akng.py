@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from urllib.parse import urlparse, urlunparse
+from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 from app.media_resolvers.contracts import (
     MediaCandidate,
@@ -13,17 +14,23 @@ from app.media_resolvers.contracts import (
     SourceContext,
 )
 from app.media_resolvers.http_client import SafeProviderHttpClient
+from app.media_resolvers.tiktok_input import (
+    TikTokCanonicalInput,
+    normalize_full_tiktok_url,
+    resolve_tiktok_canonical_input,
+    resolve_tiktok_input,
+)
 
 ADAPTER_ID = "akng_tiktok"
-TIKTOK_VIDEO_ID = re.compile(r"^[0-9]{10,24}$")
-TIKTOK_HOSTS = {
-    "tiktok.com",
-    "www.tiktok.com",
-    "m.tiktok.com",
-    "vt.tiktok.com",
-    "vm.tiktok.com",
-}
 INPUT_NOT_VALID_CODES = {"input_not_valid", "invalid_input", "invalid_url", "invalid_source"}
+
+
+@dataclass(frozen=True)
+class AkngInputResult:
+    payload: dict[str, object] = field(repr=False, compare=False)
+    status_class: str | None
+    retry_after_seconds: int | None
+    diagnostic: dict[str, object]
 
 
 class TikTokAkngResolver:
@@ -41,7 +48,90 @@ class TikTokAkngResolver:
         self._token = access_token
 
     def resolve(self, request: MediaResolutionRequest) -> MediaResolution:
-        provider_input, input_kind = normalize_akng_input(request.canonical_source_url)
+        if request.source_input_kind in {"short_url", "canonical_url", "numeric_id"}:
+            canonical = resolve_tiktok_input(
+                request.canonical_source_url,
+                input_kind=request.source_input_kind,  # type: ignore[arg-type]
+                connect_timeout_seconds=min(5, request.timeout_seconds),
+                read_timeout_seconds=min(10, request.timeout_seconds),
+                total_timeout_seconds=request.timeout_seconds,
+                max_redirects=5,
+            )
+        else:
+            canonical = resolve_tiktok_canonical_input(
+                request.canonical_source_url,
+                connect_timeout_seconds=min(5, request.timeout_seconds),
+                read_timeout_seconds=min(10, request.timeout_seconds),
+                total_timeout_seconds=request.timeout_seconds,
+                max_redirects=5,
+            )
+        inputs: list[tuple[str, str]] = [(canonical.video_id, "numeric_id")]
+        if canonical.canonical_url:
+            inputs.append((canonical.canonical_url, "canonical_url"))
+        first_diagnostic: dict[str, object] = {}
+        for provider_attempt, (provider_input, input_kind) in enumerate(inputs, start=1):
+            try:
+                inspected = self.inspect_provider_input(
+                    provider_input,
+                    input_kind=input_kind,
+                    provider_attempt=provider_attempt,
+                    alternate_input_attempted=provider_attempt > 1,
+                )
+            except ResolverError as exc:
+                if not exc.failure_stage:
+                    exc.failure_stage = (
+                        "akng_json_parse"
+                        if exc.code == "resolver_contract_error"
+                        and exc.contract_diagnostic.get("json_parsed") is False
+                        else "akng_request"
+                    )
+                exc.diagnostic_state.update(
+                    {
+                        "provider_call_attempted": True,
+                        "provider_input_kind": input_kind,
+                        "provider_status_class": exc.http_status_class or "unknown",
+                        "short_link_expansion_attempted": (
+                            canonical.original_input_kind == "short_url"
+                        ),
+                        "short_link_expansion_completed": (
+                            canonical.original_input_kind == "short_url"
+                        ),
+                        "canonical_url_resolved": canonical.canonical_url is not None,
+                        "numeric_id_resolved": True,
+                        "redirect_count": canonical.redirect_count,
+                    }
+                )
+                raise
+            try:
+                return self._parse_resolution(
+                    inspected,
+                    canonical=canonical,
+                    first_diagnostic=first_diagnostic,
+                )
+            except ResolverError as exc:
+                if provider_attempt == 1 and _eligible_alternate_input(exc):
+                    first_diagnostic = dict(exc.contract_diagnostic)
+                    continue
+                if provider_attempt == 2 and _empty_input_contract(exc):
+                    raise ResolverError(
+                        "media_unavailable",
+                        "This TikTok video did not expose usable media.",
+                        http_status_class=exc.http_status_class,
+                        contract_diagnostic=exc.contract_diagnostic,
+                        failure_stage="akng_contract_validation",
+                        diagnostic_state=_diagnostic_state(exc.contract_diagnostic),
+                    ) from exc
+                raise
+        raise ResolverError("media_unavailable", "This TikTok video did not expose usable media.")
+
+    def inspect_provider_input(
+        self,
+        provider_input: str,
+        *,
+        input_kind: str,
+        provider_attempt: int,
+        alternate_input_attempted: bool,
+    ) -> AkngInputResult:
         host = urlparse(self._base_url).hostname or ""
         payload, status_class, retry_after = self._client.get_json(
             base_url=self._base_url,
@@ -50,7 +140,37 @@ class TikTokAkngResolver:
             headers={"Accept": "application/json"},
             expected_host=host,
         )
-        diagnostic = contract_fingerprint(payload, status_class, input_kind=input_kind)
+        diagnostic = contract_fingerprint(
+            payload,
+            status_class,
+            input_kind=input_kind,
+            provider_attempt=provider_attempt,
+            alternate_input_attempted=alternate_input_attempted,
+        )
+        return AkngInputResult(payload, status_class, retry_after, diagnostic)
+
+    def _parse_resolution(
+        self,
+        inspected: AkngInputResult,
+        *,
+        canonical: TikTokCanonicalInput,
+        first_diagnostic: dict[str, object],
+    ) -> MediaResolution:
+        payload = inspected.payload
+        status_class = inspected.status_class
+        retry_after = inspected.retry_after_seconds
+        diagnostic = {
+            **inspected.diagnostic,
+            "short_link_expanded": canonical.original_input_kind == "short_url",
+            "short_link_expansion_attempted": canonical.original_input_kind == "short_url",
+            "short_link_expansion_completed": canonical.original_input_kind == "short_url",
+            "short_link_redirect_count": canonical.redirect_count,
+            "canonical_url_resolved": canonical.canonical_url is not None,
+            "numeric_id_resolved": True,
+            "provider_call_attempted": True,
+            "alternate_input_attempted": bool(first_diagnostic),
+            "first_input_contract_complete": bool(first_diagnostic.get("contract_complete")),
+        }
         if payload.get("success") is not True:
             message_code = _message_code(payload.get("message"))
             if any(marker in message_code for marker in ("private", "deleted", "not_found")):
@@ -62,7 +182,7 @@ class TikTokAkngResolver:
                 )
             if message_code in INPUT_NOT_VALID_CODES or "not_valid" in message_code:
                 raise _resolver_error(
-                    "media_unavailable",
+                    "resolver_input_rejected",
                     "This TikTok link or video ID is invalid.",
                     status_class=status_class,
                     diagnostic=diagnostic,
@@ -80,6 +200,8 @@ class TikTokAkngResolver:
         if not isinstance(data, dict):
             raise _contract_error(status_class, diagnostic)
         item_info = data.get("itemInfo")
+        if "itemInfo" not in data:
+            raise _empty_contract(status_class, diagnostic)
         if not isinstance(item_info, dict):
             raise _contract_error(status_class, diagnostic)
         item = item_info.get("itemStruct")
@@ -101,6 +223,10 @@ class TikTokAkngResolver:
             elif reason:
                 rejection_counts[reason] += 1
 
+        progressive = _progressive_video_candidate(video)
+        if progressive is not None:
+            videos.append(progressive)
+
         audio_info = video.get("bitrateAudioInfo")
         audio_values = audio_info if isinstance(audio_info, list) else []
         audios: list[MediaCandidate] = []
@@ -119,6 +245,8 @@ class TikTokAkngResolver:
                 http_status_class=status_class,
                 technical=True,
                 contract_diagnostic=diagnostic,
+                failure_stage="candidate_normalization",
+                diagnostic_state=_diagnostic_state(diagnostic),
                 raw_video_candidate_count=len(bitrate_info),
                 raw_audio_candidate_count=len(audio_values),
                 normalization_rejection_counts=dict(rejection_counts),
@@ -129,6 +257,8 @@ class TikTokAkngResolver:
                 "TikTok did not return a supported video candidate.",
                 http_status_class=status_class,
                 contract_diagnostic=diagnostic,
+                failure_stage="candidate_selection",
+                diagnostic_state=_diagnostic_state(diagnostic),
                 raw_video_candidate_count=len(bitrate_info),
                 raw_audio_candidate_count=len(audio_values),
                 normalization_rejection_counts=dict(rejection_counts),
@@ -156,33 +286,7 @@ class TikTokAkngResolver:
 
 
 def normalize_akng_input(source: str) -> tuple[str, str]:
-    text = str(source or "").strip()
-    if TIKTOK_VIDEO_ID.fullmatch(text):
-        return text, "video_id"
-    try:
-        parsed = urlparse(text)
-        _ = parsed.port
-    except (TypeError, ValueError) as exc:
-        raise ResolverError("media_unavailable", "This TikTok link is invalid.") from exc
-    host = (parsed.hostname or "").lower().rstrip(".")
-    if (
-        parsed.scheme != "https"
-        or host not in TIKTOK_HOSTS
-        or parsed.username
-        or parsed.password
-        or parsed.port not in {None, 443}
-    ):
-        raise ResolverError("media_unavailable", "This TikTok link is invalid.")
-    parts = [part for part in parsed.path.split("/") if part]
-    for index, part in enumerate(parts):
-        if part == "video" and index + 1 < len(parts):
-            candidate = parts[index + 1]
-            if TIKTOK_VIDEO_ID.fullmatch(candidate):
-                return candidate, "video_id"
-    if host not in {"vt.tiktok.com", "vm.tiktok.com"} or not parts:
-        raise ResolverError("media_unavailable", "This TikTok link is invalid.")
-    normalized = urlunparse(("https", host, "/" + "/".join(parts) + "/", "", "", ""))
-    return normalized, "short_url"
+    return normalize_full_tiktok_url(source)
 
 
 def contract_fingerprint(
@@ -190,6 +294,8 @@ def contract_fingerprint(
     status_class: str | None,
     *,
     input_kind: str,
+    provider_attempt: int = 1,
+    alternate_input_attempted: bool = False,
 ) -> dict[str, object]:
     data = payload.get("data")
     data_map = _mapping(data)
@@ -206,6 +312,8 @@ def contract_fingerprint(
         "provider_status_class": status_class or "unknown",
         "json_parsed": True,
         "provider_input_kind": input_kind,
+        "provider_attempt": max(1, min(provider_attempt, 2)),
+        "alternate_input_attempted": alternate_input_attempted,
         "success_present": "success" in payload,
         "success_type": _safe_type(payload.get("success")),
         "success_value": payload.get("success") if isinstance(payload.get("success"), bool) else None,
@@ -226,7 +334,36 @@ def contract_fingerprint(
         "download_urls_count": len(download_urls) if isinstance(download_urls, list) else 0,
         "status_code": _bounded_int(data_map.get("statusCode"), minimum=-1, maximum=9999),
         "status_msg_present": "statusMsg" in data_map,
+        "contract_complete": (
+            isinstance(data, dict)
+            and isinstance(item_info, dict)
+            and isinstance(item_struct, dict)
+            and isinstance(video, dict)
+            and isinstance(bitrate_info, list)
+        ),
     }
+
+
+def _empty_contract(status_class: str | None, diagnostic: dict[str, object]) -> ResolverError:
+    return ResolverError(
+        "resolver_input_rejected",
+        "The TikTok resolver did not accept this input form.",
+        fallback_allowed=True,
+        http_status_class=status_class,
+        contract_diagnostic=diagnostic,
+        failure_stage="akng_contract_validation",
+        diagnostic_state=_diagnostic_state(diagnostic),
+    )
+
+
+def _empty_input_contract(exc: ResolverError) -> bool:
+    return exc.code == "resolver_input_rejected" and not bool(
+        exc.contract_diagnostic.get("item_info_present")
+    )
+
+
+def _eligible_alternate_input(exc: ResolverError) -> bool:
+    return exc.code == "resolver_input_rejected" and exc.http_status_class in {None, "2xx", "4xx"}
 
 
 def _contract_error(
@@ -240,6 +377,8 @@ def _contract_error(
         http_status_class=status_class,
         technical=True,
         contract_diagnostic=diagnostic,
+        failure_stage="akng_contract_validation",
+        diagnostic_state=_diagnostic_state(diagnostic),
     )
 
 
@@ -259,7 +398,28 @@ def _resolver_error(
         fallback_allowed=fallback_allowed,
         http_status_class=status_class,
         contract_diagnostic=diagnostic,
+        failure_stage="akng_contract_validation",
+        diagnostic_state=_diagnostic_state(diagnostic),
     )
+
+
+def _diagnostic_state(diagnostic: dict[str, object]) -> dict[str, object]:
+    return {
+        "provider_call_attempted": True,
+        "provider_input_kind": diagnostic.get("provider_input_kind") or "unknown",
+        "provider_status_class": diagnostic.get("provider_status_class") or "unknown",
+        "contract_complete": bool(diagnostic.get("contract_complete")),
+        "short_link_expansion_attempted": bool(
+            diagnostic.get("short_link_expansion_attempted")
+        ),
+        "short_link_expansion_completed": bool(
+            diagnostic.get("short_link_expansion_completed")
+        ),
+        "canonical_url_resolved": bool(diagnostic.get("canonical_url_resolved")),
+        "numeric_id_resolved": bool(diagnostic.get("numeric_id_resolved")),
+        "redirect_count": int(diagnostic.get("short_link_redirect_count") or 0),
+        "raw_video_candidate_count": int(diagnostic.get("bitrate_info_count") or 0),
+    }
 
 
 def _video_candidate(value: object) -> tuple[MediaCandidate | None, str | None]:
@@ -332,6 +492,35 @@ def _audio_candidate(value: object) -> tuple[MediaCandidate | None, str | None]:
             candidate_id=_safe_identifier(value.get("FileId")),
         ),
         None,
+    )
+
+
+def _progressive_video_candidate(video: dict[str, object]) -> MediaCandidate | None:
+    play_addr = video.get("PlayAddrStruct")
+    if not isinstance(play_addr, dict):
+        return None
+    raw_urls: list[object] = [video.get("playAddr"), video.get("downloadAddr")]
+    structured_urls = play_addr.get("UrlList")
+    if isinstance(structured_urls, list):
+        raw_urls.extend(structured_urls)
+    urls = _url_tuple(raw_urls)
+    size = _positive_int(play_addr.get("DataSize"))
+    width = _positive_int(play_addr.get("Width") or video.get("width"))
+    height = _positive_int(play_addr.get("Height") or video.get("height"))
+    if not urls or size is None or width is None or height is None:
+        return None
+    return MediaCandidate(
+        media_type="video",
+        _urls=urls,
+        width=width,
+        height=height,
+        size_bytes=size,
+        codec="",
+        container="mp4",
+        bitrate=_positive_int(video.get("bitrate")),
+        quality_label="top_level_progressive",
+        audio_state="unknown",
+        candidate_id="top_level_progressive",
     )
 
 

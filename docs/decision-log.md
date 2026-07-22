@@ -1,10 +1,40 @@
 # Decision Log
 
-## 2026-07-22 — M23.W3D-TK AKNG TikTok request and contract repair
+## 2026-07-22 — M23.W3D-TK3B3 Python/curl parity and live media gate
 
-- Expanded TikTok links normalize to the numeric `/video/<id>` for AKNG's
-  documented URL-or-ID input. Valid `vt`/`vm` short links remain URLs; the
-  worker performs no preliminary redirect request and no speculative retry.
+- TK1 was insufficient; TK2 proved `normalize_akng_input()` left `vt`/`vm`
+  inputs unresolved and the adapter sent that short URL directly to AKNG.
+- Normal processing now expands TikTok redirects under HTTPS-only, exact-host,
+  public-DNS/peer-IP, no-proxy, no-cookie, timeout, redirect-count, and bounded
+  HTML guards. An unresolved short URL never reaches AKNG.
+- The owner proved curl short-link expansion and then proved AKNG numeric-ID
+  input on the same machine. Numeric ID is therefore the primary provider input.
+  A canonical full URL is attempted once only when it is available and numeric
+  input returns an empty success wrapper or explicit input rejection. Both empty maps to
+  `media_unavailable`; malformed nested types after `itemInfo` map to
+  `resolver_contract_error`.
+- Live reproduction proved Requests/urllib3 released the zero-length 3xx
+  connection before peer inspection, so `connected_peer_ip()` returned `None`.
+  Short-link GETs now use a TLS connection pinned to one prevalidated public DNS
+  answer while retaining TikTok hostname/SNI certificate validation, exact-host
+  redirects, and bounded response handling.
+- AKNG's media proxy ignores Range, omits Content-Length, and uses variable-speed
+  chunked streams. The 6.7 MB H.264 candidate did not complete within budget;
+  the 4.7 MB H.264 candidate completed, had a valid MP4 signature, and ffprobe
+  proved embedded video and audio. TikTok therefore prefers the smallest
+  compatible H.264 candidate and throughput-probes its bounded URL alternatives.
+- `scripts/check_tiktok_akng_end_to_end.py` is the pre-Render gate and shares the
+  worker resolver/download/probe/mux path. It requires an explicit input kind,
+  is development-only, opt-in, hidden-input, and secret/URL/body safe. Offline
+  tests pass. Both numeric-ID and short-link modes exited zero against the
+  development provider and completed signature, ffprobe A/V, and cleanup. No
+  Gemini, Supabase, Sentry, Render, or deployment operation occurred.
+
+## 2026-07-22 — M23.W3D-TK1/TK2 superseded approach
+
+- TK1 normalized expanded TikTok links to numeric IDs but left `vt`/`vm` links
+  unresolved. TK2's live failure disproved that approach; TK3 above supersedes
+  it with safe expansion and a bounded alternate input.
 - `INPUT_NOT_VALID` is terminal `media_unavailable`. A malformed 2xx provider
   schema is technical `resolver_contract_error`, not a configuration error, and
   retains the 2xx status plus actual attempt count.

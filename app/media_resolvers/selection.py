@@ -14,33 +14,57 @@ def select_video_candidate(
     max_short_edge: int = 720,
     allowed_host_suffixes: tuple[str, ...] = (),
 ) -> MediaCandidate:
+    ranked = rank_video_candidates(
+        candidates,
+        preferred_bytes=preferred_bytes,
+        hard_limit_bytes=hard_limit_bytes,
+        max_short_edge=max_short_edge,
+        allowed_host_suffixes=allowed_host_suffixes,
+    )
+    if not ranked:
+        raise ResolverError(
+            "unsupported_media",
+            "The resolver did not return a compatible H.264 MP4 video.",
+            fallback_allowed=True,
+            failure_stage="candidate_selection",
+        )
+    return ranked[0]
+
+
+def rank_video_candidates(
+    candidates: tuple[MediaCandidate, ...],
+    *,
+    preferred_bytes: int,
+    hard_limit_bytes: int,
+    max_short_edge: int = 720,
+    allowed_host_suffixes: tuple[str, ...] = (),
+    prefer_smallest_compatible: bool = False,
+) -> list[MediaCandidate]:
     supported, _rejections = evaluate_video_candidates(
         candidates,
         hard_limit_bytes=hard_limit_bytes,
         max_short_edge=max_short_edge,
         allowed_host_suffixes=allowed_host_suffixes,
     )
-    if not supported:
-        raise ResolverError(
-            "unsupported_media",
-            "The resolver did not return a compatible H.264 MP4 video.",
-            fallback_allowed=True,
-        )
 
-    def rank(candidate: MediaCandidate) -> tuple[int, int, int, int, int]:
+    def rank(candidate: MediaCandidate) -> tuple[int, int, int, int, int, int]:
         size = candidate.size_bytes
         within_preferred = size is not None and size <= preferred_bytes
         short_edge = _short_edge(candidate) or 0
         known_size = size is not None
+        codec = (candidate.codec or "").lower()
+        quality_rank = -short_edge if within_preferred else (size or hard_limit_bytes + 1)
+        size_or_unknown = size if size is not None else hard_limit_bytes + 1
         return (
             0 if within_preferred else 1,
-            0 if (candidate.codec or "").lower() in {"h264", "avc", "avc1"} else 1,
-            -short_edge if within_preferred else (size or hard_limit_bytes + 1),
+            0 if codec in {"h264", "avc", "avc1"} else 1,
+            quality_rank,
+            size_or_unknown if prefer_smallest_compatible else -(candidate.bitrate or 0),
             0 if known_size else 1,
-            size or hard_limit_bytes + 1,
+            -(candidate.bitrate or 0) if prefer_smallest_compatible else -(size or 0),
         )
 
-    return min(supported, key=rank)
+    return sorted(supported, key=rank)
 
 
 def evaluate_video_candidates(

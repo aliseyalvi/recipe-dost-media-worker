@@ -1051,36 +1051,63 @@ not an owner-managed feature variable. Production remains legacy mode,
 external audience disabled, empty chains, cookie fallback false, and requires
 no provider credentials. The unresolved legacy Instagram selector is parked.
 
-## 21. M23.W3D-TK AKNG contract and input repair
+## 21. M23.W3D-TK3B3 Python/curl parity and AKNG end-to-end gate
 
-Development configuration and the common external-media path are proven by an
-end-to-end Instagram success. The TikTok job stopped inside
-`TikTokAkngResolver.resolve()` before download: the deployed code raised only
-when `data.itemInfo.itemStruct.video.bitrateInfo` was not a list. Because the
-adapter discarded the HTTP client's returned status class, that technical
-contract error was incorrectly persisted as `resolver_configuration_error`
-with `provider_status_class=null`. The historical payload was not retained, so
-its missing shape cannot be reconstructed after the fact.
+TK1 was insufficient because it normalized expanded TikTok links to a numeric
+ID without proving the provider's accepted form. TK2 failed live because
+`normalize_akng_input()` deliberately returned a sanitized `vt`/`vm` URL as
+`short_url`, and `TikTokAkngResolver.resolve()` passed it directly to AKNG. No
+redirect expansion ran and the numeric-ID extractor never saw a canonical full
+URL. AKNG returned a 2xx `success=true` wrapper with `data` but no `itemInfo`,
+video, bitrate lists, or download URLs, so download, ffprobe, and Gemini never
+started.
 
-A separately observed AKNG response was `success=false` with
-`message=INPUT_NOT_VALID`. This is request-input rejection, not the malformed
-success-contract path and not a retryable outage. AKNG documents `input` as a
-TikTok URL or ID. Expanded links contain `/video/<numeric id>`; the adapter now
-submits that numeric ID. A validated `vt.tiktok.com` or `vm.tiktok.com` short
-link remains a normalized URL when no ID is locally available. The worker does
-not resolve the short link itself, manufacture a short URL, or make a second
-paid request. `INPUT_NOT_VALID` maps to terminal `media_unavailable` through
-the existing Build 3 fields.
+TK3B3 resolves short links before provider work. The expander permits only HTTPS
+TikTok hosts, follows at most five redirects manually, disables environment
+proxies and cookies, resolves only public addresses, verifies the connected
+peer against DNS, revalidates every target, and applies bounded connect/read/
+total timeouts. Tracking queries and fragments are removed. If the final path
+does not contain `/video/<numeric-id>`, at most 128 KiB of HTML may be inspected
+for a TikTok canonical or OpenGraph URL. Failure to obtain an ID is terminal
+`media_unavailable`; the unresolved short URL is never sent to AKNG in normal
+worker processing. Live reproduction proved the pre-provider failure occurred
+because Requests/urllib3 released the zero-length 3xx connection before peer
+inspection, leaving no socket for `connected_peer_ip()`. The corrected path pins
+TLS to one prevalidated public DNS answer while retaining TikTok hostname/SNI
+certificate validation, exact-host redirect validation, and bounded GET/HTML
+handling. It also recognizes a validated `/video/<digits>` path before
+classifying the terminal page status.
 
-The saved successful response was inspected only through privacy-safe shape
-queries. It matches `data.itemInfo.itemStruct.video`, with five `bitrateInfo`
-candidates, three `bitrateAudioInfo` candidates, numeric-string `DataSize`, and
-AKNG proxy URLs whose paths have no media suffix. The sanitized fixture mirrors
-that structure. Provider `Format`, `CodecType`, dimensions, and size determine
-candidacy; URL suffixes do not. Current compatibility remains H.264 MP4. At the
-36 MiB preferred/50 MiB hard limits, the 576x1024 H.264 MP4 candidate of
-24,828,499 bytes outranks the 47+ MB candidates and H.265/DASH candidates.
-Portrait resolution is evaluated by short edge.
+The worker's evidence-backed input order is numeric ID first, then one canonical
+full-URL alternate, when available, only if numeric input receives an explicit
+input rejection or a 2xx successful wrapper with no `itemInfo`. Authentication,
+configuration, rate limit, provider timeout, private/deleted, and malformed
+nested-contract failures do not create a speculative second paid call. Both
+verified forms returning empty media becomes Build 3-compatible
+`media_unavailable`; malformed types after `itemInfo` exists remain technical
+`resolver_contract_error`. Safe telemetry records input kind, input attempt,
+alternate-used, status class, contract completeness, and structural counts,
+never input values or bodies.
+
+The owner subsequently verified the numeric-ID input manually. It returned the
+same complete nested contract shape as the canonical-URL request: `success=true`,
+`data.itemInfo.itemStruct.video`, 6 video entries, 0 separate-audio entries, and
+22 aggregate download URLs. This proves both configured input forms are accepted
+for the tested media without exposing or committing the ID, token, or response.
+
+The existing sanitized 5-video/3-audio fixture still proves deterministic
+selection of its 576x1024 H.264 MP4 candidate at 24,828,499 bytes. A new
+redacted 6-video/0-audio fixture mirrors only the owner-proven structure and
+contains non-routable placeholder URLs. Offline metadata initially ranked the
+approximately 6.7 MB higher-bitrate H.264 candidate first. Live media evidence
+superseded that order: AKNG's proxy ignored Range, omitted Content-Length, used
+variable-speed chunked transfer, and the 6.7 MB stream did not complete within
+budget. The approximately 4.7 MB, 576x1024 H.264 MP4 completed within budget,
+had a valid signature, and ffprobe proved embedded video and audio. TikTok now
+prefers the smallest compatible H.264 candidate and briefly throughput-probes
+its bounded URL alternatives before the full download. Provider `Format`,
+`CodecType`, dimensions, size, and downloaded bytes determine candidacy; URL
+suffixes do not.
 
 Every parsed AKNG response now produces a safe
 `tiktok_provider_contract_inspected` shape fingerprint. Candidate processing
@@ -1104,23 +1131,33 @@ raw nested objects are excluded. Gemini is explicitly told the metadata is
 untrusted, must not supply instructions, and is secondary to the verified
 video. Events record only presence/count/length buckets.
 
-Owner-only development diagnostic, after offline validation:
+Owner-only development end-to-end gate, after offline validation:
 
 ```bash
-APP_ENV=development python scripts/check_tiktok_media_candidate.py
+APP_ENV=development \
+ALLOW_LIVE_TIKTOK_DIAGNOSTIC=true \
+python scripts/check_tiktok_akng_end_to_end.py --input-kind numeric_id
+
+APP_ENV=development \
+ALLOW_LIVE_TIKTOK_DIAGNOSTIC=true \
+python scripts/check_tiktok_akng_end_to_end.py --input-kind short_url
 ```
 
-The script reads the URL or ID through a hidden prompt, uses the existing token
-without printing it, and performs a guarded 64-byte GET of the selected media.
-It reports only host category, status class, redirect count, matched final
-suffix, content-type/length buckets, signature validity, and
-`body_download_completed=false`. Codex must not run this live diagnostic.
+The command additionally requires `TIKTOK_AKNG_ACCESS_TOKEN` in the process
+environment and refuses non-`develop` branches. It reads exactly the declared
+input kind through a hidden prompt and invokes the same resolver, selector, bounded downloader,
+ffprobe, optional audio mux, final validation, and cleanup path as the queue
+worker. Exit zero requires complete media, verified video and audio, and
+successful cleanup. Normal tests never make a provider call. The final
+numeric-ID and short-link live development runs both exited zero with the same
+shared worker path. No Gemini, Supabase, Sentry, or Render call was made.
 
 Expected success sequence is `external_resolver_started`,
 `tiktok_provider_contract_inspected`, `external_resolver_completed`,
 `tiktok_candidate_normalization_summary`, `media_candidate_selected`, bounded
 download/probe, optional merge, `external_media_validated`,
 `gemini_source_context_prepared`, Gemini upload/extraction, recipe save, queue
-completion, and temp deletion. Roll back without a mobile build by changing the
-development file audience to `disabled` and redeploying `develop`; cookie
+completion, and temp deletion. Both local gates have exited zero; after review
+and commit, the owner may redeploy `develop`. Roll back without a mobile build by changing
+the development file audience to `disabled` and redeploying `develop`; cookie
 fallback stays false. Production configuration remains unchanged.

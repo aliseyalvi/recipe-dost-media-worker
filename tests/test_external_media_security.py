@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from app.media_resolvers.contracts import MediaCandidate, ResolverError
 from app.media_resolvers.media_fetch import (
     DownloadedMedia,
@@ -16,10 +18,184 @@ from app.media_resolvers.media_fetch import (
     supported_media_signature,
     sweep_stale_job_directories,
     validate_media_url,
+    connected_peer_ip,
 )
 
 
 class ExternalMediaSecurityTests(unittest.TestCase):
+    def test_throughput_probe_reorders_url_alternatives_without_exposing_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            downloader = SecureMediaDownloader(
+                temp_root=directory,
+                allowed_host_suffixes=("provider.invalid",),
+                byte_limit=1024,
+                connect_timeout_seconds=1,
+                read_timeout_seconds=1,
+                total_timeout_seconds=10,
+                max_redirects=1,
+            )
+            job_dir = downloader.create_job_directory("throughput")
+            path = job_dir / "video.mp4"
+            path.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+            candidate = MediaCandidate(
+                media_type="video",
+                _urls=(
+                    "https://provider.invalid/slow",
+                    "https://provider.invalid/fast",
+                    "https://provider.invalid/middle",
+                ),
+                size_bytes=12,
+            )
+            downloaded = DownloadedMedia(path, 12, "video/mp4")
+            with patch.object(
+                downloader,
+                "_probe_url_throughput",
+                side_effect=[1.0, 3.0, 2.0],
+            ) as probe, patch.object(
+                downloader,
+                "_download_url",
+                return_value=downloaded,
+            ) as download:
+                result = downloader.download_candidate(
+                    candidate,
+                    job_directory=job_dir,
+                    filename="video.mp4",
+                    probe_alternatives=True,
+                )
+            self.assertEqual(result, downloaded)
+            self.assertEqual(probe.call_count, 3)
+            self.assertEqual(
+                download.call_args.args[0],
+                "https://provider.invalid/fast",
+            )
+
+    def test_known_provider_size_stops_chunked_stream_without_waiting_for_eof(self) -> None:
+        response = MagicMock()
+        response.status_code = 200
+        response.headers = {"Content-Type": "video/mp4"}
+
+        def chunks(*_args: object, **_kwargs: object):
+            yield b"\x00\x00\x00\x18ftypmp42"
+            raise AssertionError("the downloader read beyond the bounded candidate size")
+
+        response.iter_content.side_effect = chunks
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        with tempfile.TemporaryDirectory() as directory:
+            downloader = SecureMediaDownloader(
+                temp_root=directory,
+                allowed_host_suffixes=("provider.invalid",),
+                byte_limit=1024,
+                connect_timeout_seconds=1,
+                read_timeout_seconds=1,
+                total_timeout_seconds=10,
+                max_redirects=1,
+            )
+            downloader._session = MagicMock()
+            downloader._session.get.return_value = response
+            job_dir = downloader.create_job_directory("known-size")
+            candidate = MediaCandidate(
+                media_type="video",
+                _urls=("https://provider.invalid/media",),
+                size_bytes=12,
+            )
+            with patch(
+                "app.media_resolvers.media_fetch.resolve_public_ips",
+                return_value={"8.8.8.8"},
+            ), patch(
+                "app.media_resolvers.media_fetch.connected_peer_ip",
+                return_value="8.8.8.8",
+            ):
+                result = downloader.download_candidate(
+                    candidate,
+                    job_directory=job_dir,
+                    filename="video.mp4",
+                )
+            self.assertEqual(result.size_bytes, 12)
+            self.assertEqual(
+                downloader._session.get.call_args.kwargs["headers"]["Range"],
+                "bytes=0-11",
+            )
+
+    def test_candidate_deadline_bounds_all_url_alternatives(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            downloader = SecureMediaDownloader(
+                temp_root=directory,
+                allowed_host_suffixes=("provider.invalid",),
+                byte_limit=1024,
+                connect_timeout_seconds=1,
+                read_timeout_seconds=1,
+                total_timeout_seconds=10,
+                max_redirects=1,
+            )
+            job_dir = downloader.create_job_directory("deadline")
+            candidate = MediaCandidate(
+                media_type="video",
+                _urls=(
+                    "https://provider.invalid/first",
+                    "https://provider.invalid/second",
+                ),
+            )
+            with patch.object(downloader, "_download_url") as download:
+                with self.assertRaises(ResolverError) as captured:
+                    downloader.download_candidate(
+                        candidate,
+                        job_directory=job_dir,
+                        filename="video.mp4",
+                        deadline_monotonic=time.monotonic() - 1,
+                    )
+            download.assert_not_called()
+            self.assertEqual(captured.exception.code, "media_download_failed")
+
+    def test_stream_read_failure_is_normalized_and_partial_file_removed(self) -> None:
+        response = MagicMock()
+        response.status_code = 200
+        response.headers = {"Content-Type": "video/mp4"}
+        response.iter_content.side_effect = requests.ConnectionError("safe fixture")
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        with tempfile.TemporaryDirectory() as directory:
+            downloader = SecureMediaDownloader(
+                temp_root=directory,
+                allowed_host_suffixes=("provider.invalid",),
+                byte_limit=1024,
+                connect_timeout_seconds=1,
+                read_timeout_seconds=1,
+                total_timeout_seconds=10,
+                max_redirects=1,
+            )
+            downloader._session = MagicMock()
+            downloader._session.get.return_value = response
+            job_dir = downloader.create_job_directory("stream-failure")
+            candidate = MediaCandidate(
+                media_type="video",
+                _urls=("https://provider.invalid/media",),
+            )
+            with patch(
+                "app.media_resolvers.media_fetch.resolve_public_ips",
+                return_value={"8.8.8.8"},
+            ), patch(
+                "app.media_resolvers.media_fetch.connected_peer_ip",
+                return_value="8.8.8.8",
+            ):
+                with self.assertRaises(ResolverError) as captured:
+                    downloader.download_candidate(
+                        candidate,
+                        job_directory=job_dir,
+                        filename="partial.mp4",
+                    )
+            self.assertEqual(captured.exception.code, "media_download_failed")
+            self.assertFalse((job_dir / "partial.mp4").exists())
+
+    def test_peer_ip_supports_nested_urllib3_socket_shape(self) -> None:
+        socket_value = MagicMock()
+        socket_value.getpeername.return_value = ("8.8.8.8", 443)
+        response = MagicMock()
+        response.raw._connection = None
+        response.raw.connection = None
+        response.raw._fp.fp.raw._sock = socket_value
+        self.assertEqual(connected_peer_ip(response), "8.8.8.8")
+
     def test_https_host_policy_and_private_ips(self) -> None:
         parsed = validate_media_url(
             "https://cdn.provider.invalid/media?id=opaque",
@@ -88,6 +264,10 @@ class ExternalMediaSecurityTests(unittest.TestCase):
                     )
             self.assertEqual(captured.exception.code, "media_size_exceeded")
             self.assertFalse((Path(job_dir) / "partial.mp4").exists())
+            self.assertEqual(
+                session.get.call_args.kwargs["headers"]["Range"],
+                "bytes=0-19",
+            )
 
     def test_candidate_url_alternatives_are_tried_in_order_and_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

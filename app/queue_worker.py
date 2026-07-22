@@ -741,6 +741,7 @@ def resolve_queue_media(
                         "resolver_adapter": getattr(exc, "adapter_id", "unknown"),
                         "provider_attempt": getattr(exc, "provider_attempt", 0),
                         "fallback_used": getattr(exc, "provider_attempt", 1) > 1,
+                        "failure_stage": exc.failure_stage or "final_media_validation",
                     },
                 ) from (exc if exc.technical else None)
             add_event(

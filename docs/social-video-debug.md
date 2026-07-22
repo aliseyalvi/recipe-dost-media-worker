@@ -5,12 +5,16 @@
 - M23.W3D-IG passed in development end to end. The separate
   `private_metadata_save_failed` event remains open and nonblocking; the working
   Instagram media/Gemini route is unchanged.
-- M23.W3D-TK found two distinct pre-download outcomes. The historical worker
-  error proves a 2xx/success payload lacked list-shaped `bitrateInfo`; the
-  separately observed `INPUT_NOT_VALID` proves request input rejection. Long
-  TikTok URLs now submit their numeric video ID, short `vt`/`vm` links remain
-  normalized URLs, and safe contract/candidate telemetry will distinguish the
-  next live result without logging any URL or body.
+- M23.W3D-TK1 was insufficient. TK2 proved the worker passed an unresolved
+  `vt`/`vm` URL directly to AKNG, which returned a 2xx empty success wrapper.
+  TK3B3 expands TikTok-only redirects first, submits the numeric ID, then permits
+  one canonical-URL alternate only for an eligible empty/input-rejected result.
+  The owner manually verified complete contracts from both canonical and
+  numeric-ID inputs. Live reproduction then isolated a released 3xx peer socket
+  and variable-speed AKNG proxy streams. DNS-pinned short expansion plus the
+  live-proven smaller H.264 candidate and throughput-ranked URL alternatives now
+  make both explicit numeric-ID and short-link shared-path diagnostics exit zero
+  with signature, ffprobe video/audio, and cleanup verified.
 
 - M23.W3C-R repairs the development startup failure: the JSON file was loaded,
   but chain and CDN-suffix Settings fields used empty factories instead of the

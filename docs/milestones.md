@@ -57,26 +57,28 @@
 | 53 | M23.W3C Feature-flagged external media resolver | Committed to develop | Instagram Reels13 and TikTok AKNG adapters, guarded download/probe/mux, active-queue routing, no-cookie metadata, quota guard, fixtures, and rollback flags |
 | 54 | M23.W3C-R File-based resolver config remediation | Done | File Settings source, safe source diagnostics, Python 3.12 tests, and healthy development Render startup |
 | 55 | M23.W3D-IG Development Instagram resolver verification | Passed | External route, guarded media preparation, Gemini extraction, recipe save, and temp cleanup completed |
-| 56 | M23.W3D-TK AKNG TikTok contract repair | In progress | Normalize expanded links to video IDs, classify INPUT_NOT_VALID, retain 2xx contract telemetry, and validate live-shape candidates offline |
-| 57 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 58 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 59 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 56 | M23.W3D-TK1 AKNG TikTok contract repair | Insufficient | Numeric-ID normalization was not validated against short-link provider behavior |
+| 57 | M23.W3D-TK2 AKNG input telemetry | Failed live | Unresolved short URL reached AKNG and returned an empty success wrapper |
+| 58 | M23.W3D-TK3B3 Python/curl parity and media proof | Passed locally | Numeric-ID primary, DNS-pinned short-link expansion, throughput-ranked AKNG proxy alternatives, and both live local A/V gates passed |
+| 59 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 60 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 61 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Complete the offline M23.W3D-TK suite, then redeploy only reviewed `develop` and
-run one authorized TikTok development job. Confirm safe contract/candidate
-events before download and the normal validated-media/Gemini sequence after it.
-Production stays unchanged.
+Review and commit TK3B3 on `develop`, then run one authorized development Render
+TikTok job. Both local live modes already proved contract resolution, bounded
+download, MP4 signature, ffprobe video/audio, and cleanup. Production stays unchanged.
 
 - M23.W3D-IG passed in development. `private_metadata_save_failed` remains an
   open nonblocking metadata issue outside the working Instagram media/Gemini
   path. The legacy Instagram selector remains parked.
-- M23.W3D-TK distinguishes the historical 2xx missing-`bitrateInfo` contract
-  failure from the separately observed `INPUT_NOT_VALID` request rejection.
-  Expanded `/video/<id>` URLs now submit the documented numeric ID; short links
-  remain normalized URLs. The next Render test must prove the live response via
-  safe shape/count telemetry, not provider-body logging.
+- M23.W3D-TK1 was insufficient and TK2 failed because a `vt`/`vm` URL was sent
+  directly. TK3B3 expands TikTok-only redirects and sends the extracted numeric
+  ID first; a known canonical URL is the one eligible alternate. The owner
+  manually verified complete AKNG contracts for both canonical URL and numeric
+  ID inputs. Final numeric-ID and short-link diagnostics both exit zero using
+  the shared worker path and the live-proven 4.7 MB H.264 candidate.
 
 - M23.W3C-R root cause is repaired locally: mode/audience loaded because their
   Settings defaults queried JSON, while chains and CDN suffix lists used empty

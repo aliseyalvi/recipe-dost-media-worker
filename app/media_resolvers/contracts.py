@@ -17,6 +17,7 @@ class MediaResolutionRequest:
     byte_limit: int
     preferred_byte_target: int
     timeout_seconds: int
+    source_input_kind: str | None = None
 
     def safe_to_dict(self) -> dict[str, object]:
         return {
@@ -26,6 +27,7 @@ class MediaResolutionRequest:
             "byte_limit": self.byte_limit,
             "preferred_byte_target": self.preferred_byte_target,
             "timeout_seconds": self.timeout_seconds,
+            "source_input_kind": self.source_input_kind or "auto",
         }
 
 
@@ -174,6 +176,8 @@ class ResolverError(Exception):
         raw_video_candidate_count: int = 0,
         raw_audio_candidate_count: int = 0,
         normalization_rejection_counts: dict[str, int] | None = None,
+        failure_stage: str | None = None,
+        diagnostic_state: dict[str, object] | None = None,
     ) -> None:
         super().__init__(code)
         self.code = code
@@ -188,6 +192,8 @@ class ResolverError(Exception):
         self.normalization_rejection_counts = dict(
             normalization_rejection_counts or {}
         )
+        self.failure_stage = failure_stage
+        self.diagnostic_state = dict(diagnostic_state or {})
 
 
 class MediaResolver(Protocol):

@@ -76,6 +76,7 @@ class ProviderHttpClientTests(unittest.TestCase):
             self.call(active)
         self.assertEqual(captured.exception.code, "resolver_temporarily_unavailable")
         self.assertNotIn("secret.invalid", str(captured.exception))
+        self.assertIsNone(captured.exception.__cause__)
 
 
 if __name__ == "__main__":

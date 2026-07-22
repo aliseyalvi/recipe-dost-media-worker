@@ -39,6 +39,7 @@ class SafeProviderHttpClient:
                 "External media resolver configuration is invalid.",
                 technical=True,
             )
+        self._session.cookies.clear()
         try:
             response = self._session.get(
                 endpoint,
@@ -48,24 +49,25 @@ class SafeProviderHttpClient:
                 allow_redirects=False,
                 stream=True,
             )
-        except requests.Timeout as exc:
+        except requests.Timeout:
             raise ResolverError(
                 "resolver_temporarily_unavailable",
                 "The media resolver timed out. Please try again.",
                 retryable=True,
                 fallback_allowed=True,
                 technical=False,
-            ) from exc
-        except requests.RequestException as exc:
+            ) from None
+        except requests.RequestException:
             raise ResolverError(
                 "resolver_temporarily_unavailable",
                 "The media resolver is temporarily unavailable.",
                 retryable=True,
                 fallback_allowed=True,
                 technical=True,
-            ) from exc
+            ) from None
 
         with response:
+            self._session.cookies.clear()
             status_class = f"{response.status_code // 100}xx"
             retry_after = _safe_retry_after(
                 response.headers.get("Retry-After") or response.headers.get("retry-after")

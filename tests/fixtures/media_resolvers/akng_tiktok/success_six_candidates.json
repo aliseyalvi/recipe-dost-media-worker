@@ -1,0 +1,107 @@
+{
+  "success": true,
+  "message": "",
+  "data": {
+    "download_urls": [
+      "redacted-01", "redacted-02", "redacted-03", "redacted-04",
+      "redacted-05", "redacted-06", "redacted-07", "redacted-08",
+      "redacted-09", "redacted-10", "redacted-11", "redacted-12",
+      "redacted-13", "redacted-14", "redacted-15", "redacted-16",
+      "redacted-17", "redacted-18", "redacted-19", "redacted-20",
+      "redacted-21", "redacted-22"
+    ],
+    "itemInfo": {
+      "itemStruct": {
+        "desc": "Fixture recipe caption",
+        "video": {
+          "duration": 52,
+          "width": 576,
+          "height": 1024,
+          "bitrate": 1037892,
+          "playAddr": "https://provider.invalid/progressive/play",
+          "downloadAddr": "https://provider.invalid/progressive/download",
+          "PlayAddrStruct": {
+            "DataSize": "6729049",
+            "Width": 576,
+            "Height": 1024,
+            "UrlList": ["https://provider.invalid/progressive/backup"]
+          },
+          "bitrateInfo": [
+            {
+              "GearName": "h264-high",
+              "CodecType": "h264",
+              "Format": "mp4",
+              "Bitrate": 1037892,
+              "PlayAddr": {
+                "DataSize": "6729049",
+                "Width": 576,
+                "Height": 1024,
+                "UrlList": ["https://provider.invalid/video/h264-high"]
+              }
+            },
+            {
+              "GearName": "h265-720",
+              "CodecType": "h265_hvc1",
+              "Format": "mp4",
+              "Bitrate": 811726,
+              "PlayAddr": {
+                "DataSize": "5262726",
+                "Width": 720,
+                "Height": 1280,
+                "UrlList": ["https://provider.invalid/video/h265-720"]
+              }
+            },
+            {
+              "GearName": "h264-lower",
+              "CodecType": "h264",
+              "Format": "mp4",
+              "Bitrate": 728173,
+              "PlayAddr": {
+                "DataSize": "4721022",
+                "Width": 576,
+                "Height": 1024,
+                "UrlList": ["https://provider.invalid/video/h264-lower"]
+              }
+            },
+            {
+              "GearName": "h265-a",
+              "CodecType": "h265_hvc1",
+              "Format": "mp4",
+              "Bitrate": 684919,
+              "PlayAddr": {
+                "DataSize": "4440590",
+                "Width": 576,
+                "Height": 1024,
+                "UrlList": ["https://provider.invalid/video/h265-a"]
+              }
+            },
+            {
+              "GearName": "h265-b",
+              "CodecType": "h265_hvc1",
+              "Format": "mp4",
+              "Bitrate": 650997,
+              "PlayAddr": {
+                "DataSize": "4220662",
+                "Width": 576,
+                "Height": 1024,
+                "UrlList": ["https://provider.invalid/video/h265-b"]
+              }
+            },
+            {
+              "GearName": "h265-c",
+              "CodecType": "h265_hvc1",
+              "Format": "mp4",
+              "Bitrate": 473697,
+              "PlayAddr": {
+                "DataSize": "3071157",
+                "Width": 576,
+                "Height": 1024,
+                "UrlList": ["https://provider.invalid/video/h265-c"]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

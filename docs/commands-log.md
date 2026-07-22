@@ -1269,3 +1269,146 @@ not executed because it is an owner-only live development diagnostic. No AKNG,
 Instagram, Gemini, Supabase, Sentry, or Render request was made. No deployment,
 Render mutation, mobile/schema change, branch switch, commit, push, or main
 merge occurred.
+
+## M23.W3D-TK3 short-link expansion and local media gate
+
+```bash
+git status --short --branch
+git branch --show-current
+git diff --check
+# branch: develop; AKNG token presence checked as a boolean only: false
+
+# Owner response inspected with a jq shape/count projection only. No URL, ID,
+# token, content text, or response body was printed or committed.
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m compileall -q app scripts
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m unittest \
+  tests.test_media_resolver_adapters tests.test_tiktok_short_link \
+  tests.test_external_media_security
+# 32 passed
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  -m unittest discover -s tests -p "test_*.py"
+# 145 passed, 0 failures, 0 errors, exit 0 (intermediate TK3 pass)
+```
+
+The required opt-in live diagnostic was not run because
+`TIKTOK_AKNG_ACCESS_TOKEN` was absent from the Codex process environment. No
+provider, Gemini, Supabase, Sentry, or Render request was made. Final compile,
+test, dependency, diff, diagnostic-guard, and secret-scan results are recorded
+after the final validation pass below.
+
+```bash
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m unittest -q \
+  tests.test_file_runtime_config tests.test_external_resolver_config \
+  tests.test_media_resolver_adapters tests.test_tiktok_short_link \
+  tests.test_external_queue_routing tests.test_metadata_preview_no_cookies \
+  tests.test_provider_http_client tests.test_external_media_security \
+  tests.test_external_media_processing tests.test_sentry_observability \
+  tests.test_queue_claim tests.test_queue_failure_contract \
+  tests.test_queue_gemini_guard tests.test_tiktok_safe_diagnostics \
+  tests.test_tiktok_source_context
+# 109 focused tests passed, exit 0
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  -m unittest discover -s tests -p "test_*.py"
+# 146 tests passed, 0 failures, 0 errors, 0 skipped, exit 0
+
+env -u TIKTOK_AKNG_ACCESS_TOKEN APP_ENV=development \
+  ALLOW_LIVE_TIKTOK_DIAGNOSTIC=true \
+  /private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  scripts/check_tiktok_akng_end_to_end.py --input-kind numeric_id
+# refused before input/provider work as designed: token not configured; exit 1
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m compileall app scripts
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m pip check
+git diff --check
+# passed on develop; generic credential, signed-URL, and live-response-marker
+# scans each found zero files
+```
+
+The owner later verified AKNG manually with numeric-ID input. Its attached
+response was inspected only through a `jq` shape/count projection: complete
+`data.itemInfo.itemStruct.video`, 6 video entries, 0 separate-audio entries,
+and 22 aggregate download URLs. No ID, token, URL, response body, or response
+file was printed or committed, and Codex made no provider call.
+
+## M23.W3D-TK3B3 Python/curl parity final offline validation
+
+```bash
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python --version
+# Python 3.12.13
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m compileall app scripts
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m unittest -q \
+  tests.test_file_runtime_config tests.test_external_resolver_config \
+  tests.test_media_resolver_adapters tests.test_tiktok_short_link \
+  tests.test_tiktok_candidate_fallback tests.test_tiktok_live_diagnostic \
+  tests.test_external_queue_routing tests.test_metadata_preview_no_cookies \
+  tests.test_provider_http_client tests.test_external_media_security \
+  tests.test_external_media_processing tests.test_sentry_observability \
+  tests.test_queue_claim tests.test_queue_failure_contract \
+  tests.test_queue_gemini_guard tests.test_tiktok_safe_diagnostics \
+  tests.test_tiktok_source_context
+# 119 passed, 0 failures, 0 errors, exit 0
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  -m unittest discover -s tests -p "test_*.py"
+# 156 passed, 0 failures, 0 errors, 0 skipped, exit 0
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m pip check
+git diff --check
+# passed; no broken requirements
+
+env -u TIKTOK_AKNG_ACCESS_TOKEN APP_ENV=development \
+  ALLOW_LIVE_TIKTOK_DIAGNOSTIC=true \
+  /private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  scripts/check_tiktok_akng_end_to_end.py --input-kind numeric_id
+# failed closed before prompt/provider work, failure_stage=input_validation,
+# provider_call_attempted=false, cleanup_succeeded=true, exit 1
+```
+
+The live numeric-ID and short-link commands were intentionally not executed by
+Codex. No provider, Gemini, Supabase, Sentry, or Render call was made.
+
+## M23.W3D-TK3B3 live root-cause repair and final validation
+
+- Live short-link-only reproduction first failed at
+  `short_link_redirect_validation`: the zero-length 3xx response had no retained
+  urllib3 socket, so peer discovery returned no value. A DNS-pinned TLS GET then
+  passed with one redirect and resolved both canonical URL and numeric ID.
+- The local machine lacked ffprobe/ffmpeg. `brew install --yes ffmpeg` installed
+  ffmpeg/ffprobe 8.1.2; the Docker image already installs ffmpeg.
+- Live AKNG numeric-ID responses returned 2xx, a complete six-video contract,
+  zero separate-audio candidates, and three compatible media candidates.
+- Safe media probes showed AKNG proxy alternatives were HTTPS/public-peer
+  verified, 2xx video responses with valid initial MP4 bytes. They ignored
+  Range, omitted Content-Length, and used variable-speed chunked transfer.
+- The approximately 6.7 MB H.264 stream did not complete inside the bounded
+  budget. The approximately 4.7 MB H.264 stream completed in the 60–90 second
+  bucket, passed signature validation, and ffprobe proved video plus embedded
+  audio. TikTok selection now uses this evidence-backed smaller-first policy and
+  throughput-ranks URL alternatives.
+- Final explicit `numeric_id` and `short_url` shared-path diagnostics both
+  exited zero with `provider_status_class=2xx`, complete contract, six raw/three
+  eligible candidates, H.264 MP4 selection, verified download/signature/video/
+  audio, and cleanup. Inputs, token, response bodies, URLs, IDs, and temp paths
+  were not emitted or persisted.
+
+```bash
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python --version
+# Python 3.12.13
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m compileall app scripts
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  -m unittest discover -s tests -p "test_*.py"
+# 162 passed, 0 failures, 0 errors, 0 skipped, exit 0
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m pip check
+git diff --check
+# passed; no broken requirements
+```
+
+No Gemini, Supabase, Sentry, Render, deployment, main merge, mobile, schema,
+cookie, entitlement, or quota operation occurred.

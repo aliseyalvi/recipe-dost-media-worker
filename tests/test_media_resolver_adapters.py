@@ -3,11 +3,17 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.media_resolvers.contracts import MediaResolutionRequest, ResolverError
 from app.media_resolvers.instagram_reels13 import InstagramReels13Resolver
-from app.media_resolvers.selection import evaluate_video_candidates, select_video_candidate
+from app.media_resolvers.selection import (
+    evaluate_video_candidates,
+    rank_video_candidates,
+    select_video_candidate,
+)
 from app.media_resolvers.tiktok_akng import TikTokAkngResolver, normalize_akng_input
+from app.media_resolvers.tiktok_input import TikTokCanonicalInput
 
 FIXTURES = Path(__file__).parent / "fixtures" / "media_resolvers"
 
@@ -20,6 +26,17 @@ class FakeClient:
     def get_json(self, **kwargs: object):
         self.kwargs = kwargs
         return self.payload, "2xx", None
+
+
+class SequencedClient(FakeClient):
+    def __init__(self, payloads: list[dict[str, object]]) -> None:
+        super().__init__(payloads[0])
+        self.payloads = list(payloads)
+        self.calls: list[dict[str, object]] = []
+
+    def get_json(self, **kwargs: object):
+        self.calls.append(kwargs)
+        return self.payloads.pop(0), "2xx", None
 
 
 def fixture(adapter: str, name: str) -> dict[str, object]:
@@ -193,7 +210,7 @@ class TikTokAdapterTests(unittest.TestCase):
         self.assertEqual(captured.exception.normalization_rejection_counts["empty_url_list"], 1)
         self.assertEqual(captured.exception.normalization_rejection_counts["non_https_url"], 1)
 
-    def test_long_url_is_sent_as_video_id(self) -> None:
+    def test_long_url_is_sent_as_numeric_id(self) -> None:
         client = FakeClient(fixture("akng_tiktok", "success_multi_quality.json"))
         resolver = TikTokAkngResolver(
             client=client,  # type: ignore[arg-type]
@@ -214,14 +231,17 @@ class TikTokAdapterTests(unittest.TestCase):
         params = client.kwargs["params"]
         self.assertIsInstance(params, dict)
         self.assertEqual(params["input"], "7651218940919598000")
-        self.assertNotIn("tiktok.com", str(params["input"]))
-
-    def test_short_url_is_normalized_without_redirect_request(self) -> None:
-        value, kind = normalize_akng_input(
-            "https://vt.tiktok.com/ZSFixture/?_tracking=removed#fragment"
+        self.assertEqual(
+            resolver.resolve(media_request).contract_diagnostic["provider_input_kind"],
+            "numeric_id",
         )
-        self.assertEqual(value, "https://vt.tiktok.com/ZSFixture/")
-        self.assertEqual(kind, "short_url")
+
+    def test_short_url_cannot_be_normalized_for_direct_provider_use(self) -> None:
+        with self.assertRaises(ResolverError) as captured:
+            normalize_akng_input(
+                "https://vt.tiktok.com/ZSFixture/?_tracking=removed#fragment"
+            )
+        self.assertEqual(captured.exception.code, "media_unavailable")
 
     def test_non_tiktok_url_is_rejected_before_provider_call(self) -> None:
         with self.assertRaises(ResolverError) as captured:
@@ -236,6 +256,106 @@ class TikTokAdapterTests(unittest.TestCase):
         self.assertFalse(captured.exception.fallback_allowed)
         self.assertEqual(captured.exception.http_status_class, "2xx")
         self.assertEqual(captured.exception.contract_diagnostic["success_value"], False)
+
+    def test_empty_numeric_contract_uses_canonical_url_once(self) -> None:
+        empty = {"success": True, "message": "", "data": {}}
+        client = SequencedClient(
+            [empty, fixture("akng_tiktok", "success_multi_quality.json")]
+        )
+        resolver = TikTokAkngResolver(
+            client=client,  # type: ignore[arg-type]
+            base_url="https://provider.invalid",
+            access_token="fixture-secret",
+        )
+        result = resolver.resolve(request("tiktok"))
+        self.assertEqual(len(client.calls), 2)
+        first_params = client.calls[0]["params"]
+        second_params = client.calls[1]["params"]
+        self.assertIsInstance(first_params, dict)
+        self.assertIsInstance(second_params, dict)
+        self.assertEqual(result.contract_diagnostic["provider_input_kind"], "canonical_url")
+        self.assertTrue(result.contract_diagnostic["alternate_input_attempted"])
+        self.assertNotIn("tiktok.com", str(first_params["input"]))
+        self.assertIn("tiktok.com", str(second_params["input"]))
+
+    def test_both_verified_input_forms_empty_fail_as_media_unavailable(self) -> None:
+        empty = {"success": True, "message": "", "data": {}}
+        client = SequencedClient([empty, empty])
+        resolver = TikTokAkngResolver(
+            client=client,  # type: ignore[arg-type]
+            base_url="https://provider.invalid",
+            access_token="fixture-secret",
+        )
+        with self.assertRaises(ResolverError) as captured:
+            resolver.resolve(request("tiktok"))
+        self.assertEqual(captured.exception.code, "media_unavailable")
+        self.assertEqual(len(client.calls), 2)
+
+    def test_malformed_nested_contract_does_not_try_alternate_input(self) -> None:
+        malformed = {"success": True, "data": {"itemInfo": {"unexpected": True}}}
+        client = SequencedClient([malformed])
+        resolver = TikTokAkngResolver(
+            client=client,  # type: ignore[arg-type]
+            base_url="https://provider.invalid",
+            access_token="fixture-secret",
+        )
+        with self.assertRaises(ResolverError) as captured:
+            resolver.resolve(request("tiktok"))
+        self.assertEqual(captured.exception.code, "resolver_contract_error")
+        self.assertEqual(len(client.calls), 1)
+
+    def test_short_url_is_expanded_and_never_sent_directly(self) -> None:
+        client = FakeClient(fixture("akng_tiktok", "success_multi_quality.json"))
+        resolver = TikTokAkngResolver(
+            client=client,  # type: ignore[arg-type]
+            base_url="https://provider.invalid",
+            access_token="fixture-secret",
+        )
+        media_request = request("tiktok")
+        short_request = type(media_request)(
+            platform="tiktok",
+            canonical_source_url="https://vt.tiktok.com/ZSFixture/",
+            correlation_id=media_request.correlation_id,
+            capability=media_request.capability,
+            byte_limit=media_request.byte_limit,
+            preferred_byte_target=media_request.preferred_byte_target,
+            timeout_seconds=media_request.timeout_seconds,
+        )
+        expanded = TikTokCanonicalInput(
+            canonical_url="https://www.tiktok.com/@fixture/video/7651218940919598000",
+            video_id="7651218940919598000",
+            original_input_kind="short_url",
+            redirect_count=1,
+            canonical_source="redirect_path",
+        )
+        with patch(
+            "app.media_resolvers.tiktok_akng.resolve_tiktok_canonical_input",
+            return_value=expanded,
+        ):
+            resolver.resolve(short_request)
+        params = client.kwargs["params"]
+        self.assertIsInstance(params, dict)
+        self.assertNotIn("vt.tiktok.com", str(params["input"]))
+        self.assertNotIn("tiktok.com", str(params["input"]))
+
+    def test_six_candidate_contract_uses_live_proven_smaller_h264_policy(self) -> None:
+        result = self.resolver("success_six_candidates.json").resolve(request("tiktok"))
+        ranked = rank_video_candidates(
+            result.candidates,
+            preferred_bytes=36 * 1024 * 1024,
+            hard_limit_bytes=50 * 1024 * 1024,
+            allowed_host_suffixes=("provider.invalid",),
+            prefer_smallest_compatible=True,
+        )
+        self.assertEqual(result.raw_video_candidate_count, 6)
+        self.assertEqual(result.raw_audio_candidate_count, 0)
+        self.assertEqual(result.contract_diagnostic["download_urls_count"], 22)
+        self.assertEqual(ranked[0].candidate_id, "h264-lower")
+        self.assertEqual(ranked[0].size_bytes, 4_721_022)
+        self.assertEqual(ranked[0].bitrate, 728_173)
+        self.assertEqual(ranked[1].candidate_id, "h264-high")
+        self.assertEqual(ranked[2].candidate_id, "top_level_progressive")
+        self.assertNotIn("h265", " ".join(str(item.candidate_id) for item in ranked))
 
     def test_proxy_url_without_media_suffix_is_accepted(self) -> None:
         result = self.resolver("success_multi_quality.json").resolve(request("tiktok"))

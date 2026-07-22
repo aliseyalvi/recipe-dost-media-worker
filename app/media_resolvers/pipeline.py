@@ -19,8 +19,8 @@ from app.media_resolvers.media_processing import (
 from app.media_resolvers.registry import build_resolver
 from app.media_resolvers.selection import (
     evaluate_video_candidates,
+    rank_video_candidates,
     select_audio_candidate,
-    select_video_candidate,
 )
 
 logger = logging.getLogger("recipe_dost.worker")
@@ -49,6 +49,7 @@ def resolve_external_media(
     source_url: str,
     platform: str,
     audience_route: str,
+    source_input_kind: str | None = None,
 ) -> dict[str, object]:
     chain = (
         settings.instagram_resolver_chain
@@ -71,6 +72,7 @@ def resolve_external_media(
         byte_limit=settings.max_video_size_bytes,
         preferred_byte_target=settings.preferred_video_size_bytes,
         timeout_seconds=settings.external_provider_timeout_seconds,
+        source_input_kind=source_input_kind,
     )
     last_error: ResolverError | None = None
     for attempt, adapter_id in enumerate(chain[:2], start=1):
@@ -108,6 +110,8 @@ def resolve_external_media(
         started = time.monotonic()
         job_directory: Path | None = None
         tiktok_diagnostics_emitted = False
+        resolution = None
+        eligible_videos = []
         try:
             resolution = build_resolver(adapter_id, settings).resolve(request)
             if platform == "tiktok":
@@ -164,19 +168,21 @@ def resolve_external_media(
                     rejection_counts=dict(combined_rejections),
                 )
                 tiktok_diagnostics_emitted = True
-            video = select_video_candidate(
+            ranked_videos = rank_video_candidates(
                 resolution.candidates,
                 preferred_bytes=settings.preferred_video_size_bytes,
                 hard_limit_bytes=settings.max_video_size_bytes,
                 max_short_edge=settings.max_video_height,
                 allowed_host_suffixes=suffixes,
+                prefer_smallest_compatible=platform == "tiktok",
             )
-            repository.insert_event(
-                media_job_id,
-                event_type="media_candidate_selected",
-                message="External media candidate selected.",
-                metadata={**base_event, **_candidate_event(video), "media_mode": resolution.media_mode},
-            )
+            if not ranked_videos:
+                raise ResolverError(
+                    "unsupported_media",
+                    "The resolver did not return a compatible H.264 MP4 video.",
+                    fallback_allowed=True,
+                    failure_stage="candidate_selection",
+                )
             downloader = SecureMediaDownloader(
                 temp_root=settings.temp_media_dir,
                 allowed_host_suffixes=suffixes,
@@ -186,89 +192,237 @@ def resolve_external_media(
                 total_timeout_seconds=settings.external_media_download_total_timeout_seconds,
                 max_redirects=settings.external_media_max_redirects,
             )
-            job_directory = downloader.create_job_directory(str(media_job_id))
-            repository.insert_event(
-                media_job_id,
-                event_type="external_media_download_started",
-                message="External media download started.",
-                metadata=base_event,
+            media_download_deadline = (
+                time.monotonic()
+                + settings.external_media_download_total_timeout_seconds
             )
-            downloaded_video = downloader.download_candidate(
-                video,
-                job_directory=job_directory,
-                filename="video-input.mp4",
-            )
-            repository.insert_event(
-                media_job_id,
-                event_type="external_media_download_completed",
-                message="External media download completed.",
-                metadata={**base_event, "size_bucket": _size_bucket(downloaded_video.size_bytes)},
-            )
-            probe = probe_media(
-                downloaded_video.path,
-                timeout_seconds=settings.ytdlp_extract_timeout_seconds,
-            )
-            repository.insert_event(
-                media_job_id,
-                event_type="media_probe_completed",
-                message="External media probe completed.",
-                metadata={
-                    **base_event,
-                    "media_validation_result": (
-                        "video_with_audio" if probe.video_present and probe.audio_present else "video_only"
-                    ),
-                    "duration_bucket": _duration_bucket(probe.duration_seconds),
-                },
-            )
-            final_path = downloaded_video.path
-            if not probe.video_present:
+            candidate_errors: list[ResolverError] = []
+            final_path = None
+            final_probe = None
+            downloaded_video = None
+            probe = None
+            video = None
+            separate_audio_required = False
+            audio_download_verified = False
+            mux_succeeded = False
+            selected_audio_size = 0
+            candidate_attempt = 0
+            for candidate_attempt, candidate in enumerate(ranked_videos[:3], start=1):
+                current_stage = "candidate_selection"
+                job_directory = downloader.create_job_directory(
+                    f"{media_job_id}-{candidate_attempt}"
+                )
+                repository.insert_event(
+                    media_job_id,
+                    event_type="media_candidate_selected",
+                    message="External media candidate selected.",
+                    metadata={
+                        **base_event,
+                        **_candidate_event(candidate),
+                        "media_mode": resolution.media_mode,
+                        "candidate_attempt": candidate_attempt,
+                    },
+                )
+                try:
+                    current_stage = "media_download"
+                    repository.insert_event(
+                        media_job_id,
+                        event_type="external_media_download_started",
+                        message="External media download started.",
+                        metadata={**base_event, "candidate_attempt": candidate_attempt},
+                    )
+                    candidate_download = downloader.download_candidate(
+                        candidate,
+                        job_directory=job_directory,
+                        filename="video-input.mp4",
+                        deadline_monotonic=media_download_deadline,
+                        probe_alternatives=candidate_attempt == 1,
+                    )
+                    repository.insert_event(
+                        media_job_id,
+                        event_type="external_media_download_completed",
+                        message="External media download completed.",
+                        metadata={
+                            **base_event,
+                            "candidate_attempt": candidate_attempt,
+                            "size_bucket": _size_bucket(candidate_download.size_bytes),
+                        },
+                    )
+                    current_stage = "ffprobe_video"
+                    candidate_probe = probe_media(
+                        candidate_download.path,
+                        timeout_seconds=settings.ytdlp_extract_timeout_seconds,
+                    )
+                    if not candidate_probe.video_present:
+                        raise ResolverError(
+                            "media_validation_failed",
+                            "Downloaded media does not contain video.",
+                            fallback_allowed=True,
+                            failure_stage="ffprobe_video",
+                        )
+                    repository.insert_event(
+                        media_job_id,
+                        event_type="media_probe_completed",
+                        message="External media probe completed.",
+                        metadata={
+                            **base_event,
+                            "candidate_attempt": candidate_attempt,
+                            "media_validation_result": (
+                                "video_with_audio"
+                                if candidate_probe.audio_present
+                                else "video_only"
+                            ),
+                            "duration_bucket": _duration_bucket(
+                                candidate_probe.duration_seconds
+                            ),
+                        },
+                    )
+                    candidate_final_path = candidate_download.path
+                    candidate_audio_required = not candidate_probe.audio_present
+                    candidate_audio_verified = False
+                    candidate_mux_succeeded = False
+                    candidate_audio_size = 0
+                    if candidate_audio_required:
+                        current_stage = "ffprobe_audio"
+                        remaining = (
+                            settings.max_video_size_bytes - candidate_download.size_bytes
+                        )
+                        audio = select_audio_candidate(
+                            resolution.candidates,
+                            remaining_bytes=remaining,
+                        )
+                        if audio is None:
+                            raise ResolverError(
+                                "media_has_no_audio",
+                                "This video does not contain usable audio.",
+                                fallback_allowed=True,
+                                failure_stage="ffprobe_audio",
+                            )
+                        downloaded_audio = downloader.download_candidate(
+                            audio,
+                            job_directory=job_directory,
+                            filename="audio-input.m4a",
+                            byte_limit=max(1, remaining),
+                            deadline_monotonic=media_download_deadline,
+                        )
+                        candidate_audio_size = downloaded_audio.size_bytes
+                        audio_probe = probe_media(
+                            downloaded_audio.path,
+                            timeout_seconds=settings.ytdlp_extract_timeout_seconds,
+                        )
+                        if not audio_probe.audio_present:
+                            raise ResolverError(
+                                "media_validation_failed",
+                                "Downloaded media does not contain usable audio.",
+                                fallback_allowed=True,
+                                failure_stage="ffprobe_audio",
+                            )
+                        candidate_audio_verified = True
+                        repository.insert_event(
+                            media_job_id,
+                            event_type="media_audio_probe_completed",
+                            message="External audio candidate probe completed.",
+                            metadata={
+                                **base_event,
+                                "candidate_attempt": candidate_attempt,
+                                "media_validation_result": "audio_present",
+                            },
+                        )
+                        current_stage = "final_media_validation"
+                        repository.insert_event(
+                            media_job_id,
+                            event_type="media_merge_started",
+                            message="External media merge started.",
+                            metadata={
+                                **base_event,
+                                "candidate_attempt": candidate_attempt,
+                                "media_mode": "split_av",
+                            },
+                        )
+                        candidate_final_path = mux_video_audio(
+                            candidate_download.path,
+                            downloaded_audio.path,
+                            output_path=job_directory / "validated-media.mp4",
+                            timeout_seconds=min(settings.max_job_runtime_seconds, 120),
+                            byte_limit=settings.max_video_size_bytes,
+                        )
+                        candidate_mux_succeeded = True
+                        repository.insert_event(
+                            media_job_id,
+                            event_type="media_merge_completed",
+                            message="External media merge completed.",
+                            metadata={
+                                **base_event,
+                                "candidate_attempt": candidate_attempt,
+                                "media_mode": "split_av",
+                            },
+                        )
+                        candidate_download.path.unlink(missing_ok=True)
+                        downloaded_audio.path.unlink(missing_ok=True)
+                    current_stage = "final_media_validation"
+                    candidate_final_probe = validate_final_media(
+                        candidate_final_path,
+                        byte_limit=settings.max_video_size_bytes,
+                        duration_limit_seconds=settings.max_video_duration_seconds,
+                        timeout_seconds=settings.ytdlp_extract_timeout_seconds,
+                    )
+                    video = candidate
+                    downloaded_video = candidate_download
+                    probe = candidate_probe
+                    final_path = candidate_final_path
+                    final_probe = candidate_final_probe
+                    separate_audio_required = candidate_audio_required
+                    audio_download_verified = candidate_audio_verified
+                    mux_succeeded = candidate_mux_succeeded
+                    selected_audio_size = candidate_audio_size
+                    break
+                except ResolverError as exc:
+                    if not exc.failure_stage:
+                        exc.failure_stage = current_stage
+                    candidate_errors.append(exc)
+                    cleanup_job_directory(job_directory)
+                    job_directory = None
+                    fallback_eligible = exc.code in {
+                        "media_download_failed",
+                        "media_validation_failed",
+                        "media_signature_validation",
+                        "media_size_exceeded",
+                        "media_has_no_audio",
+                        "media_merge_failed",
+                    }
+                    if fallback_eligible and candidate_attempt < min(3, len(ranked_videos)):
+                        repository.insert_event(
+                            media_job_id,
+                            event_type="media_candidate_fallback",
+                            message="External media candidate fallback selected.",
+                            metadata={
+                                **base_event,
+                                "candidate_attempt": candidate_attempt,
+                                "normalized_error_code": exc.code,
+                                "failure_stage": exc.failure_stage,
+                            },
+                        )
+                        continue
+                    if candidate_attempt > 1 and exc.code == "media_has_no_audio":
+                        exc.failure_stage = "candidate_fallback"
+                    raise
+            if (
+                video is None
+                or downloaded_video is None
+                or probe is None
+                or final_path is None
+                or final_probe is None
+            ):
+                last_candidate_error = candidate_errors[-1] if candidate_errors else None
+                if last_candidate_error is not None:
+                    last_candidate_error.failure_stage = "candidate_fallback"
+                    raise last_candidate_error
                 raise ResolverError(
                     "media_validation_failed",
-                    "Downloaded media does not contain video.",
+                    "Resolved media candidates could not be validated.",
                     fallback_allowed=True,
+                    failure_stage="candidate_fallback",
                 )
-            if not probe.audio_present:
-                remaining = settings.max_video_size_bytes - downloaded_video.size_bytes
-                audio = select_audio_candidate(resolution.candidates, remaining_bytes=remaining)
-                if audio is None:
-                    raise ResolverError(
-                        "media_has_no_audio",
-                        "This video does not contain usable audio.",
-                        fallback_allowed=True,
-                    )
-                downloaded_audio = downloader.download_candidate(
-                    audio,
-                    job_directory=job_directory,
-                    filename="audio-input.m4a",
-                    byte_limit=max(1, remaining),
-                )
-                repository.insert_event(
-                    media_job_id,
-                    event_type="media_merge_started",
-                    message="External media merge started.",
-                    metadata={**base_event, "media_mode": "split_av"},
-                )
-                final_path = mux_video_audio(
-                    downloaded_video.path,
-                    downloaded_audio.path,
-                    output_path=job_directory / "validated-media.mp4",
-                    timeout_seconds=min(settings.max_job_runtime_seconds, 120),
-                    byte_limit=settings.max_video_size_bytes,
-                )
-                repository.insert_event(
-                    media_job_id,
-                    event_type="media_merge_completed",
-                    message="External media merge completed.",
-                    metadata={**base_event, "media_mode": "split_av"},
-                )
-                downloaded_video.path.unlink(missing_ok=True)
-                downloaded_audio.path.unlink(missing_ok=True)
-            final_probe = validate_final_media(
-                final_path,
-                byte_limit=settings.max_video_size_bytes,
-                duration_limit_seconds=settings.max_video_duration_seconds,
-                timeout_seconds=settings.ytdlp_extract_timeout_seconds,
-            )
             final_size = final_path.stat().st_size
             repository.insert_event(
                 media_job_id,
@@ -330,12 +484,146 @@ def resolve_external_media(
                 "thumbnail_selected": bool(resolution.metadata.thumbnail_url),
                 "cookie_mode": "none",
                 "provider_attempt": attempt,
+                "provider_input_attempt": int(
+                    resolution.contract_diagnostic.get("provider_attempt") or 1
+                ),
+                "provider_input_kind": str(
+                    resolution.contract_diagnostic.get("provider_input_kind") or "unknown"
+                ),
+                "provider_status_class": str(
+                    resolution.contract_diagnostic.get("provider_status_class") or "unknown"
+                ),
+                "contract_complete": bool(
+                    resolution.contract_diagnostic.get("contract_complete")
+                ),
+                "short_link_expansion_attempted": bool(
+                    resolution.contract_diagnostic.get("short_link_expansion_attempted")
+                ),
+                "short_link_expansion_completed": bool(
+                    resolution.contract_diagnostic.get("short_link_expansion_completed")
+                ),
+                "canonical_url_resolved": bool(
+                    resolution.contract_diagnostic.get("canonical_url_resolved")
+                ),
+                "numeric_id_resolved": bool(
+                    resolution.contract_diagnostic.get("numeric_id_resolved")
+                ),
+                "short_link_redirect_count": int(
+                    resolution.contract_diagnostic.get("short_link_redirect_count") or 0
+                ),
+                "alternate_input_attempted": bool(
+                    resolution.contract_diagnostic.get("alternate_input_attempted")
+                ),
                 "fallback_used": fallback_used,
+                "raw_video_candidate_count": resolution.raw_video_candidate_count,
+                "eligible_video_candidate_count": len(eligible_videos),
+                "selected_candidate": (
+                    "top_level_progressive"
+                    if video.candidate_id == "top_level_progressive"
+                    else "primary"
+                    if candidate_attempt == 1
+                    else f"fallback_{candidate_attempt}"
+                ),
+                "candidate_fallback_used": candidate_attempt > 1,
                 "source_context": source_context,
+                "diagnostic_media": {
+                    "selected_candidate": {
+                        "width": video.width,
+                        "height": video.height,
+                        "size_bytes": video.size_bytes,
+                        "codec": video.codec,
+                        "container": video.container,
+                        "url_count": len(video.urls()),
+                    },
+                    "candidate_attempt": candidate_attempt,
+                    "candidate_fallback_used": candidate_attempt > 1,
+                    "initial_host_category": downloaded_video.initial_host_category,
+                    "redirect_count": downloaded_video.redirect_count,
+                    "final_host_category": downloaded_video.final_host_category,
+                    "url_alternative": downloaded_video.url_alternative,
+                    "content_type_category": _content_type_category(
+                        downloaded_video.content_type
+                    ),
+                    "downloaded_size_bucket": _size_bucket(downloaded_video.size_bytes),
+                    "media_signature_valid": downloaded_video.signature_valid,
+                    "initial_probe_video_present": probe.video_present,
+                    "initial_probe_audio_present": probe.audio_present,
+                    "separate_audio_required": separate_audio_required,
+                    "audio_candidate_count": sum(
+                        1 for candidate in resolution.candidates if candidate.media_type == "audio"
+                    ),
+                    "selected_audio_size_bucket": _size_bucket(selected_audio_size),
+                    "audio_download_verified": audio_download_verified,
+                    "mux_succeeded": mux_succeeded,
+                    "final_video_present": final_probe.video_present,
+                    "final_audio_present": final_probe.audio_present,
+                    "final_size_bucket": _size_bucket(final_size),
+                    "duration_bucket": _duration_bucket(final_probe.duration_seconds),
+                    "resolution_bucket": _resolution_bucket(
+                        final_probe.width, final_probe.height
+                    ),
+                },
             }
         except ResolverError as exc:
             exc.adapter_id = adapter_id
             exc.provider_attempt = attempt
+            contract_diagnostic = (
+                resolution.contract_diagnostic if resolution is not None else {}
+            )
+            exc.diagnostic_state.update(
+                {
+                    "provider_call_attempted": bool(
+                        contract_diagnostic.get("provider_call_attempted")
+                        or exc.diagnostic_state.get("provider_call_attempted")
+                    ),
+                    "short_link_expansion_attempted": bool(
+                        contract_diagnostic.get("short_link_expansion_attempted")
+                        or exc.diagnostic_state.get("short_link_expansion_attempted")
+                    ),
+                    "short_link_expansion_completed": bool(
+                        contract_diagnostic.get("short_link_expansion_completed")
+                        or exc.diagnostic_state.get("short_link_expansion_completed")
+                    ),
+                    "canonical_url_resolved": bool(
+                        contract_diagnostic.get("canonical_url_resolved")
+                        or exc.diagnostic_state.get("canonical_url_resolved")
+                    ),
+                    "numeric_id_resolved": bool(
+                        contract_diagnostic.get("numeric_id_resolved")
+                        or exc.diagnostic_state.get("numeric_id_resolved")
+                    ),
+                    "provider_input_kind": str(
+                        contract_diagnostic.get("provider_input_kind")
+                        or exc.diagnostic_state.get("provider_input_kind")
+                        or "none"
+                    ),
+                    "provider_status_class": (
+                        exc.http_status_class
+                        or contract_diagnostic.get("provider_status_class")
+                        or exc.diagnostic_state.get("provider_status_class")
+                        or "unknown"
+                    ),
+                    "redirect_count": int(
+                        contract_diagnostic.get("short_link_redirect_count")
+                        or exc.diagnostic_state.get("redirect_count")
+                        or 0
+                    ),
+                    "contract_complete": bool(
+                        contract_diagnostic.get("contract_complete")
+                        or exc.diagnostic_state.get("contract_complete")
+                    ),
+                    "raw_video_candidate_count": max(
+                        int(exc.diagnostic_state.get("raw_video_candidate_count") or 0),
+                        int(
+                            resolution.raw_video_candidate_count
+                            if resolution is not None
+                            else 0
+                        ),
+                        int(getattr(exc, "raw_video_candidate_count", 0) or 0),
+                    ),
+                    "eligible_video_candidate_count": len(eligible_videos),
+                }
+            )
             last_error = exc
             if platform == "tiktok" and not tiktok_diagnostics_emitted:
                 _emit_tiktok_contract_diagnostic(
@@ -382,7 +670,10 @@ def resolve_external_media(
                 metadata={
                     **base_event,
                     "normalized_error_code": exc.code,
-                    "provider_status_class": exc.http_status_class,
+                    "failure_stage": exc.failure_stage or "final_media_validation",
+                    "provider_status_class": exc.diagnostic_state.get(
+                        "provider_status_class", "unknown"
+                    ),
                     "terminal": not (exc.fallback_allowed and attempt < len(chain[:2])),
                 },
             )
@@ -391,12 +682,18 @@ def resolve_external_media(
                 extra={
                     **base_event,
                     "error_code": exc.code,
-                    "provider_status_class": exc.http_status_class or "unknown",
+                    "failure_stage": exc.failure_stage or "final_media_validation",
+                    "provider_status_class": exc.diagnostic_state.get(
+                        "provider_status_class", "unknown"
+                    ),
                     "terminal": not (exc.fallback_allowed and attempt < len(chain[:2])),
                 },
             )
             if not exc.fallback_allowed or attempt >= len(chain[:2]):
                 break
+        except BaseException:
+            cleanup_job_directory(job_directory)
+            raise
     raise last_error or ResolverError(
         "resolver_temporarily_unavailable",
         "External media resolution failed.",
@@ -504,6 +801,17 @@ def _size_bucket(value: int | None) -> str:
     if mib < 50:
         return "32_50_mib"
     return "50_mib_or_more"
+
+
+def _content_type_category(value: str) -> str:
+    normalized = str(value or "").lower()
+    if normalized.startswith("video/"):
+        return "video"
+    if normalized.startswith("audio/"):
+        return "audio"
+    if normalized == "application/octet-stream":
+        return "binary"
+    return "unknown"
 
 
 def _duration_bucket(value: int | None) -> str:
