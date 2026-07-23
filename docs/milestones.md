@@ -60,15 +60,24 @@
 | 56 | M23.W3D-TK1 AKNG TikTok contract repair | Insufficient | Numeric-ID normalization was not validated against short-link provider behavior |
 | 57 | M23.W3D-TK2 AKNG input telemetry | Failed live | Unresolved short URL reached AKNG and returned an empty success wrapper |
 | 58 | M23.W3D-TK3B3 Python/curl parity and media proof | Passed locally | Numeric-ID primary, DNS-pinned short-link expansion, throughput-ranked AKNG proxy alternatives, and both live local A/V gates passed |
-| 59 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 60 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 61 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 59 | M23.W3I-IG2 Instagram split-AV compatibility repair | Done locally | Preserve unknown declarations for secure probe, keep roles separate, accept verified H.264 MP4, conditionally mux audio, and add an owner-only live gate |
+| 60 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 61 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 62 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Review and commit TK3B3 on `develop`, then run one authorized development Render
-TikTok job. Both local live modes already proved contract resolution, bounded
-download, MP4 signature, ffprobe video/audio, and cleanup. Production stays unchanged.
+Run the owner-only Instagram diagnostic on `develop`, then commit and deploy the
+reviewed change to the development Render service for one authorized Premium
+Instagram retest. Production stays unchanged.
+
+- M23.W3I-IG2 proved the incident-compatible 1080x1920 candidate was rejected
+  by the shared 720 short-edge gate, not by its missing codec. Instagram now
+  treats unknown declared codec/container as probe-required, preserves video
+  and audio roles plus URL alternatives, securely downloads and ffprobes actual
+  media, skips mux for embedded audio, and uses video stream copy with bounded
+  audio-only AAC fallback when muxing is required. The live codec remains
+  unknown until the owner diagnostic runs.
 
 - M23.W3D-IG passed in development. `private_metadata_save_failed` remains an
   open nonblocking metadata issue outside the working Instagram media/Gemini

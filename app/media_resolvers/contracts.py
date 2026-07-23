@@ -6,6 +6,11 @@ from typing import Literal, Protocol
 MediaMode = Literal["progressive", "split_av", "youtube_url"]
 MediaType = Literal["video", "audio"]
 AudioState = Literal["present", "absent", "unknown"]
+CompatibilityState = Literal[
+    "compatible_declared",
+    "incompatible_declared",
+    "probe_required",
+]
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,7 @@ class MediaCandidate:
     width: int | None = None
     height: int | None = None
     size_bytes: int | None = None
+    mime_type: str | None = None
     codec: str | None = None
     container: str | None = None
     bitrate: int | None = None
@@ -54,6 +60,7 @@ class MediaCandidate:
             "width": self.width,
             "height": self.height,
             "size_bytes": self.size_bytes,
+            "mime_type": self.mime_type,
             "codec": self.codec,
             "container": self.container,
             "bitrate": self.bitrate,

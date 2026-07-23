@@ -21,6 +21,10 @@ class MediaProbe:
     container: str | None
 
 
+H264_CODECS = frozenset({"h264", "avc", "avc1"})
+MP4_FORMATS = frozenset({"mp4", "mov", "m4v"})
+
+
 def probe_media(path: Path, *, timeout_seconds: int) -> MediaProbe:
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
@@ -96,6 +100,7 @@ def validate_final_media(
     probe = probe_media(path, timeout_seconds=timeout_seconds)
     if not probe.video_present:
         raise ResolverError("media_validation_failed", "Downloaded media does not contain video.")
+    validate_video_probe_compatibility(probe)
     if not probe.audio_present:
         raise ResolverError("media_has_no_audio", "This video does not contain usable audio.")
     if probe.duration_seconds is not None and probe.duration_seconds > duration_limit_seconds:
@@ -104,6 +109,43 @@ def validate_final_media(
             "This video is longer than the supported duration.",
         )
     return probe
+
+
+def validate_video_probe_compatibility(probe: MediaProbe) -> None:
+    if not probe.video_present:
+        raise ResolverError(
+            "media_validation_failed",
+            "Downloaded media does not contain video.",
+            fallback_allowed=True,
+            failure_stage="ffprobe_video",
+        )
+    codec = str(probe.video_codec or "").strip().lower()
+    if codec not in H264_CODECS:
+        raise ResolverError(
+            "unsupported_media",
+            "Downloaded video uses an unsupported video codec.",
+            fallback_allowed=True,
+            failure_stage="ffprobe_video",
+        )
+    formats = {
+        value.strip().lower()
+        for value in str(probe.container or "").split(",")
+        if value.strip()
+    }
+    if not formats.intersection(MP4_FORMATS):
+        raise ResolverError(
+            "unsupported_media",
+            "Downloaded video uses an unsupported container.",
+            fallback_allowed=True,
+            failure_stage="ffprobe_video",
+        )
+    if not probe.width or not probe.height or probe.width <= 0 or probe.height <= 0:
+        raise ResolverError(
+            "media_validation_failed",
+            "Downloaded video dimensions are invalid.",
+            fallback_allowed=True,
+            failure_stage="ffprobe_video",
+        )
 
 
 def mux_video_audio(
@@ -155,14 +197,8 @@ def mux_video_audio(
             "0:v:0",
             "-map",
             "1:a:0",
-            "-vf",
-            "scale=-2:720:force_original_aspect_ratio=decrease",
             "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "25",
+            "copy",
             "-c:a",
             "aac",
             "-b:a",

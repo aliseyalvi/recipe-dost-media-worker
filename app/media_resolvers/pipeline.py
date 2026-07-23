@@ -15,9 +15,11 @@ from app.media_resolvers.media_processing import (
     mux_video_audio,
     probe_media,
     validate_final_media,
+    validate_video_probe_compatibility,
 )
 from app.media_resolvers.registry import build_resolver
 from app.media_resolvers.selection import (
+    declared_video_compatibility,
     evaluate_video_candidates,
     rank_video_candidates,
     select_audio_candidate,
@@ -110,6 +112,7 @@ def resolve_external_media(
         started = time.monotonic()
         job_directory: Path | None = None
         tiktok_diagnostics_emitted = False
+        instagram_diagnostics_emitted = False
         resolution = None
         eligible_videos = []
         try:
@@ -151,7 +154,24 @@ def resolve_external_media(
                 hard_limit_bytes=settings.max_video_size_bytes,
                 max_short_edge=settings.max_video_height,
                 allowed_host_suffixes=suffixes,
+                enforce_max_short_edge=platform != "instagram",
             )
+            if platform == "instagram":
+                instagram_summary = _instagram_summary_with_selection(
+                    resolution.contract_diagnostic.get(
+                        "instagram_candidate_normalization_summary", {}
+                    ),
+                    selection_rejections,
+                )
+                resolution.contract_diagnostic[
+                    "instagram_candidate_normalization_summary"
+                ] = instagram_summary
+                _emit_instagram_candidate_summary(
+                    repository,
+                    media_job_id,
+                    instagram_summary,
+                )
+                instagram_diagnostics_emitted = True
             if platform == "tiktok":
                 combined_rejections = Counter(resolution.normalization_rejection_counts)
                 combined_rejections.update(selection_rejections)
@@ -175,6 +195,7 @@ def resolve_external_media(
                 max_short_edge=settings.max_video_height,
                 allowed_host_suffixes=suffixes,
                 prefer_smallest_compatible=platform == "tiktok",
+                enforce_max_short_edge=platform != "instagram",
             )
             if not ranked_videos:
                 raise ResolverError(
@@ -236,7 +257,7 @@ def resolve_external_media(
                         job_directory=job_directory,
                         filename="video-input.mp4",
                         deadline_monotonic=media_download_deadline,
-                        probe_alternatives=candidate_attempt == 1,
+                        probe_alternatives=platform == "tiktok" and candidate_attempt == 1,
                     )
                     repository.insert_event(
                         media_job_id,
@@ -260,6 +281,7 @@ def resolve_external_media(
                             fallback_allowed=True,
                             failure_stage="ffprobe_video",
                         )
+                    validate_video_probe_compatibility(candidate_probe)
                     repository.insert_event(
                         media_job_id,
                         event_type="media_probe_completed",
@@ -389,6 +411,7 @@ def resolve_external_media(
                         "media_size_exceeded",
                         "media_has_no_audio",
                         "media_merge_failed",
+                        "unsupported_media",
                     }
                     if fallback_eligible and candidate_attempt < min(3, len(ranked_videos)):
                         repository.insert_event(
@@ -466,6 +489,7 @@ def resolve_external_media(
                 "platform": platform,
                 "resolver": adapter_id,
                 "resolution_mode": "local_file_ready",
+                "provider_media_mode": resolution.media_mode,
                 "output_mode": "temp_file",
                 "temp_file_path": str(final_path),
                 "video_bytes_verified": True,
@@ -517,6 +541,9 @@ def resolve_external_media(
                 "fallback_used": fallback_used,
                 "raw_video_candidate_count": resolution.raw_video_candidate_count,
                 "eligible_video_candidate_count": len(eligible_videos),
+                "instagram_candidate_summary": resolution.contract_diagnostic.get(
+                    "instagram_candidate_normalization_summary", {}
+                ),
                 "selected_candidate": (
                     "top_level_progressive"
                     if video.candidate_id == "top_level_progressive"
@@ -534,6 +561,7 @@ def resolve_external_media(
                         "codec": video.codec,
                         "container": video.container,
                         "url_count": len(video.urls()),
+                        "declared_compatibility": declared_video_compatibility(video),
                     },
                     "candidate_attempt": candidate_attempt,
                     "candidate_fallback_used": candidate_attempt > 1,
@@ -548,6 +576,8 @@ def resolve_external_media(
                     "media_signature_valid": downloaded_video.signature_valid,
                     "initial_probe_video_present": probe.video_present,
                     "initial_probe_audio_present": probe.audio_present,
+                    "actual_video_codec": _codec_category(probe.video_codec),
+                    "actual_container": _container_category(probe.container),
                     "separate_audio_required": separate_audio_required,
                     "audio_candidate_count": sum(
                         1 for candidate in resolution.candidates if candidate.media_type == "audio"
@@ -649,6 +679,14 @@ def resolve_external_media(
                             exc, "normalization_rejection_counts", {}
                         ),
                     )
+            if platform == "instagram" and not instagram_diagnostics_emitted:
+                _emit_instagram_candidate_summary(
+                    repository,
+                    media_job_id,
+                    getattr(exc, "contract_diagnostic", {}).get(
+                        "instagram_candidate_normalization_summary", {}
+                    ),
+                )
             if exc.code in {
                 "resolver_rate_limited",
                 "resolver_temporarily_unavailable",
@@ -719,6 +757,72 @@ def _emit_tiktok_contract_diagnostic(
         "tiktok_provider_contract_inspected",
         extra={**base_event, **diagnostic},
     )
+
+
+def _emit_instagram_candidate_summary(
+    repository: EventRepository,
+    media_job_id: UUID,
+    diagnostic: object,
+) -> None:
+    if not isinstance(diagnostic, dict):
+        return
+    allowed_rejections = {
+        "missing_url",
+        "invalid_url",
+        "non_https",
+        "disallowed_host",
+        "explicit_unsupported_codec",
+        "explicit_unsupported_container",
+        "role_not_video",
+        "malformed_candidate",
+        "size_exceeds_limit",
+        "dimensions_invalid",
+    }
+    raw_rejections = diagnostic.get("rejection_counts")
+    rejections = raw_rejections if isinstance(raw_rejections, dict) else {}
+    metadata = {
+        key: max(0, int(diagnostic.get(key) or 0))
+        for key in (
+            "raw_candidate_count",
+            "raw_video_count",
+            "raw_audio_count",
+            "unknown_role_count",
+            "declared_codec_present_count",
+            "declared_container_present_count",
+            "declared_mime_present_count",
+            "size_present_count",
+            "dimensions_present_count",
+            "eligible_declared_video_count",
+            "probe_required_video_count",
+            "eligible_audio_count",
+        )
+    }
+    metadata["rejection_counts"] = {
+        str(key): max(0, int(value))
+        for key, value in rejections.items()
+        if key in allowed_rejections
+    }
+    repository.insert_event(
+        media_job_id,
+        event_type="instagram_candidate_normalization_summary",
+        message="Instagram media candidates normalized.",
+        metadata=metadata,
+    )
+    logger.info("instagram_candidate_normalization_summary", extra=metadata)
+
+
+def _instagram_summary_with_selection(
+    diagnostic: object,
+    selection_rejections: dict[str, int],
+) -> dict[str, object]:
+    summary = dict(diagnostic) if isinstance(diagnostic, dict) else {}
+    raw_rejections = summary.get("rejection_counts")
+    rejections = Counter(raw_rejections if isinstance(raw_rejections, dict) else {})
+    rejections["disallowed_host"] += selection_rejections.get(
+        "disallowed_initial_host", 0
+    )
+    summary["rejection_counts"] = dict(rejections)
+    return summary
 
 
 def _emit_tiktok_candidate_summary(
@@ -812,6 +916,26 @@ def _content_type_category(value: str) -> str:
     if normalized == "application/octet-stream":
         return "binary"
     return "unknown"
+
+
+def _codec_category(value: str | None) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"h264", "avc", "avc1"}:
+        return "h264"
+    if normalized in {"hevc", "h265", "hev1", "hvc1"}:
+        return "h265"
+    return "unknown" if not normalized else "other"
+
+
+def _container_category(value: str | None) -> str:
+    formats = {
+        item.strip().lower()
+        for item in str(value or "").split(",")
+        if item.strip()
+    }
+    if formats.intersection({"mp4", "mov", "m4v"}):
+        return "mp4"
+    return "unknown" if not formats else "other"
 
 
 def _duration_bucket(value: int | None) -> str:

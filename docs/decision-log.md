@@ -1,5 +1,39 @@
 # Decision Log
 
+## 2026-07-23 — M23.W3I-IG2 Instagram split-AV compatibility repair
+
+- The incident-compatible normalized candidates are one 1080x1920 video and
+  one audio entry. The video has no declared codec, declares `mp4` through the
+  provider extension, has no MIME/size, and has one URL. The audio declares
+  `m4a`, has no codec/MIME/size/dimensions, and has one URL.
+- The exact pre-download rejection was the shared
+  `short_edge > max_short_edge` predicate: 1080 exceeded the 720 TikTok policy.
+  Missing codec was already accepted; missing container was not. The terminal
+  H.264/MP4 message therefore misclassified a resolution-policy rejection.
+- Instagram now has three declared states: `compatible_declared`,
+  `incompatible_declared`, and `probe_required`. Explicit H.265/non-MP4 is
+  rejected; absent/unknown declarations continue to the existing guarded
+  downloader and ffprobe. MIME and URL suffix are not compatibility truth.
+- Instagram video selection no longer inherits TikTok's 720 hard gate. Declared
+  compatible video ranks before probe-required video, candidates remain role
+  separated, provider order breaks metadata ties, and URL alternatives are
+  bounded by the existing downloader.
+- ffprobe now proves H.264 plus an MP4-family container before acceptance.
+  Embedded audio skips separate audio and mux. Missing audio selects only an
+  audio-role candidate, probes it, and muxes with argv-only ffmpeg. The first
+  attempt is stream copy; the bounded fallback copies video and re-encodes
+  audio to AAC only. Video transcoding was removed.
+- `instagram_candidate_normalization_summary` emits only allowlisted counts.
+  `scripts/check_instagram_media_candidate.py` is an opt-in, develop-only,
+  hidden-input owner gate using the shared worker path without Supabase, Gemini,
+  or Sentry. Codex did not run it; the live candidate's actual codec remains
+  unproven.
+- Direct external-URL Gemini input is deferred from this repair. The current
+  worker must first download and probe to enforce its DNS/redirect/content/
+  signature/byte/codec/audio policy. A future opt-in experiment may compare a
+  post-verification external URL handoff against Files API upload without
+  weakening those controls or persisting signed URLs.
+
 ## 2026-07-22 — M23.W3D-TK3B3 Python/curl parity and live media gate
 
 - TK1 was insufficient; TK2 proved `normalize_akng_input()` left `vt`/`vm`

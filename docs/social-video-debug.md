@@ -2,6 +2,15 @@
 
 ## Current Status
 
+- M23.W3I-IG2 proves the current Instagram incident failed before download
+  because the provider's 1080x1920 video hit the shared 720 short-edge gate.
+  The incident shape is one video plus one audio candidate; codec is absent,
+  video container is declared `mp4`, and no MIME or size is declared. Instagram
+  now keeps unknown declarations probe-required, preserves role/URL-alternative
+  order, securely downloads and ffprobes actual H.264 MP4 compatibility, skips
+  mux when embedded audio exists, and otherwise probes an audio-role candidate
+  and muxes without video transcoding. The owner-only live diagnostic must
+  determine the actual codec before the development Render retest.
 - M23.W3D-IG passed in development end to end. The separate
   `private_metadata_save_failed` event remains open and nonblocking; the working
   Instagram media/Gemini route is unchanged.

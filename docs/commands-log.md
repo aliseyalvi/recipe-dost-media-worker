@@ -1412,3 +1412,21 @@ git diff --check
 
 No Gemini, Supabase, Sentry, Render, deployment, main merge, mobile, schema,
 cookie, entitlement, or quota operation occurred.
+
+## M23.W3I-IG2 Instagram split-AV compatibility repair
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python -m compileall app scripts
+PATH="$PWD/.venv/bin:$PATH" python -m unittest discover -s tests -p "test_*.py"
+PATH="$PWD/.venv/bin:$PATH" python -m pip check
+git diff --check
+# Python 3.12.13; compile passed; 175 tests passed with 0 failures/errors;
+# no broken requirements; diff check passed.
+```
+
+Focused tests generated only synthetic local H.264/AAC and incompatible MPEG-4
+media with ffmpeg, then exercised the shared ffprobe/mux path. The owner-only
+Instagram diagnostic was compile-tested and unit-tested but deliberately not
+executed. No live provider/media URL, Gemini, Supabase, Sentry, Render,
+deployment, main merge, production worker, mobile, schema, cookie, entitlement,
+quota, secret read, or secret output occurred.

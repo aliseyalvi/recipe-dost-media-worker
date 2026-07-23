@@ -247,6 +247,20 @@ python3.12 scripts/check_external_resolver_config.py development
 python3.12 scripts/check_environment.py development
 ```
 
+Owner-only Instagram media gate (never run from Codex or production):
+
+```bash
+APP_ENV=development \
+ALLOW_LIVE_INSTAGRAM_DIAGNOSTIC=true \
+python scripts/check_instagram_media_candidate.py
+```
+
+The command requires `INSTAGRAM_RAPIDAPI_KEY` in the environment, reads the
+Instagram URL through a hidden prompt, uses the worker adapter/selection/
+download/ffprobe/mux path, and prints counts/categories only. It makes no
+Supabase, Gemini, or Sentry call and exits zero only when final H.264 MP4 video
+with audio is ready for Gemini.
+
 Production preflight from `main`:
 
 ```bash

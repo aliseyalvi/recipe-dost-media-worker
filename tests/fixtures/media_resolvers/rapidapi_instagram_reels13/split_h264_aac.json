@@ -1,0 +1,22 @@
+{
+  "status": true,
+  "medias": [
+    {
+      "id": "video-main",
+      "type": "video",
+      "codec": "h264",
+      "container": "mp4",
+      "resolution": "720x1280",
+      "url": "https://provider.invalid/media/video"
+    },
+    {
+      "id": "audio-main",
+      "type": "audio",
+      "codec": "aac",
+      "container": "m4a",
+      "mime_type": "audio/mp4",
+      "url": "https://provider.invalid/media/audio"
+    }
+  ],
+  "error": null
+}
