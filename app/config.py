@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     )
     gemini_max_retries: int = 1
     gemini_retry_base_seconds: float = 2.0
-    gemini_max_calls_per_job: int = worker_config_value("gemini_max_calls_per_job", 2)
+    gemini_max_calls_per_job: int = worker_config_value("gemini_max_calls_per_job", 3)
     gemini_daily_dev_call_limit: int = 5
     gemini_video_observation_timeout_seconds: int = 120
     gemini_text_normalization_timeout_seconds: int = 60

@@ -49,9 +49,14 @@ class QueueGeminiGuardTests(unittest.TestCase):
                 guarded_generate_content(client, model="fixture-model", contents=["x"], stage="gemini_structured_extraction")
         finally:
             _GEMINI_CALL_CONTEXT.reset(token)
-        self.assertEqual(captured.exception.code, "gemini_job_call_limit_reached")
+        self.assertEqual(captured.exception.code, "gemini_call_budget_exhausted")
         self.assertEqual(client.models.generate_content.call_count, 2)
-        self.assertEqual(repository.insert_event.call_count, 2)
+        started = [
+            call
+            for call in repository.insert_event.call_args_list
+            if call.kwargs.get("event_type") == "gemini_api_call_started"
+        ]
+        self.assertEqual(len(started), 2)
 
 
 if __name__ == "__main__":

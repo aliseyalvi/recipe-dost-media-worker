@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
 from supabase import Client, create_client
@@ -99,6 +99,76 @@ class MediaJobRepository:
         )
         return int(response.count or 0) > 0
 
+    def has_event(self, media_job_id: UUID, event_type: str) -> bool:
+        response = (
+            self._client.table("media_job_events")
+            .select("id", count="exact", head=True)
+            .eq("media_job_id", str(media_job_id))
+            .eq("event_type", event_type)
+            .execute()
+        )
+        return int(response.count or 0) > 0
+
+    def get_quota_counts(
+        self,
+        *,
+        user_id: UUID,
+        plan: str,
+    ) -> dict[str, int]:
+        active_statuses = [
+            "queued",
+            "processing",
+            "analyzing",
+            "pending",
+            "running",
+            "resolving",
+            "downloading",
+            "validating",
+            "thumbnailing",
+            "uploading_to_ai",
+            "saving_result",
+        ]
+        active_query = (
+            self._client.table("media_jobs")
+            .select("id", count="exact", head=True)
+            .eq("user_id", str(user_id))
+            .in_("status", active_statuses)
+        )
+        successful_query = (
+            self._client.table("media_jobs")
+            .select("id", count="exact", head=True)
+            .eq("user_id", str(user_id))
+            .eq("status", "completed")
+            .not_.is_("result_recipe_card_id", "null")
+            .not_.is_("ai_provider", "null")
+        )
+        if plan == "premium":
+            now = datetime.now(timezone.utc)
+            month_start = now.replace(
+                day=1,
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            if month_start.month == 12:
+                next_month = month_start.replace(
+                    year=month_start.year + 1,
+                    month=1,
+                )
+            else:
+                next_month = month_start.replace(month=month_start.month + 1)
+            active_query = active_query.gte(
+                "created_at", month_start.isoformat()
+            ).lt("created_at", next_month.isoformat())
+            successful_query = successful_query.gte(
+                "completed_at", month_start.isoformat()
+            ).lt("completed_at", next_month.isoformat())
+        return {
+            "active_reservation_count": int(active_query.execute().count or 0),
+            "successful_count": int(successful_query.execute().count or 0),
+        }
+
     def update_job(
         self,
         media_job_id: UUID,
@@ -190,8 +260,8 @@ class MediaJobRepository:
             "resolver": resolver,
             "cdn_url": cdn_url,
             "cdn_url_expires_at": None,
-            "raw_metadata": raw_metadata,
-            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "raw_metadata": raw_metadata if isinstance(raw_metadata, dict) else {},
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         self._client.table("media_job_private_metadata").upsert(
             values,

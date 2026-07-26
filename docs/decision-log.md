@@ -1,5 +1,28 @@
 # Decision Log
 
+## 2026-07-26 — M23.W6A-W6C deterministic worker reliability
+
+- The active strategy is one single-pass video structured-output call, followed
+  by at most one text-only repair and, only when recoverable, one model fallback
+  that reuses the active Gemini file. `GEMINI_MAX_CALLS_PER_JOB=3` changes the
+  provider recovery budget, not user entitlement or usage limits.
+- `gemini-3.1-flash-lite` uses JSON MIME, JSON Schema, and
+  `thinking_level=high`. `gemini-2.5-flash` uses its own schema field and omits
+  the Gemini-3 thinking-level option. Configuration is validated before quota
+  accounting or provider invocation.
+- Fallback telemetry is emitted only after budget/configuration preflight. A
+  two-call primary+repair sequence skips fallback with
+  `gemini_call_budget_exhausted` and records no provider request.
+- Quota remains status-derived in the Edge access code: active statuses reserve,
+  failed/cancelled release, and only completed jobs with a result card and AI
+  provider count as success. Worker events audit this idempotently; there is no
+  reservation row or quota RPC.
+- `media_job_private_metadata.raw_metadata` is non-null JSONB. External jobs
+  supplied `None`, explaining `APIError`/Postgres `23502`; missing metadata now
+  writes `{}`. Service-role/RLS and types match, so no migration is needed.
+- Offline replay/batch QA uses production pipeline functions and writes only a
+  gitignored sanitized report.
+
 ## 2026-07-23 — M23.W3I-IG2 Instagram split-AV compatibility repair
 
 - The incident-compatible normalized candidates are one 1080x1920 video and

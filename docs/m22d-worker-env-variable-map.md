@@ -50,7 +50,7 @@ These moved to committed JSON config. Existing Render env values with the same n
 | `GEMINI_FILE_UPLOAD_TIMEOUT_SECONDS` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default 120. |
 | `GEMINI_JSON_FALLBACK_ENABLED` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | legacy two-step | moved | Default true. |
 | `GEMINI_JSON_RETRY_ENABLED` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | legacy two-step | moved | Default true. |
-| `GEMINI_MAX_CALLS_PER_JOB` | config/default/env override | `app/config.py`, `app/main.py` | no | no | quota guard | moved | Default 2; quota logic unchanged. |
+| `GEMINI_MAX_CALLS_PER_JOB` | config/default/env override | `app/config.py`, `app/main.py` | no | no | quota guard | moved | Default 3: primary, text-only repair, bounded compatible-model fallback; entitlement quota unchanged. |
 | `GEMINI_MAX_OUTPUT_TOKENS` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default 12000. |
 | `GEMINI_PRIMARY_MODEL` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default `gemini-3.1-flash-lite`. |
 | `GEMINI_RECIPE_REPAIR_MAX_RETRIES` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default 1. |

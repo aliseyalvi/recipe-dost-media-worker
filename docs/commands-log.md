@@ -1430,3 +1430,36 @@ Instagram diagnostic was compile-tested and unit-tested but deliberately not
 executed. No live provider/media URL, Gemini, Supabase, Sentry, Render,
 deployment, main merge, production worker, mobile, schema, cookie, entitlement,
 quota, secret read, or secret output occurred.
+
+## M23.W6A-W6C deterministic replay and Gemini reliability
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+# passed: 7/7 terminal, 5 completed, 2 deliberate failures, FIFO, concurrency 1,
+# cleanup true for all, active reservations 0, success ratio 0.7143
+
+PATH="$PWD/.venv/bin:$PATH" python -m unittest -q \
+  tests.test_gemini_reliability tests.test_worker_qa \
+  tests.test_queue_gemini_guard
+# passed: 14 tests
+```
+
+No live mode, provider, Gemini, Supabase, Sentry, Render, deployment, main
+merge, mobile, schema, entitlement-limit, concurrency, or secret change was
+performed.
+
+Final validation:
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python -m compileall app scripts
+PATH="$PWD/.venv/bin:$PATH" python -m unittest discover -s tests -p "test_*.py"
+PATH="$PWD/.venv/bin:$PATH" python -m pip check
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/replay_manifest.json
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+git diff --check
+# passed: compile; 188 tests; pip check; 11-case replay; 7-case mixed batch;
+# diff check. Live mode also refused without owner credentials as designed.
+```

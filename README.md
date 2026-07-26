@@ -378,3 +378,26 @@ cd /Users/sadaqatali/Documents/AiAppBuilder/recipe-dost/recipe-dost
 npm run env:supabase:dev:dry
 node scripts/env/sync-supabase-secrets.mjs development --apply
 ```
+
+## Deterministic worker QA
+
+Offline QA calls production normalization, selection, request construction,
+parsing, validation, recovery, terminal-state, cleanup, and quota-finalization
+functions without network calls or secrets:
+
+```bash
+python scripts/worker_qa.py replay --case primary_malformed_repaired
+python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+```
+
+The sanitized report is `.worker-qa/latest/summary.json` and is gitignored.
+Owner-only live development mode uses an in-memory repository, so it performs no
+Supabase writes or entitlement charge:
+
+```bash
+APP_ENV=development ALLOW_LIVE_WORKER_QA=true \
+python scripts/worker_qa.py live \
+  --manifest .worker-qa/private/live-manifest.json \
+  --max-total-calls 8
+```

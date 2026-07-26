@@ -2,6 +2,19 @@
 
 ## Current Status
 
+- M23.W6A-W6C resolves the post-`gemini_file_active` incidents locally. Upload
+  telemetry used stale `GEMINI_VIDEO_ANALYSIS_MODE=two_step_brief_then_json`
+  while branching used `GEMINI_EXTRACTION_MODE=single_pass_structured`; active
+  telemetry now consistently reports the latter. Requests are model-specific,
+  repair is text-only, failures are closed categories, and fallback never
+  claims invocation when budget/configuration preflight blocks it.
+- External resolver results often omit raw metadata, but the deployed
+  `raw_metadata jsonb not null` column rejected SQL null with `23502`. Missing
+  metadata now maps to `{}` and remains optional/nonterminal.
+- Offline mixed queue: 7 terminal jobs, 5 expected completions, 2 deliberate
+  failures, ratio 0.7143, concurrency 1, no starvation, cleanup passed, active
+  reservations 0.
+
 - M23.W3I-IG2 proves the current Instagram incident failed before download
   because the provider's 1080x1920 video hit the shared 720 short-edge gate.
   The incident shape is one video plus one audio candidate; codec is absent,

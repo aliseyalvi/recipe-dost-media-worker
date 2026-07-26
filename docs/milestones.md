@@ -61,15 +61,25 @@
 | 57 | M23.W3D-TK2 AKNG input telemetry | Failed live | Unresolved short URL reached AKNG and returned an empty success wrapper |
 | 58 | M23.W3D-TK3B3 Python/curl parity and media proof | Passed locally | Numeric-ID primary, DNS-pinned short-link expansion, throughput-ranked AKNG proxy alternatives, and both live local A/V gates passed |
 | 59 | M23.W3I-IG2 Instagram split-AV compatibility repair | Done locally | Preserve unknown declarations for secure probe, keep roles separate, accept verified H.264 MP4, conditionally mux audio, and add an owner-only live gate |
-| 60 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 61 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 62 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 60 | M23.W6A-W6C Deterministic replay, Gemini reliability, queue finalization audit | Done locally | Offline replay/batch harness, model-specific structured extraction, closed failures, implicit quota-finalization proof, and private metadata fix |
+| 61 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 62 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 63 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Run the owner-only Instagram diagnostic on `develop`, then commit and deploy the
-reviewed change to the development Render service for one authorized Premium
-Instagram retest. Production stays unchanged.
+Review M23.W6A-W6C, then deploy only the `develop` revision to the development
+Render service and run the bounded sequential Premium TikTok/Instagram retest.
+Production stays unchanged.
+
+- M23.W6A-W6C keeps single-pass structured extraction as the active strategy:
+  one video call, one text-only repair when useful, and one compatible-model
+  fallback only when recovery requires it. The exact maximum is three calls.
+  The offline mixed batch completed 5/7 expected successes with all seven jobs
+  terminal, FIFO, serialized, cleaned, and quota-finalized.
+- `private_metadata_save_failed` was a worker payload defect: optional external
+  metadata became SQL null although the deployed JSONB column is non-null.
+  Missing raw metadata now persists as `{}`; no migration is required.
 
 - M23.W3I-IG2 proved the incident-compatible 1080x1920 candidate was rejected
   by the shared 720 short-edge gate, not by its missing codec. Instagram now

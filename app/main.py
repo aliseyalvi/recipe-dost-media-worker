@@ -231,7 +231,7 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         ),
         ai_analysis_mode=settings.ai_analysis_mode,
         gemini_video_input_mode=settings.gemini_video_input_mode,
-        gemini_video_analysis_mode=settings.gemini_video_analysis_mode,
+        gemini_video_analysis_mode=settings.gemini_extraction_mode,
         gemini_extraction_mode=settings.gemini_extraction_mode,
         gemini_primary_model=settings.gemini_primary_model,
         gemini_fallback_model=settings.gemini_fallback_model,
