@@ -8,6 +8,7 @@ import re
 import shutil
 import time
 from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -44,6 +45,7 @@ from app.observability.sentry import (
 )
 from app.media_resolvers.contracts import ResolverError
 from app.media_resolvers.pipeline import resolve_external_media
+from app.pipeline.resources import gemini_upload_slot
 from app.recipe_tags import has_required_recipe_tags, normalize_recipe_tags
 from app.quota_finalization import (
     ensure_quota_reservation_event,
@@ -336,6 +338,20 @@ class StructuredExtractionFailure(QueueJobFailure):
             metadata={"failure_category": failure_category},
         )
         self.raw_text = raw_text
+
+
+@dataclass(frozen=True)
+class DeferredGeminiRecipe:
+    job: MediaJobRecord
+    result: GeminiRecipeResult
+    model: str
+    platform: str
+    resolver: str
+    uploaded_thumbnail_url: str | None
+    source_metadata: dict[str, object]
+    used_fallback: bool = False
+    brief_text: str | None = None
+    client: object | None = None
 
 
 async def run_queue_loop(_build_job_runner: Callable[[Settings], object]) -> None:
@@ -931,7 +947,10 @@ def save_metadata(
     *,
     allow_private_metadata_failure: bool | None = None,
 ) -> None:
-    cdn_url = str_or_none(result.get("cdn_download_url"))
+    # Provider/CDN URLs are ephemeral resolver inputs. Even the private metadata
+    # row stores no signed URL; crash recovery rematerializes from the durable
+    # job source rather than replaying an expiring provider URL.
+    cdn_url = None
     try:
         repository.upsert_private_metadata(
             media_job_id,
@@ -1021,6 +1040,11 @@ def public_source_metadata(
         if result.get("platform") == "youtube"
         else "platform_first_v2"
     )
+    thumbnail_source_present = bool(
+        result.get("thumbnail_selected")
+        or result.get("thumbnail_url")
+        or uploaded_thumbnail_url
+    )
     return {
         "platform": result.get("platform"),
         "resolver": result.get("resolver") or "ytdlp_stream",
@@ -1028,17 +1052,17 @@ def public_source_metadata(
         "description": result.get("description"),
         "author_username": result.get("author_username"),
         "duration_seconds": result.get("duration_seconds"),
-        "thumbnail_source_present": bool(result.get("thumbnail_url")),
+        "thumbnail_source_present": thumbnail_source_present,
         "thumbnail_source": result.get("thumbnail_source") or "placeholder",
         "thumbnail_provider": result.get("thumbnail_provider") or result.get("platform"),
         "thumbnail_strategy": result.get("thumbnail_strategy") or default_thumbnail_strategy,
         "thumbnail_candidate_count": result.get("thumbnail_candidate_count") or 0,
-        "thumbnail_selected": bool(result.get("thumbnail_selected")),
+        "thumbnail_selected": thumbnail_source_present,
         "uploaded_thumbnail_url": uploaded_thumbnail_url,
         "resolution_mode": resolution_mode,
         "media": {
             "has_cdn_url": has_cdn_url,
-            "cdn_url_stored_private": has_cdn_url,
+            "cdn_url_stored_private": False,
             "mime_type": result.get("mime_type"),
             "size_bytes": result.get("size_bytes"),
             "width": result.get("width"),
@@ -1331,7 +1355,8 @@ def process_youtube_gemini_url_job(
     job: MediaJobRecord,
     platform: str,
     started_at: float,
-) -> MediaJobRecord:
+    defer_finalization: bool = False,
+) -> MediaJobRecord | DeferredGeminiRecipe:
     if settings.gemini_api_key is None:
         raise QueueJobFailure(
             "gemini_api_key_missing",
@@ -1450,7 +1475,7 @@ def process_youtube_gemini_url_job(
                 "repair_used": repair_used,
             },
         )
-        return save_gemini_recipe_card(
+        return complete_or_defer_gemini_recipe(
             repository=repository,
             job=job,
             result=result,
@@ -1462,6 +1487,7 @@ def process_youtube_gemini_url_job(
             used_fallback=accepted_model != settings.gemini_primary_model,
             client=client,
             settings=settings,
+            defer_finalization=defer_finalization,
         )
     add_event(
         repository,
@@ -1525,7 +1551,7 @@ def process_youtube_gemini_url_job(
         text_model,
         PROMPT_VERSION,
     )
-    return save_gemini_recipe_card(
+    return complete_or_defer_gemini_recipe(
         repository=repository,
         job=job,
         result=result,
@@ -1538,6 +1564,7 @@ def process_youtube_gemini_url_job(
         brief_text=brief,
         client=client,
         settings=settings,
+        defer_finalization=defer_finalization,
     )
 
 
@@ -3489,7 +3516,8 @@ def run_gemini_video_poc_analysis(
     extract_result: dict[str, object],
     platform: str,
     uploaded_thumbnail_url: str | None,
-) -> MediaJobRecord:
+    defer_finalization: bool = False,
+) -> MediaJobRecord | DeferredGeminiRecipe:
     temp_file_path = str_or_none(extract_result.get("temp_file_path"))
     temp_file = Path(temp_file_path) if temp_file_path is not None else None
     if (
@@ -3555,11 +3583,12 @@ def run_gemini_video_poc_analysis(
             metadata=base_ai_metadata,
         )
         try:
-            uploaded_file = upload_gemini_video_file(
-                client=client,
-                temp_file_path=temp_file_path,
-                mime_type=mime_type,
-            )
+            with gemini_upload_slot():
+                uploaded_file = upload_gemini_video_file(
+                    client=client,
+                    temp_file_path=temp_file_path,
+                    mime_type=mime_type,
+                )
         except Exception as exc:
             raise QueueJobFailure(
                 "gemini_file_upload_failed",
@@ -3594,6 +3623,19 @@ def run_gemini_video_poc_analysis(
                 "file_state": "ACTIVE",
             },
         )
+        # ACTIVE proves the Files API has finished ingesting the uploaded bytes.
+        # Structured extraction and fallback use the Gemini file object only;
+        # the local file is therefore no longer an input and can be removed.
+        if delete_temp_media(temp_file_path):
+            repository.insert_event(
+                job.id,
+                event_type="temp_video_deleted",
+                message="Temporary video file deleted.",
+                metadata={
+                    "stage": "gemini_file_processing",
+                    "cleanup_point": "after_gemini_file_active",
+                },
+            )
         if settings.gemini_extraction_mode == "single_pass_structured":
             result, accepted_model, repair_used = run_single_pass_structured_extraction(
                 repository=repository,
@@ -3624,7 +3666,7 @@ def run_gemini_video_poc_analysis(
                 )
                 | {"repair_used": repair_used},
             )
-            return save_gemini_recipe_card(
+            return complete_or_defer_gemini_recipe(
                 repository=repository,
                 job=job,
                 result=result,
@@ -3636,6 +3678,7 @@ def run_gemini_video_poc_analysis(
                 used_fallback=accepted_model != settings.gemini_primary_model,
                 client=client,
                 settings=settings,
+                defer_finalization=defer_finalization,
             )
         brief_metadata = {
             **base_ai_metadata,
@@ -3827,7 +3870,7 @@ def run_gemini_video_poc_analysis(
             mime_type=mime_type,
         ),
     )
-    return save_gemini_recipe_card(
+    return complete_or_defer_gemini_recipe(
         repository=repository,
         job=job,
         result=result,
@@ -3838,6 +3881,52 @@ def run_gemini_video_poc_analysis(
         source_metadata=extract_result,
         used_fallback=parsed.get("save_mode") == "local_brief_fallback" or brief_used_fallback,
         brief_text=brief,
+        client=client,
+        settings=settings,
+        defer_finalization=defer_finalization,
+    )
+
+
+def complete_or_defer_gemini_recipe(
+    *,
+    repository: MediaJobRepository,
+    job: MediaJobRecord,
+    result: GeminiRecipeResult,
+    model: str,
+    platform: str,
+    resolver: str,
+    uploaded_thumbnail_url: str | None,
+    source_metadata: dict[str, object],
+    used_fallback: bool,
+    brief_text: str | None = None,
+    client: object | None = None,
+    settings: Settings,
+    defer_finalization: bool,
+) -> MediaJobRecord | DeferredGeminiRecipe:
+    if defer_finalization:
+        return DeferredGeminiRecipe(
+            job=job,
+            result=result,
+            model=model,
+            platform=platform,
+            resolver=resolver,
+            uploaded_thumbnail_url=uploaded_thumbnail_url,
+            source_metadata=source_metadata,
+            used_fallback=used_fallback,
+            brief_text=brief_text,
+            client=client,
+        )
+    return save_gemini_recipe_card(
+        repository=repository,
+        job=job,
+        result=result,
+        model=model,
+        platform=platform,
+        resolver=resolver,
+        uploaded_thumbnail_url=uploaded_thumbnail_url,
+        source_metadata=source_metadata,
+        used_fallback=used_fallback,
+        brief_text=brief_text,
         client=client,
         settings=settings,
     )
@@ -4565,7 +4654,9 @@ def safe_extract_event_metadata(
         "title_present": bool(result.get("title")),
         "description_present": bool(result.get("description")),
         "duration_seconds": result.get("duration_seconds"),
-        "has_thumbnail": bool(result.get("thumbnail_url")),
+        "has_thumbnail": bool(
+            result.get("thumbnail_selected") or result.get("thumbnail_url")
+        ),
         "thumbnail_source": result.get("thumbnail_source") or "placeholder",
         "thumbnail_provider": result.get("thumbnail_provider") or result.get("platform"),
         "thumbnail_strategy": result.get("thumbnail_strategy") or default_thumbnail_strategy,
@@ -5104,9 +5195,18 @@ def delete_temp_media(temp_file_path: str | None) -> bool:
         pass
     parent = path.parent
     try:
-        if parent.exists() and parent.name:
+        recognized_job_directory = parent.name.startswith("external-") or bool(
+            re.fullmatch(
+                r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+                parent.name,
+            )
+        )
+        if parent.exists() and recognized_job_directory:
             shutil.rmtree(parent, ignore_errors=True)
             deleted = True
+        elif parent.exists():
+            parent.rmdir()
     except OSError:
         pass
     return deleted

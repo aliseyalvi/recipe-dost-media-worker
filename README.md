@@ -4,7 +4,9 @@ FastAPI worker for Recipe Dost media jobs. The production cutover path is the se
 
 ## Scope
 
-- Queue mode is the primary production flow: startup and `GET /wake` keep one serialized queue loop active.
+- Queue mode is the primary production flow. Render starts one combined service
+  with `python -m app.workers.combined_worker`; `WORKER_PIPELINE_MODE=sequential`
+  preserves the serialized loop and `staged` enables bounded in-process stages.
 - `/process-job` remains available only for legacy/manual/debug job kicks.
 - YouTube uses Gemini native URL input when `YOUTUBE_AI_INPUT_MODE=gemini_url`; it does not use yt-dlp in that mode.
 - TikTok and Instagram can use the provider-neutral external resolver pipeline;
@@ -130,9 +132,20 @@ Cookies are platform-specific. Do not use Facebook cookies for TikTok. `COOKIE_F
 ## Run
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
+PORT=8080 python -m app.workers.combined_worker
 curl http://localhost:8080/health
 ```
+
+Staged development mode keeps all resource defaults at one:
+
+```bash
+WORKER_PIPELINE_MODE=staged PORT=8080 python -m app.workers.combined_worker
+```
+
+The ingest, analyzer, and finalizer module entry points are placeholders for a
+future durable transport and fail closed today. See
+[docs/m23-w7-staged-worker.md](docs/m23-w7-staged-worker.md) for stage
+contracts, admission, recovery limits, deployment, soak, and rollback.
 
 Wake the queue worker:
 

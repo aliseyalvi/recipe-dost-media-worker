@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import shutil
 import socket
 import tempfile
@@ -514,10 +515,17 @@ def sweep_stale_job_directories(
     removed = 0
     for child in root.iterdir():
         try:
+            recognized_job_directory = child.name.startswith("external-") or bool(
+                re.fullmatch(
+                    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+                    child.name,
+                )
+            )
             if (
                 child.is_symlink()
                 or not child.is_dir()
-                or not child.name.startswith("external-")
+                or not recognized_job_directory
                 or child.stat().st_mtime >= cutoff
             ):
                 continue

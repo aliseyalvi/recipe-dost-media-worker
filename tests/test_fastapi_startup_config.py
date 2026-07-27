@@ -31,7 +31,7 @@ class FastApiStartupConfigTests(unittest.TestCase):
         with patch.object(main, "get_settings", return_value=settings), patch.object(
             main, "ensure_queue_worker_started"
         ) as start, patch.object(
-            main, "sweep_stale_job_directories", return_value=0
+            main, "cleanup_stale_media", return_value=0
         ), patch.object(main, "report_worker_error"):
             asyncio.run(main.start_queue_worker())
         start.assert_called_once_with(settings)

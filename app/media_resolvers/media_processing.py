@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.media_resolvers.contracts import ResolverError
+from app.pipeline.resources import ffmpeg_process_slot
 
 
 @dataclass(frozen=True)
@@ -34,22 +35,23 @@ def probe_media(path: Path, *, timeout_seconds: int) -> MediaProbe:
             technical=True,
         )
     try:
-        result = subprocess.run(
-            [
-                ffprobe,
-                "-v",
-                "error",
-                "-show_entries",
-                "stream=codec_type,codec_name,width,height:format=duration,format_name",
-                "-of",
-                "json",
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=max(1, timeout_seconds),
-            check=False,
-        )
+        with ffmpeg_process_slot():
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type,codec_name,width,height:format=duration,format_name",
+                    "-of",
+                    "json",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=max(1, timeout_seconds),
+                check=False,
+            )
         payload = json.loads(result.stdout or "{}")
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
         raise ResolverError(
@@ -214,12 +216,13 @@ def mux_video_audio(
     for command in commands:
         output_path.unlink(missing_ok=True)
         try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                timeout=max(1, timeout_seconds),
-                check=False,
-            )
+            with ffmpeg_process_slot():
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    timeout=max(1, timeout_seconds),
+                    check=False,
+                )
         except (OSError, subprocess.SubprocessError):
             continue
         if result.returncode == 0 and output_path.exists() and 0 < output_path.stat().st_size <= byte_limit:

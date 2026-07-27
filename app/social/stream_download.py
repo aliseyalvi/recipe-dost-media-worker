@@ -16,6 +16,7 @@ from typing import Any, Literal
 import requests
 
 from app.config import Settings
+from app.pipeline.resources import ffmpeg_process_slot
 from app.social.models import SocialResolverError, SocialVideoInfo
 from app.social.thumbnail_selection import platform_thumbnail, select_ytdlp_thumbnail
 from app.social.yt_dlp_resolver import (
@@ -398,22 +399,23 @@ def probe_downloaded_media(
     if not ffprobe:
         return MediaProbeResult(False, None, None)
     try:
-        completed = subprocess.run(
-            [
-                ffprobe,
-                "-v",
-                "error",
-                "-show_entries",
-                "stream=codec_type,width,height:format=duration",
-                "-of",
-                "json",
-                str(file_path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=max(1, settings.ytdlp_extract_timeout_seconds),
-            check=False,
-        )
+        with ffmpeg_process_slot():
+            completed = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type,width,height:format=duration",
+                    "-of",
+                    "json",
+                    str(file_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=max(1, settings.ytdlp_extract_timeout_seconds),
+                check=False,
+            )
         if completed.returncode != 0:
             raise MediaProbeError("media_probe_failed")
         payload = json.loads(completed.stdout or "{}")
@@ -459,8 +461,9 @@ def optimize_downloaded_media(
         return file_path, False, False
     output = job_dir / "optimized.mp4"
     try:
-        completed = subprocess.run(
-            [
+        with ffmpeg_process_slot():
+            completed = subprocess.run(
+                [
                 ffmpeg,
                 "-v",
                 "error",
@@ -487,12 +490,12 @@ def optimize_downloaded_media(
                 "-1",
                 "-movflags",
                 "+faststart",
-                str(output),
-            ],
-            capture_output=True,
-            timeout=max(1, min(settings.max_job_runtime_seconds, 120)),
-            check=False,
-        )
+                    str(output),
+                ],
+                capture_output=True,
+                timeout=max(1, min(settings.max_job_runtime_seconds, 120)),
+                check=False,
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         raise MediaOptimizationError("media_optimization_failed") from exc
     if completed.returncode != 0 or not output.exists() or output.stat().st_size <= 0:

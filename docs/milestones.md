@@ -62,14 +62,17 @@
 | 58 | M23.W3D-TK3B3 Python/curl parity and media proof | Passed locally | Numeric-ID primary, DNS-pinned short-link expansion, throughput-ranked AKNG proxy alternatives, and both live local A/V gates passed |
 | 59 | M23.W3I-IG2 Instagram split-AV compatibility repair | Done locally | Preserve unknown declarations for secure probe, keep roles separate, accept verified H.264 MP4, conditionally mux audio, and add an owner-only live gate |
 | 60 | M23.W6A-W6C Deterministic replay, Gemini reliability, queue finalization audit | Done locally | Offline replay/batch harness, model-specific structured extraction, closed failures, implicit quota-finalization proof, and private metadata fix |
-| 61 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 62 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 63 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 61 | M23.W7A-W7C Staged combined worker architecture | Done locally; durable lease migration blocked | Typed stages, bounded in-process transport, resource admission, combined/fail-closed standalone entry points, ACTIVE-point cleanup, deterministic staged/concurrency-two QA; cross-process lease recovery needs approval |
+| 62 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 63 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 64 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Review M23.W6A-W6C, then deploy only the `develop` revision to the development
-Render service and run the bounded sequential Premium TikTok/Instagram retest.
+Review M23.W7A-W7C, then owner-deploy only the `develop` revision to the
+development Render service. Verify combined-worker sequential compatibility
+first, then run the bounded staged Premium TikTok/Instagram soak at concurrency
+one. Durable lease/schema work remains separately approval-gated.
 Production stays unchanged.
 
 - M23.W6A-W6C keeps single-pass structured extraction as the active strategy:

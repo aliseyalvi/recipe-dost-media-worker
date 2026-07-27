@@ -1,5 +1,24 @@
 # Decision Log
 
+## 2026-07-27 — M23.W7A-W7C staged combined worker
+
+- One Render service now has sequential compatibility and bounded staged modes;
+  the Docker/Render entry point is `python -m app.workers.combined_worker`.
+- Typed internal contracts omit runtime paths/job snapshots from serialization,
+  and in-process queues are the only enabled transport. Standalone stage
+  commands fail closed because no durable transport is configured.
+- Dispatch checks ingest capacity, RSS, worst-case temp bytes, free temp space,
+  ffmpeg, and upload budgets before conditional claim. All concurrency defaults
+  remain one; analyzer two is offline-tested but not approved for Render.
+- Local media is deleted only after Gemini Files API reports ACTIVE. Signed
+  provider/CDN URLs are not persisted even in private metadata.
+- The existing schema has no lease owner/expiry, heartbeat, attempt fence,
+  durable stage, or result idempotency key. Unsafe `started_at` reclaim was not
+  added and no migration was created; true crash recovery/separate services
+  remain approval-blocked.
+- Quota terminal events remain idempotent. Probe, thumbnail, and quota snapshot
+  telemetry now state the lifecycle fact they actually represent.
+
 ## 2026-07-26 — M23.W6A-W6C deterministic worker reliability
 
 - The active strategy is one single-pass video structured-output call, followed

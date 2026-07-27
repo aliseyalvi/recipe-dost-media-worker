@@ -58,6 +58,7 @@ def ensure_quota_reservation_event(
             "plan": plan,
             "reason": reason,
             **counts,
+            "quota_count_observed_at": "reservation_after_claim",
             "idempotent_replay": False,
         },
     )
@@ -88,6 +89,7 @@ def finalize_quota_transition(
                 "plan": plan,
                 "reason": reason,
                 **quota_counts(repository, job, plan),
+                "quota_count_observed_at": "terminal_replay",
                 "idempotent_replay": True,
             },
         )
@@ -104,6 +106,7 @@ def finalize_quota_transition(
             "plan": plan,
             "reason": reason,
             **quota_counts(repository, job, plan),
+            "quota_count_observed_at": "terminal_after_status_update",
             "idempotent_replay": False,
         },
     )

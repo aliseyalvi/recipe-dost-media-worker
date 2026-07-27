@@ -51,14 +51,22 @@ class OfflineRepository:
         self.active_jobs = 0
         self.max_active_jobs = 0
         self.private_metadata_failure = False
+        self.terminal_updates: dict[UUID, int] = {}
 
     def register(self, job: MediaJobRecord) -> None:
         self.jobs[job.id] = job
+
+    def get_job(self, media_job_id: UUID) -> MediaJobRecord | None:
+        return self.jobs.get(media_job_id)
 
     def update_job(self, media_job_id: UUID, **values: object) -> MediaJobRecord:
         current = self.jobs[media_job_id]
         updated = current.model_copy(update=values)
         self.jobs[media_job_id] = updated
+        if updated.status in {"completed", "failed"}:
+            self.terminal_updates[media_job_id] = (
+                self.terminal_updates.get(media_job_id, 0) + 1
+            )
         self.active_jobs = sum(
             item.status
             in {

@@ -2,6 +2,19 @@
 
 ## Current Status
 
+- M23.W7A-W7C separates the active queue into dispatch, ingest, Gemini analysis,
+  and finalization services while retaining one combined Render process and a
+  sequential rollback mode. In staged mode, local media is removed after the
+  Gemini file becomes ACTIVE, allowing the next ingest to overlap structured
+  extraction under bounded RSS/temp/ffmpeg/upload admission.
+- External final probe telemetry now reports `probe_performed=true`; thumbnail
+  presence survives safe provider-URL redaction; quota count snapshots identify
+  their observation point. Signed provider/CDN URLs are no longer persisted.
+- Offline staged QA passes 7/7 terminal with 5 expected successes, FIFO,
+  overlap, cleanup, zero active reservations, and analyzer-two isolation. The
+  database has no lease/heartbeat/attempt fence, so standalone workers and
+  automatic expired-lease recovery fail closed pending an approved migration.
+
 - M23.W6A-W6C resolves the post-`gemini_file_active` incidents locally. Upload
   telemetry used stale `GEMINI_VIDEO_ANALYSIS_MODE=two_step_brief_then_json`
   while branching used `GEMINI_EXTRACTION_MODE=single_pass_structured`; active

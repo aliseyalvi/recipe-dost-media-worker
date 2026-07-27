@@ -21,8 +21,9 @@ from app.metadata_preview import (
     SUPPORTED_METADATA_PLATFORMS,
     fetch_metadata_preview,
 )
-from app.media_resolvers.media_fetch import sweep_stale_job_directories
+from app.pipeline.recovery import cleanup_stale_media
 from app.observability.sentry import flush_sentry, initialize_sentry, report_worker_error
+from app.pipeline.runtime import run_combined_pipeline
 from app.queue_worker import run_queue_loop
 from app.runtime_config import worker_config_report
 from app.schemas import (
@@ -132,6 +133,15 @@ class JsonFormatter(logging.Formatter):
             "eligible_audio_count",
             "rejection_counts",
             "stale_directories_removed",
+            "pipeline_mode",
+            "configured_concurrency",
+            "queue_depth_bucket",
+            "active_stage_count",
+            "rss_bucket",
+            "temp_byte_bucket",
+            "latency_bucket",
+            "retry_recovery_category",
+            "lease_state_category",
         ):
             value = getattr(record, field, None)
             if value is not None:
@@ -334,6 +344,21 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         cobalt_configured=settings.cobalt_configured,
         cobalt_enabled_platforms=settings.cobalt_enabled_platforms,
         worker_execution_mode=settings.worker_execution_mode,
+        worker_pipeline_mode=settings.worker_pipeline_mode,
+        worker_stage_transport=settings.worker_stage_transport,
+        worker_dispatch_concurrency=settings.worker_dispatch_concurrency,
+        worker_ingest_concurrency=settings.worker_ingest_concurrency,
+        worker_gemini_analysis_concurrency=(
+            settings.worker_gemini_analysis_concurrency
+        ),
+        worker_finalize_concurrency=settings.worker_finalize_concurrency,
+        worker_ffmpeg_concurrency=settings.worker_ffmpeg_concurrency,
+        worker_gemini_upload_concurrency=(
+            settings.worker_gemini_upload_concurrency
+        ),
+        worker_ingest_queue_size=settings.worker_ingest_queue_size,
+        worker_analysis_queue_size=settings.worker_analysis_queue_size,
+        worker_finalize_queue_size=settings.worker_finalize_queue_size,
         queue_loop_enabled=settings.worker_execution_mode == "queue"
         and queue_task is not None
         and not queue_task.done(),
@@ -368,6 +393,21 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
     return {
         "app_env": settings.app_env,
         "worker_execution_mode": settings.worker_execution_mode,
+        "worker_pipeline_mode": settings.worker_pipeline_mode,
+        "worker_stage_transport": settings.worker_stage_transport,
+        "worker_concurrency": {
+            "dispatch": settings.worker_dispatch_concurrency,
+            "ingest": settings.worker_ingest_concurrency,
+            "gemini_analysis": settings.worker_gemini_analysis_concurrency,
+            "finalize": settings.worker_finalize_concurrency,
+            "ffmpeg": settings.worker_ffmpeg_concurrency,
+            "gemini_upload": settings.worker_gemini_upload_concurrency,
+        },
+        "worker_queue_sizes": {
+            "ingest": settings.worker_ingest_queue_size,
+            "analysis": settings.worker_analysis_queue_size,
+            "finalize": settings.worker_finalize_queue_size,
+        },
         "queue_mode_active": queue_mode,
         "process_job_mode": (
             "queue_wake_compatibility" if queue_mode else "legacy_direct_background"
@@ -495,7 +535,12 @@ def ensure_queue_worker_started(settings: Settings) -> None:
     if queue_task is not None and not queue_task.done():
         return
     try:
-        queue_task = asyncio.create_task(run_queue_loop(build_job_runner))
+        target = (
+            run_combined_pipeline()
+            if settings.worker_pipeline_mode == "staged"
+            else run_queue_loop(build_job_runner)
+        )
+        queue_task = asyncio.create_task(target)
     except Exception as exc:
         report_worker_error(
             exc,
@@ -527,10 +572,7 @@ async def start_queue_worker() -> None:
     try:
         settings = get_settings()
         validate_external_resolver_runtime_config(settings)
-        stale_directories_removed = sweep_stale_job_directories(
-            settings.temp_media_dir,
-            older_than_seconds=settings.max_job_runtime_seconds + 120,
-        )
+        stale_directories_removed = cleanup_stale_media(settings)
         logger.info(
             "worker_safe_config_summary",
             extra={

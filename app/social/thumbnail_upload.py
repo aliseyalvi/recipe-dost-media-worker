@@ -6,6 +6,8 @@ from uuid import UUID
 
 import requests
 
+from app.pipeline.resources import ffmpeg_process_slot
+
 from app.config import Settings
 from app.supabase_client import MediaJobRepository
 
@@ -118,12 +120,13 @@ def extract_raw_frame(ffmpeg: str, video_path: str, timestamp: float) -> bytes |
         "pipe:1",
     ]
     try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            check=False,
-            timeout=10,
-        )
+        with ffmpeg_process_slot():
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
     except Exception:
         return None
     expected = SAMPLE_WIDTH * SAMPLE_HEIGHT * 3
@@ -148,12 +151,13 @@ def extract_jpeg_frame(ffmpeg: str, video_path: str, timestamp: float) -> bytes 
         "pipe:1",
     ]
     try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            check=False,
-            timeout=10,
-        )
+        with ffmpeg_process_slot():
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
     except Exception:
         return None
     data = completed.stdout

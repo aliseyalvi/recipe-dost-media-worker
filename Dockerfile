@@ -22,4 +22,4 @@ COPY scripts ./scripts
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000} --timeout-keep-alive 120"]
+CMD ["python", "-m", "app.workers.combined_worker"]

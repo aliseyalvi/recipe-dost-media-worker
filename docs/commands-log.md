@@ -2,6 +2,46 @@
 
 Keep only commands that future turns may need.
 
+## M23.W7A-W7C staged combined worker
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python --version
+# Python 3.12.13
+
+PATH="$PWD/.venv/bin:$PATH" python -m compileall app scripts
+
+PATH="$PWD/.venv/bin:$PATH" python -m unittest discover \
+  -s tests -p "test_*.py"
+# intermediate pass: 190 tests
+
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py pipeline \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json \
+  --pipeline-mode staged
+# passed: 7 terminal, 5 expected completed, FIFO/backpressure/overlap/cleanup,
+# active reservations 0; analyzer-two probe reached 2 analyzers with ingest 1
+```
+
+No live provider, Gemini, Supabase, Sentry, or Render call was made. No deploy,
+branch switch, main merge, mobile/schema/quota-limit/direct-CDN/cookie/secret
+operation occurred. Final validation results are appended after the full pass.
+
+Final validation:
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python -m compileall app scripts
+PATH="$PWD/.venv/bin:$PATH" python -m unittest discover \
+  -s tests -p "test_*.py"
+PATH="$PWD/.venv/bin:$PATH" python -m pip check
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py pipeline \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json \
+  --pipeline-mode staged
+git diff --check
+# passed with Python 3.12.13: compile; 194 tests; no broken requirements;
+# 7-case batch; 7-case staged/concurrency-two QA; diff check.
+```
+
 ## Validation
 
 ```bash

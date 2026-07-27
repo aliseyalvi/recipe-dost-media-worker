@@ -2395,7 +2395,7 @@ class JobRunner:
                 job.id,
                 platform=info.platform,
                 resolver=info.resolver,
-                cdn_url=info.stream_url or None,
+                cdn_url=None,
                 raw_metadata=info.raw_metadata,
             )
             self._repository.insert_event(
@@ -3061,7 +3061,9 @@ def build_public_source_metadata(
         "description": description,
         "author_username": info.uploader or "",
         "duration_seconds": info.duration_seconds,
-        "thumbnail_source_present": bool(info.thumbnail_url),
+        "thumbnail_source_present": bool(
+            info.thumbnail_url or info.thumbnail_selected or uploaded_thumbnail_url
+        ),
         "thumbnail_source": info.thumbnail_source or "existing_platform_thumbnail",
         "thumbnail_provider": info.thumbnail_provider or info.platform,
         "thumbnail_strategy": info.thumbnail_strategy or "platform_first_v2",
@@ -3070,11 +3072,7 @@ def build_public_source_metadata(
         "uploaded_thumbnail_url": uploaded_thumbnail_url,
         "media": {
             "has_cdn_url": has_stream,
-            "cdn_url_stored_private": (
-                has_stream
-                if private_metadata_saved is None
-                else has_stream and private_metadata_saved
-            ),
+            "cdn_url_stored_private": False,
             "mime_type": info.mime_type,
             "size_bytes": info.filesize_approx,
             "width": info.width,
