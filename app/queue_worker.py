@@ -9,9 +9,11 @@ import re
 import shutil
 import threading
 import time
+from copy import deepcopy
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable
@@ -27,12 +29,15 @@ from app.ai.gemini_reliability import (
     classify_gemini_exception,
     effective_configuration_category,
     exception_status,
+    google_response_schema,
     model_capabilities,
     normalize_finish_reason,
+    normalize_generation_config_error,
     parse_structured_response,
     provider_status_class,
     response_length_bucket,
     sdk_exception_category,
+    structural_schema_fingerprint,
     validate_generation_config,
 )
 from app.config import Settings, get_settings
@@ -266,6 +271,15 @@ CANONICAL_RECIPE_SCHEMA: dict[str, object] = {
         "confidence": {"type": "string"},
     },
 }
+
+EXPECTED_GOOGLE_GENAI_VERSION = "2.13.0"
+EXPECTED_PYDANTIC_VERSION = "2.13.4"
+EXPECTED_PRIMARY_GEMINI_MODEL = "gemini-3.1-flash-lite"
+EXPECTED_FALLBACK_GEMINI_MODEL = "gemini-2.5-flash"
+_CANONICAL_SCHEMA_IMPORT_FINGERPRINT = structural_schema_fingerprint(
+    CANONICAL_RECIPE_SCHEMA
+)
+_STARTUP_GEMINI_CONFIG_VALIDATION: dict[str, object] | None = None
 
 VIDEO_BRIEF_PROMPT = """Extract a detailed, sectioned recipe brief from this video.
 Use visible labels, narration, captions, and the inferred cooking sequence.
@@ -1851,11 +1865,223 @@ def build_gemini_generation_config(
     return build_model_generation_config(
         model=model,
         response_schema=CANONICAL_RECIPE_SCHEMA if structured_schema else None,
-        structured_output_enabled=True,
+        structured_output_enabled=settings.gemini_structured_output_enabled,
         thinking_level=settings.gemini_thinking_level,
         max_output_tokens=settings.gemini_max_output_tokens,
         temperature=0.1,
     )
+
+
+def validate_production_gemini_configs(
+    settings: Settings | None = None,
+) -> dict[str, object]:
+    runtime_settings = settings or get_settings()
+    error_locations: set[str] = set()
+    error_types: set[str] = set()
+    primary_ready = True
+    fallback_ready = True
+
+    google_genai_version = _installed_package_version("google-genai")
+    pydantic_version = _installed_package_version("pydantic")
+    pydantic_core_version = _installed_package_version("pydantic-core")
+    if google_genai_version != EXPECTED_GOOGLE_GENAI_VERSION:
+        primary_ready = False
+        fallback_ready = False
+        error_locations.add("runtime.google_genai_version")
+        error_types.add("literal_error")
+    if pydantic_version != EXPECTED_PYDANTIC_VERSION:
+        primary_ready = False
+        fallback_ready = False
+        error_locations.add("runtime.pydantic_version")
+        error_types.add("literal_error")
+    if runtime_settings.gemini_primary_model != EXPECTED_PRIMARY_GEMINI_MODEL:
+        primary_ready = False
+        error_locations.add("model")
+        error_types.add("literal_error")
+    if runtime_settings.gemini_fallback_model != EXPECTED_FALLBACK_GEMINI_MODEL:
+        fallback_ready = False
+        error_locations.add("model")
+        error_types.add("literal_error")
+    if not runtime_settings.gemini_structured_output_enabled:
+        primary_ready = False
+        fallback_ready = False
+        error_locations.add("response_mime_type")
+        error_types.add("missing")
+
+    canonical_fingerprints = [
+        _CANONICAL_SCHEMA_IMPORT_FINGERPRINT,
+        structural_schema_fingerprint(CANONICAL_RECIPE_SCHEMA),
+    ]
+    primary_schema_fingerprint = canonical_fingerprints[-1]
+    fallback_schema_fingerprint = "unavailable"
+    primary_config: dict[str, object] | None = None
+    fallback_config: dict[str, object] | None = None
+
+    try:
+        primary_config = build_gemini_generation_config(
+            runtime_settings,
+            model=runtime_settings.gemini_primary_model,
+            structured_schema=True,
+        )
+    except Exception as exc:
+        primary_ready = False
+        _merge_normalized_config_error(exc, error_locations, error_types)
+    canonical_fingerprints.append(
+        structural_schema_fingerprint(CANONICAL_RECIPE_SCHEMA)
+    )
+
+    try:
+        converted_fallback_schema = google_response_schema(
+            deepcopy(CANONICAL_RECIPE_SCHEMA)
+        )
+        fallback_schema_fingerprint = structural_schema_fingerprint(
+            converted_fallback_schema
+        )
+    except Exception as exc:
+        fallback_ready = False
+        _merge_normalized_config_error(exc, error_locations, error_types)
+    canonical_fingerprints.append(
+        structural_schema_fingerprint(CANONICAL_RECIPE_SCHEMA)
+    )
+
+    try:
+        fallback_config = build_gemini_generation_config(
+            runtime_settings,
+            model=runtime_settings.gemini_fallback_model,
+            structured_schema=True,
+        )
+        fallback_schema = fallback_config.get("response_schema")
+        if not isinstance(fallback_schema, dict):
+            raise GeminiRequestConfigurationError(
+                "Fallback response schema is missing.",
+                normalized_error_locations=("response_schema",),
+                normalized_error_types=("missing",),
+            )
+        fallback_schema_fingerprint = structural_schema_fingerprint(
+            fallback_schema
+        )
+    except Exception as exc:
+        fallback_ready = False
+        _merge_normalized_config_error(exc, error_locations, error_types)
+    canonical_fingerprints.append(
+        structural_schema_fingerprint(CANONICAL_RECIPE_SCHEMA)
+    )
+
+    try:
+        second_primary_config = build_gemini_generation_config(
+            runtime_settings,
+            model=runtime_settings.gemini_primary_model,
+            structured_schema=True,
+        )
+        second_primary_schema = second_primary_config.get("response_json_schema")
+        if not isinstance(second_primary_schema, dict):
+            raise GeminiRequestConfigurationError(
+                "Primary JSON schema is missing.",
+                normalized_error_locations=("response_json_schema",),
+                normalized_error_types=("missing",),
+            )
+        second_primary_fingerprint = structural_schema_fingerprint(
+            second_primary_schema
+        )
+        if second_primary_fingerprint != primary_schema_fingerprint:
+            primary_ready = False
+            error_locations.add("response_json_schema")
+            error_types.add("schema_invalid")
+    except Exception as exc:
+        primary_ready = False
+        _merge_normalized_config_error(exc, error_locations, error_types)
+    canonical_fingerprints.append(
+        structural_schema_fingerprint(CANONICAL_RECIPE_SCHEMA)
+    )
+
+    if primary_config is not None:
+        primary_schema = primary_config.get("response_json_schema")
+        if not isinstance(primary_schema, dict):
+            primary_ready = False
+            error_locations.add("response_json_schema")
+            error_types.add("missing")
+        else:
+            primary_schema_fingerprint = structural_schema_fingerprint(
+                primary_schema
+            )
+        try:
+            validate_generation_config(primary_config)
+        except Exception as exc:
+            primary_ready = False
+            _merge_normalized_config_error(exc, error_locations, error_types)
+    if fallback_config is not None:
+        try:
+            validate_generation_config(fallback_config)
+        except Exception as exc:
+            fallback_ready = False
+            _merge_normalized_config_error(exc, error_locations, error_types)
+
+    schema_mutation_detected = (
+        len(set(canonical_fingerprints)) != 1
+        or primary_schema_fingerprint != _CANONICAL_SCHEMA_IMPORT_FINGERPRINT
+    )
+    if schema_mutation_detected:
+        primary_ready = False
+        fallback_ready = False
+        error_locations.add("response_json_schema")
+        error_types.add("schema_invalid")
+
+    ready = primary_ready and fallback_ready and not schema_mutation_detected
+    return {
+        "ready": ready,
+        "google_genai_version": google_genai_version,
+        "pydantic_version": pydantic_version,
+        "pydantic_core_version": pydantic_core_version,
+        "primary_ready": primary_ready,
+        "fallback_ready": fallback_ready,
+        "primary_configuration_category": (
+            safe_effective_configuration_category(
+                runtime_settings.gemini_primary_model
+            )
+        ),
+        "fallback_configuration_category": (
+            safe_effective_configuration_category(
+                runtime_settings.gemini_fallback_model
+            )
+        ),
+        "primary_schema_fingerprint": primary_schema_fingerprint,
+        "fallback_schema_fingerprint": fallback_schema_fingerprint,
+        "schema_mutation_detected": schema_mutation_detected,
+        "normalized_error_locations": sorted(error_locations),
+        "normalized_error_types": sorted(error_types),
+    }
+
+
+def cache_startup_gemini_config_validation(
+    result: dict[str, object] | None,
+) -> None:
+    global _STARTUP_GEMINI_CONFIG_VALIDATION
+    _STARTUP_GEMINI_CONFIG_VALIDATION = dict(result) if result is not None else None
+
+
+def startup_gemini_config_validation() -> dict[str, object] | None:
+    return (
+        dict(_STARTUP_GEMINI_CONFIG_VALIDATION)
+        if _STARTUP_GEMINI_CONFIG_VALIDATION is not None
+        else None
+    )
+
+
+def _installed_package_version(distribution: str) -> str:
+    try:
+        return package_version(distribution)
+    except PackageNotFoundError:
+        return "unavailable"
+
+
+def _merge_normalized_config_error(
+    exc: BaseException,
+    locations: set[str],
+    error_types: set[str],
+) -> None:
+    normalized_locations, normalized_types = normalize_generation_config_error(exc)
+    locations.update(normalized_locations)
+    error_types.update(normalized_types)
 
 
 def safe_effective_configuration_category(model: str) -> str:
@@ -2516,6 +2742,7 @@ PRIMARY_PREFLIGHT_CATEGORIES = frozenset(
         "missing_runtime_context",
         "missing_gemini_file_reference",
         "invalid_schema_configuration",
+        "schema_mutation_detected",
         "invalid_model_configuration",
         "call_budget_initialization_failed",
         "invalid_analysis_input",
@@ -2545,6 +2772,7 @@ def primary_preflight_failure(
         metadata={
             "failure_category": failure_category,
             "preflight_category": category,
+            "category": category,
             "provider_request_attempted": False,
             "validation_stage": "primary_preflight",
             "call_purpose": "analysis",
@@ -2565,6 +2793,17 @@ def preflight_structured_extraction(
     context = current_gemini_runtime_context()
     if context is None or not hasattr(client, "models"):
         raise primary_preflight_failure("missing_runtime_context")
+    expected_schema_fingerprint = _CANONICAL_SCHEMA_IMPORT_FINGERPRINT
+    startup_validation = startup_gemini_config_validation()
+    if startup_validation is not None:
+        cached_fingerprint = startup_validation.get("primary_schema_fingerprint")
+        if isinstance(cached_fingerprint, str) and cached_fingerprint:
+            expected_schema_fingerprint = cached_fingerprint
+    if (
+        structural_schema_fingerprint(CANONICAL_RECIPE_SCHEMA)
+        != expected_schema_fingerprint
+    ):
+        raise primary_preflight_failure("schema_mutation_detected")
     if not isinstance(source_metadata, dict) or not str(
         source_metadata.get("platform") or ""
     ).strip():
@@ -2830,6 +3069,7 @@ def run_single_pass_structured_extraction(
                         "input_mode": input_mode,
                         "failure_category": failure_category,
                         "preflight_category": category,
+                        "category": category,
                         "provider_request_attempted": False,
                         "validation_stage": "primary_preflight",
                         "call_purpose": "analysis",

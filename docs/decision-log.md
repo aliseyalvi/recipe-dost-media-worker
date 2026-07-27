@@ -1,5 +1,11 @@
 # Decision Log
 
+## 2026-07-27 — M23.W7C-RP2 Gemini runtime readiness
+
+- `google-genai==2.13.0` and `pydantic==2.13.4` are the shared local/Render
+  contract. Startup validates and fingerprints the full primary/fallback
+  configurations; invalid readiness keeps HTTP healthy and leaves queues unclaimed.
+
 ## 2026-07-27 — M23.W7C-R analyzer parity checkpoint
 
 - Staged and sequential analysis use the same Gemini orchestration. Local media

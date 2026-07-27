@@ -4,10 +4,12 @@ import hashlib
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from app import main as app_main
 from app.pipeline.contracts import (
     DispatchEnvelope,
     IngestedMedia,
@@ -29,8 +31,10 @@ from app.qa.replay import (
     settings_for_case,
 )
 from app.queue_worker import (
+    CANONICAL_RECIPE_SCHEMA,
     QueueJobFailure,
     _GEMINI_CALL_CONTEXT,
+    build_gemini_generation_config,
     finalize_quota_transition_safely,
     guarded_generate_content,
     make_gemini_runtime_context,
@@ -75,6 +79,10 @@ class RecordingGeminiClient(FixtureGeminiClient):
 
 
 class PipelineAnalysisParityTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        app_main.reset_gemini_request_config_readiness_cache()
+        app_main.queue_task = None
+
     def test_primary_preflight_records_exact_safe_exception_category(self) -> None:
         result = self._run(
             "staged",
@@ -282,6 +290,104 @@ class PipelineAnalysisParityTests(unittest.TestCase):
         self.assertEqual(numbers_by_job[jobs[1].id], [1])
         self.assertIsNot(contexts[0].budget, contexts[1].budget)
 
+    def test_invalid_startup_config_blocks_sequential_and_staged_launch(self) -> None:
+        invalid = self._invalid_readiness()
+        for mode in ("sequential", "staged"):
+            with self.subTest(mode=mode):
+                app_main.reset_gemini_request_config_readiness_cache()
+                settings = settings_for_case(
+                    worker_execution_mode="queue",
+                    worker_pipeline_mode=mode,
+                )
+                with patch.object(
+                    app_main,
+                    "get_settings",
+                    return_value=settings,
+                ), patch.object(
+                    app_main,
+                    "validate_external_resolver_runtime_config",
+                ), patch.object(
+                    app_main,
+                    "cleanup_stale_media",
+                    return_value=0,
+                ), patch.object(
+                    app_main,
+                    "validate_production_gemini_configs",
+                    return_value=invalid,
+                ), patch.object(
+                    app_main,
+                    "run_queue_loop",
+                ) as sequential, patch.object(
+                    app_main,
+                    "run_combined_pipeline",
+                ) as staged, patch.object(
+                    app_main,
+                    "create_repository",
+                ) as repository_factory, patch(
+                    "app.queue_worker.ensure_quota_reservation_event_safely"
+                ) as reserve, patch(
+                    "app.queue_worker.create_gemini_client"
+                ) as provider:
+                    import asyncio
+
+                    asyncio.run(app_main.start_queue_worker())
+                    wake_result = asyncio.run(app_main.wake(settings))
+                self.assertFalse(wake_result["queue_loop_enabled"])
+                self.assertTrue(wake_result["configuration_not_ready"])
+                sequential.assert_not_called()
+                staged.assert_not_called()
+                repository_factory.assert_not_called()
+                reserve.assert_not_called()
+                provider.assert_not_called()
+
+    def test_sequential_and_staged_use_same_canonical_builder(self) -> None:
+        valid = fixture_response(json.dumps(canonical_recipe(), ensure_ascii=False))
+        for mode in ("sequential", "staged"):
+            with self.subTest(mode=mode):
+                with patch(
+                    "app.queue_worker.build_gemini_generation_config",
+                    wraps=build_gemini_generation_config,
+                ) as builder:
+                    result = self._run(mode, [valid], {})
+                self.assertEqual(result["terminal_status"], "completed")
+                models = {
+                    str(call.kwargs.get("model") or "")
+                    for call in builder.call_args_list
+                }
+                self.assertIn("gemini-3.1-flash-lite", models)
+
+    def test_schema_mutation_fails_primary_without_call_or_fallback(self) -> None:
+        original = deepcopy(CANONICAL_RECIPE_SCHEMA)
+        try:
+            properties = CANONICAL_RECIPE_SCHEMA["properties"]
+            assert isinstance(properties, dict)
+            properties["servings"] = {"type": "boolean"}
+            result = self._run(
+                "sequential",
+                [fixture_response(json.dumps(canonical_recipe()))],
+                {"recipe_repair_enabled": False},
+            )
+        finally:
+            CANONICAL_RECIPE_SCHEMA.clear()
+            CANONICAL_RECIPE_SCHEMA.update(original)
+        self.assertEqual(result["terminal_status"], "failed")
+        self.assertEqual(result["call_purposes"], [])
+        self.assertIn(
+            "gemini_primary_preflight_failed",
+            result["analysis_events"],
+        )
+        self.assertIn(
+            "gemini_structured_extraction_fallback_skipped",
+            result["analysis_events"],
+        )
+        self.assertEqual(
+            result["primary_preflight"]["category"],  # type: ignore[index]
+            "schema_mutation_detected",
+        )
+        self.assertFalse(
+            result["primary_preflight"]["provider_request_attempted"]  # type: ignore[index]
+        )
+
     def _run(
         self,
         mode: str,
@@ -486,6 +592,27 @@ class PipelineAnalysisParityTests(unittest.TestCase):
             "primary_preflight": primary_preflight,
             "quota_success": events.count("ai_quota_success_committed"),
             "cleanup": cleanup,
+        }
+
+    def _invalid_readiness(self) -> dict[str, object]:
+        return {
+            "ready": False,
+            "google_genai_version": "2.13.0",
+            "pydantic_version": "2.13.4",
+            "pydantic_core_version": "2.46.4",
+            "primary_ready": False,
+            "fallback_ready": True,
+            "primary_configuration_category": "json_schema_thinking_level",
+            "fallback_configuration_category": (
+                "response_schema_model_default_thinking"
+            ),
+            "primary_schema_fingerprint": "0" * 64,
+            "fallback_schema_fingerprint": "1" * 64,
+            "schema_mutation_detected": False,
+            "normalized_error_locations": [
+                "thinking_config.thinking_level"
+            ],
+            "normalized_error_types": ["literal_error"],
         }
 
 

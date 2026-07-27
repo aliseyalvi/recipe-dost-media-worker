@@ -2,6 +2,11 @@
 
 ## Current Status
 
+- M23.W7C-RP2 pins the Gemini/Pydantic runtime and validates the full production
+  primary/fallback schema at startup. Failed readiness keeps probes responsive
+  but does not start either queue consumer; schema mutation also fails preflight
+  before call accounting or fallback.
+
 - M23.W7C-R targeted checkpoint restores the staged analyzer to the shared
   sequential Gemini invocation. The exact reproducible fallback defect was an
   SDK `ValidationError` caused by nullable JSON-Schema unions passed through

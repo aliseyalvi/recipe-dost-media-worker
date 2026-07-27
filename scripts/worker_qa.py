@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -13,24 +15,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.config import Settings  # noqa: E402
-from app.qa.replay import (  # noqa: E402
-    OfflineRepository,
-    load_manifest,
-    make_job,
-    run_batch,
-    run_case,
-)
-from app.qa.staged import run_staged_batch  # noqa: E402
-from app.qa.parity import run_pipeline_parity  # noqa: E402
-from app.queue_worker import process_queue_job  # noqa: E402
-
 DEFAULT_REPORT = PROJECT_ROOT / ".worker-qa" / "latest" / "summary.json"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Deterministic worker QA harness.")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("gemini-config")
 
     replay = subparsers.add_parser("replay")
     replay.add_argument("--case", required=True)
@@ -59,6 +50,10 @@ def main() -> int:
     live.add_argument("--report", type=Path, default=DEFAULT_REPORT)
 
     args = parser.parse_args()
+    if args.command == "gemini-config":
+        return run_gemini_config_diagnostic()
+
+    _load_qa_runtime()
     if args.command == "replay":
         report = {
             "mode": "offline_replay",
@@ -86,6 +81,103 @@ def main() -> int:
         )
     )
     return 0
+
+
+def run_gemini_config_diagnostic() -> int:
+    # Match the production entry point: import the combined worker first, then
+    # let the ASGI application import its normal startup dependency graph.
+    import app.workers.combined_worker  # noqa: F401
+    import app.main  # noqa: F401
+    from app.config import Settings
+    from app.queue_worker import validate_production_gemini_configs
+
+    settings = Settings(
+        _env_file=None,
+        worker_api_secret="offline-diagnostic",
+        supabase_url="https://offline.invalid",
+        supabase_service_role_key="offline-diagnostic",
+    )
+    result = validate_production_gemini_configs(settings)
+    values = {
+        "render_git_commit_suffix": _safe_render_commit_suffix(),
+        "python_version": platform.python_version(),
+        "google_genai_version": result["google_genai_version"],
+        "pydantic_version": result["pydantic_version"],
+        "pydantic_core_version": result["pydantic_core_version"],
+        "primary_ready": _safe_bool(result["primary_ready"]),
+        "fallback_ready": _safe_bool(result["fallback_ready"]),
+        "schema_mutation_detected": _safe_bool(
+            result["schema_mutation_detected"]
+        ),
+        "primary_configuration_category": result[
+            "primary_configuration_category"
+        ],
+        "fallback_configuration_category": result[
+            "fallback_configuration_category"
+        ],
+        "normalized_error_locations": _safe_list(
+            result["normalized_error_locations"]
+        ),
+        "normalized_error_types": _safe_list(
+            result["normalized_error_types"]
+        ),
+        "provider_call_attempted": "false",
+    }
+    for key, value in values.items():
+        print(f"{key}={value}")
+    return 0 if bool(result["ready"]) else 1
+
+
+def _load_qa_runtime() -> None:
+    global Settings
+    global OfflineRepository
+    global load_manifest
+    global make_job
+    global run_batch
+    global run_case
+    global run_staged_batch
+    global run_pipeline_parity
+    global process_queue_job
+
+    from app.config import Settings as SettingsType
+    from app.qa.parity import run_pipeline_parity as parity_runner
+    from app.qa.replay import (
+        OfflineRepository as Repository,
+        load_manifest as manifest_loader,
+        make_job as job_factory,
+        run_batch as batch_runner,
+        run_case as case_runner,
+    )
+    from app.qa.staged import run_staged_batch as staged_runner
+    from app.queue_worker import process_queue_job as queue_processor
+
+    Settings = SettingsType
+    OfflineRepository = Repository
+    load_manifest = manifest_loader
+    make_job = job_factory
+    run_batch = batch_runner
+    run_case = case_runner
+    run_staged_batch = staged_runner
+    run_pipeline_parity = parity_runner
+    process_queue_job = queue_processor
+
+
+def _safe_render_commit_suffix() -> str:
+    value = str(os.getenv("RENDER_GIT_COMMIT") or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{8,64}", value):
+        return "unavailable"
+    return value[-8:].lower()
+
+
+def _safe_bool(value: object) -> str:
+    return "true" if value is True else "false"
+
+
+def _safe_list(value: object) -> str:
+    if not isinstance(value, list):
+        return "none"
+    safe = [str(item) for item in value if isinstance(item, str) and item]
+    return ",".join(safe) if safe else "none"
 
 
 def run_live(manifest_path: Path, max_total_calls: int) -> dict[str, object]:

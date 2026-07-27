@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
+import os
+import subprocess
+import sys
 import unittest
+from importlib.metadata import version
+from pathlib import Path
 
 from app.ai.gemini_reliability import (
     GeminiRequestConfigurationError,
@@ -9,13 +15,20 @@ from app.ai.gemini_reliability import (
     build_model_generation_config,
     classify_gemini_exception,
     google_response_schema,
+    structural_schema_fingerprint,
     parse_structured_response,
 )
 from app.qa.replay import canonical_recipe, settings_for_case
 from app.queue_worker import (
+    CANONICAL_RECIPE_SCHEMA,
+    EXPECTED_GOOGLE_GENAI_VERSION,
+    EXPECTED_PYDANTIC_VERSION,
     build_gemini_generation_config,
+    validate_production_gemini_configs,
     validate_and_normalize_canonical_recipe,
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class GeminiStructuredParserTests(unittest.TestCase):
@@ -78,6 +91,101 @@ class GeminiStructuredParserTests(unittest.TestCase):
 
 
 class GeminiCapabilityTests(unittest.TestCase):
+    def test_exact_runtime_versions_are_declared_and_installed(self) -> None:
+        requirements = (PROJECT_ROOT / "requirements.txt").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        self.assertIn(
+            f"google-genai=={EXPECTED_GOOGLE_GENAI_VERSION}",
+            requirements,
+        )
+        self.assertIn(f"pydantic=={EXPECTED_PYDANTIC_VERSION}", requirements)
+        self.assertEqual(
+            version("google-genai"),
+            EXPECTED_GOOGLE_GENAI_VERSION,
+        )
+        self.assertEqual(version("pydantic"), EXPECTED_PYDANTIC_VERSION)
+
+    def test_exact_full_production_configurations_validate(self) -> None:
+        result = validate_production_gemini_configs(settings_for_case())
+        self.assertTrue(result["ready"])
+        self.assertTrue(result["primary_ready"])
+        self.assertTrue(result["fallback_ready"])
+        self.assertFalse(result["schema_mutation_detected"])
+        self.assertEqual(result["normalized_error_locations"], [])
+        self.assertEqual(result["normalized_error_types"], [])
+
+    def test_fallback_conversion_isolated_and_primary_revalidates(self) -> None:
+        from google.genai import types
+
+        settings = settings_for_case()
+        original = copy.deepcopy(CANONICAL_RECIPE_SCHEMA)
+        initial_fingerprint = structural_schema_fingerprint(
+            CANONICAL_RECIPE_SCHEMA
+        )
+        primary = build_gemini_generation_config(
+            settings,
+            model=settings.gemini_primary_model,
+            structured_schema=True,
+        )
+        fallback = build_gemini_generation_config(
+            settings,
+            model=settings.gemini_fallback_model,
+            structured_schema=True,
+        )
+        second_primary = build_gemini_generation_config(
+            settings,
+            model=settings.gemini_primary_model,
+            structured_schema=True,
+        )
+        self.assertIs(
+            primary["response_json_schema"],
+            CANONICAL_RECIPE_SCHEMA,
+        )
+        self.assertIsNot(
+            primary["response_json_schema"],
+            fallback["response_schema"],
+        )
+        self.assertEqual(CANONICAL_RECIPE_SCHEMA, original)
+        self.assertEqual(
+            structural_schema_fingerprint(CANONICAL_RECIPE_SCHEMA),
+            initial_fingerprint,
+        )
+        self.assertEqual(
+            structural_schema_fingerprint(primary["response_json_schema"]),
+            structural_schema_fingerprint(
+                second_primary["response_json_schema"]
+            ),
+        )
+        types.GenerateContentConfig(**second_primary)
+
+    def test_startup_import_order_matches_isolated_diagnostic(self) -> None:
+        isolated = self._subprocess_validation(startup_order=False)
+        startup = self._subprocess_validation(startup_order=True)
+        self.assertEqual(isolated, startup)
+        self.assertTrue(startup["ready"])
+
+    def test_worker_qa_gemini_config_valid_and_invalid(self) -> None:
+        valid = self._run_gemini_config_command({})
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        self.assertIn("primary_ready=true", valid.stdout)
+        self.assertIn("fallback_ready=true", valid.stdout)
+        self.assertIn("schema_mutation_detected=false", valid.stdout)
+        self.assertIn("provider_call_attempted=false", valid.stdout)
+
+        invalid = self._run_gemini_config_command(
+            {"GEMINI_THINKING_LEVEL": "unsupported-fixture-level"}
+        )
+        self.assertNotEqual(invalid.returncode, 0)
+        self.assertIn("primary_ready=false", invalid.stdout)
+        self.assertIn(
+            "normalized_error_locations=thinking_config.thinking_level",
+            invalid.stdout,
+        )
+        self.assertIn("normalized_error_types=literal_error", invalid.stdout)
+        self.assertIn("provider_call_attempted=false", invalid.stdout)
+        self.assertNotIn("Traceback", invalid.stderr)
+
     def test_fallback_25_full_configuration_validates(self) -> None:
         from google.genai import types
 
@@ -176,6 +284,66 @@ class GeminiCapabilityTests(unittest.TestCase):
             ),
             "gemini_server_error",
         )
+
+    def _subprocess_validation(self, *, startup_order: bool) -> dict[str, object]:
+        imports = (
+            "import app.workers.combined_worker; import app.main;"
+            if startup_order
+            else ""
+        )
+        code = (
+            "import json;"
+            f"{imports}"
+            "from app.config import Settings;"
+            "from app.queue_worker import validate_production_gemini_configs;"
+            "s=Settings(_env_file=None,worker_api_secret='offline',"
+            "supabase_url='https://offline.invalid',"
+            "supabase_service_role_key='offline',app_env='production');"
+            "r=validate_production_gemini_configs(s);"
+            "print(json.dumps({k:r[k] for k in "
+            "('ready','primary_ready','fallback_ready',"
+            "'primary_schema_fingerprint','fallback_schema_fingerprint',"
+            "'schema_mutation_detected')},sort_keys=True))"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=PROJECT_ROOT,
+            env=self._diagnostic_env({}),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return json.loads(completed.stdout)
+
+    def _run_gemini_config_command(
+        self,
+        overrides: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "scripts/worker_qa.py", "gemini-config"],
+            cwd=PROJECT_ROOT,
+            env=self._diagnostic_env(overrides),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def _diagnostic_env(self, overrides: dict[str, str]) -> dict[str, str]:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GEMINI_")
+            and key
+            not in {
+                "APP_ENV",
+                "RENDER",
+                "RENDER_GIT_BRANCH",
+                "WORKER_CONFIG_DIR",
+            }
+        }
+        environment["APP_ENV"] = "production"
+        environment.update(overrides)
+        return environment
 
 
 if __name__ == "__main__":

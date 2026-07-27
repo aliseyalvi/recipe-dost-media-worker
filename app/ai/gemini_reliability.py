@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -47,8 +48,89 @@ class GeminiModelCapabilities:
     max_output_tokens: int
 
 
+ALLOWED_VALIDATION_ERROR_TYPES = frozenset(
+    {
+        "missing",
+        "literal_error",
+        "string_type",
+        "int_type",
+        "bool_type",
+        "model_type",
+        "extra_forbidden",
+        "union_tag_invalid",
+        "union_tag_not_found",
+        "schema_invalid",
+        "unknown_validation_error",
+    }
+)
+
+_ALLOWED_VALIDATION_LOCATION_PARTS = frozenset(
+    {
+        "model",
+        "runtime",
+        "google_genai_version",
+        "pydantic_version",
+        "pydantic_core_version",
+        "response_json_schema",
+        "response_schema",
+        "response_mime_type",
+        "thinking_config",
+        "thinking_level",
+        "temperature",
+        "max_output_tokens",
+        "properties",
+        "items",
+        "type",
+        "required",
+        "nullable",
+        "anyOf",
+        "additionalProperties",
+        "minItems",
+        "maxItems",
+        "is_recipe",
+        "title_en",
+        "title_ur",
+        "summary_en",
+        "summary_ur",
+        "ingredients",
+        "steps",
+        "grocery_list",
+        "time",
+        "prep_minutes",
+        "cook_minutes",
+        "total_minutes",
+        "servings",
+        "difficulty",
+        "cuisine_en",
+        "cuisine_ur",
+        "tags",
+        "missing_info",
+        "confidence",
+        "name_en",
+        "name_ur",
+        "quantity",
+        "notes_en",
+        "notes_ur",
+        "step_number",
+        "instruction_en",
+        "instruction_ur",
+        "tip_en",
+        "tip_ur",
+    }
+)
+
+
 class GeminiRequestConfigurationError(ValueError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        normalized_error_locations: tuple[str, ...] = (),
+        normalized_error_types: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.normalized_error_locations = normalized_error_locations
+        self.normalized_error_types = normalized_error_types
 
 
 class StructuredResponseError(ValueError):
@@ -119,7 +201,11 @@ def build_model_generation_config(
     if capabilities.thinking_mode == "level" and thinking_level:
         normalized_level = str(thinking_level).strip().lower()
         if normalized_level not in {"minimal", "low", "medium", "high"}:
-            raise GeminiRequestConfigurationError("Invalid Gemini thinking level.")
+            raise GeminiRequestConfigurationError(
+                "Invalid Gemini thinking level.",
+                normalized_error_locations=("thinking_config.thinking_level",),
+                normalized_error_types=("literal_error",),
+            )
         config["thinking_config"] = {"thinking_level": normalized_level}
     # Gemini 2.5 uses a model-specific thinking budget rather than the Gemini 3
     # thinking-level contract. Omit it here and retain the model default.
@@ -172,15 +258,116 @@ def google_response_schema(schema: dict[str, object]) -> dict[str, object]:
     return result
 
 
-def validate_generation_config(config: dict[str, object]) -> None:
+def validate_generation_config(config: dict[str, object]) -> object:
     try:
         from google.genai import types
 
-        types.GenerateContentConfig(**config)
+        return types.GenerateContentConfig(**config)
     except (TypeError, ValueError) as exc:
+        locations, error_types = normalize_generation_config_error(exc)
         raise GeminiRequestConfigurationError(
-            "Gemini generation configuration was rejected locally."
+            "Gemini generation configuration was rejected locally.",
+            normalized_error_locations=locations,
+            normalized_error_types=error_types,
         ) from exc
+
+
+def structural_schema_fingerprint(schema: object) -> str:
+    serialized = json.dumps(
+        schema,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def normalize_generation_config_error(
+    exc: BaseException,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    current: BaseException | None = exc
+    while current is not None:
+        locations = tuple(
+            str(value)
+            for value in getattr(current, "normalized_error_locations", ())
+            if isinstance(value, str) and value
+        )
+        error_types = tuple(
+            str(value)
+            for value in getattr(current, "normalized_error_types", ())
+            if isinstance(value, str) and value in ALLOWED_VALIDATION_ERROR_TYPES
+        )
+        if locations or error_types:
+            return (
+                tuple(sorted({_normalize_validation_location(value) for value in locations})),
+                tuple(sorted(set(error_types or ("unknown_validation_error",)))),
+            )
+        errors_method = getattr(current, "errors", None)
+        if callable(errors_method):
+            try:
+                errors = errors_method(
+                    include_url=False,
+                    include_context=False,
+                    include_input=False,
+                )
+            except TypeError:
+                errors = errors_method()
+            if isinstance(errors, list):
+                normalized_locations: set[str] = set()
+                normalized_types: set[str] = set()
+                for item in errors:
+                    if not isinstance(item, dict):
+                        continue
+                    raw_location = item.get("loc")
+                    if isinstance(raw_location, (list, tuple)):
+                        normalized_locations.add(
+                            _normalize_validation_location(raw_location)
+                        )
+                    normalized_types.add(
+                        _normalize_validation_error_type(
+                            item.get("type"),
+                            raw_location,
+                        )
+                    )
+                if normalized_locations or normalized_types:
+                    return (
+                        tuple(sorted(normalized_locations or {"unknown"})),
+                        tuple(
+                            sorted(
+                                normalized_types
+                                or {"unknown_validation_error"}
+                            )
+                        ),
+                    )
+        current = current.__cause__ or current.__context__
+    return ("unknown",), ("unknown_validation_error",)
+
+
+def _normalize_validation_location(value: object) -> str:
+    parts = value if isinstance(value, (list, tuple)) else str(value).split(".")
+    normalized: list[str] = []
+    for part in parts:
+        text = str(part)
+        if text.isdigit():
+            normalized.append("items")
+        elif text in _ALLOWED_VALIDATION_LOCATION_PARTS:
+            normalized.append(text)
+        else:
+            normalized.append("field")
+    return ".".join(normalized) if normalized else "unknown"
+
+
+def _normalize_validation_error_type(
+    value: object,
+    location: object,
+) -> str:
+    text = str(value or "").strip()
+    if text in ALLOWED_VALIDATION_ERROR_TYPES:
+        return text
+    location_text = ".".join(str(item) for item in (location or ()))
+    if "schema" in location_text or "properties" in location_text:
+        return "schema_invalid"
+    return "unknown_validation_error"
 
 
 def effective_configuration_category(model: str) -> str:

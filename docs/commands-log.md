@@ -2,6 +2,17 @@
 
 Keep only commands that future turns may need.
 
+## M23.W7C-RP2 Gemini runtime parity
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py gemini-config
+# primary/fallback ready; no mutation; provider_call_attempted=false
+```
+
+Targeted tests and compile passed. Full discovery ran 212 tests with one
+pre-existing staged-default mismatch; pip check, batch, staged pipeline,
+pipeline parity, and diff check passed.
+
 ## M23.W7C-R analyzer parity checkpoint
 
 ```bash

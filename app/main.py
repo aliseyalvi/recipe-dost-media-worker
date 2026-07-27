@@ -24,7 +24,11 @@ from app.metadata_preview import (
 from app.pipeline.recovery import cleanup_stale_media
 from app.observability.sentry import flush_sentry, initialize_sentry, report_worker_error
 from app.pipeline.runtime import run_combined_pipeline
-from app.queue_worker import run_queue_loop
+from app.queue_worker import (
+    cache_startup_gemini_config_validation,
+    run_queue_loop,
+    validate_production_gemini_configs,
+)
 from app.runtime_config import worker_config_report
 from app.schemas import (
     ErrorDetail,
@@ -48,6 +52,8 @@ logger = logging.getLogger("recipe_dost.worker")
 PROCESSING_STATUSES = {"resolving", "downloading", "analyzing"}
 INITIAL_JOB_STATUS = "queued"
 queue_task: asyncio.Task[None] | None = None
+_gemini_request_config_readiness: dict[str, object] | None = None
+_gemini_request_config_not_ready_logged = False
 
 
 class JsonFormatter(logging.Formatter):
@@ -458,6 +464,7 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
         "gemini_file_max_size_bytes": settings.gemini_file_max_size_bytes,
         "gemini_video_model": settings.effective_gemini_video_model,
         "gemini_text_model": settings.effective_gemini_text_model,
+        "gemini_request_config": gemini_request_config_readiness(settings),
         "raw_url_logging_enabled": settings.allow_raw_url_logs,
         "config_source": safe_config_source_summary(settings),
         "mock_fallback": {
@@ -528,12 +535,54 @@ def queue_loop_enabled(settings: Settings) -> bool:
     )
 
 
-def ensure_queue_worker_started(settings: Settings) -> None:
+def gemini_request_config_readiness(settings: Settings) -> dict[str, object]:
+    global _gemini_request_config_readiness
+    if _gemini_request_config_readiness is None:
+        _gemini_request_config_readiness = validate_production_gemini_configs(
+            settings
+        )
+        cache_startup_gemini_config_validation(
+            _gemini_request_config_readiness
+        )
+    return dict(_gemini_request_config_readiness)
+
+
+def reset_gemini_request_config_readiness_cache() -> None:
+    global _gemini_request_config_readiness
+    global _gemini_request_config_not_ready_logged
+    _gemini_request_config_readiness = None
+    _gemini_request_config_not_ready_logged = False
+    cache_startup_gemini_config_validation(None)
+
+
+def _report_gemini_request_config_not_ready_once(
+    readiness: dict[str, object],
+) -> None:
+    global _gemini_request_config_not_ready_logged
+    if _gemini_request_config_not_ready_logged:
+        return
+    _gemini_request_config_not_ready_logged = True
+    logger.warning(
+        "gemini_request_config_not_ready",
+        extra={
+            "safe_config": {
+                "gemini_request_config": readiness,
+                "provider_call_attempted": False,
+            }
+        },
+    )
+
+
+def ensure_queue_worker_started(settings: Settings) -> bool:
     global queue_task
     if settings.worker_execution_mode != "queue":
-        return
+        return False
     if queue_task is not None and not queue_task.done():
-        return
+        return True
+    readiness = gemini_request_config_readiness(settings)
+    if not bool(readiness.get("ready")):
+        _report_gemini_request_config_not_ready_once(readiness)
+        return False
     try:
         target = (
             run_combined_pipeline()
@@ -541,6 +590,7 @@ def ensure_queue_worker_started(settings: Settings) -> None:
             else run_queue_loop(build_job_runner)
         )
         queue_task = asyncio.create_task(target)
+        return True
     except Exception as exc:
         report_worker_error(
             exc,
@@ -558,12 +608,17 @@ def ensure_queue_worker_started(settings: Settings) -> None:
 @app.get("/wake")
 async def wake(settings: Settings = Depends(get_settings)) -> dict[str, object]:
     logger.info("queue_wake_received")
+    started = False
     if settings.enable_queue_wake_endpoint:
-        ensure_queue_worker_started(settings)
+        started = ensure_queue_worker_started(settings)
+    readiness = gemini_request_config_readiness(settings)
     return {
         "ok": True,
         "worker_execution_mode": settings.worker_execution_mode,
         "queue_loop_enabled": queue_loop_enabled(settings),
+        "gemini_request_config_ready": bool(readiness.get("ready")),
+        "configuration_not_ready": not bool(readiness.get("ready")),
+        "worker_start_requested": started,
     }
 
 
@@ -572,6 +627,7 @@ async def start_queue_worker() -> None:
     try:
         settings = get_settings()
         validate_external_resolver_runtime_config(settings)
+        readiness = gemini_request_config_readiness(settings)
         stale_directories_removed = cleanup_stale_media(settings)
         logger.info(
             "worker_safe_config_summary",
@@ -580,7 +636,10 @@ async def start_queue_worker() -> None:
                 "stale_directories_removed": stale_directories_removed,
             },
         )
-        ensure_queue_worker_started(settings)
+        if bool(readiness.get("ready")):
+            ensure_queue_worker_started(settings)
+        else:
+            _report_gemini_request_config_not_ready_once(readiness)
     except Exception as exc:
         report_worker_error(
             exc,
