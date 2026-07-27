@@ -2,6 +2,10 @@
 
 ## Current Status
 
+- M23.W7C-RP3 restores Gemini 3.1 `response_schema` with explicit thinking and
+  converts ACTIVE file URIs into typed SDK parts. Offline full request
+  transformation passes; the owner-gated live canary remains unrun.
+
 - M23.W7C-RP2 pins the Gemini/Pydantic runtime and validates the full production
   primary/fallback schema at startup. Failed readiness keeps probes responsive
   but does not start either queue consumer; schema mutation also fails preflight

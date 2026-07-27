@@ -8,6 +8,7 @@ import sys
 import unittest
 from importlib.metadata import version
 from pathlib import Path
+from unittest.mock import patch
 
 from app.ai.gemini_reliability import (
     GeminiRequestConfigurationError,
@@ -15,15 +16,18 @@ from app.ai.gemini_reliability import (
     build_model_generation_config,
     classify_gemini_exception,
     google_response_schema,
+    sdk_failure_evidence,
     structural_schema_fingerprint,
     parse_structured_response,
 )
 from app.qa.replay import canonical_recipe, settings_for_case
 from app.queue_worker import (
     CANONICAL_RECIPE_SCHEMA,
+    CanonicalRecipeResponse,
     EXPECTED_GOOGLE_GENAI_VERSION,
     EXPECTED_PYDANTIC_VERSION,
     build_gemini_generation_config,
+    build_prepared_gemini_request,
     validate_production_gemini_configs,
     validate_and_normalize_canonical_recipe,
 )
@@ -111,6 +115,9 @@ class GeminiCapabilityTests(unittest.TestCase):
         self.assertTrue(result["ready"])
         self.assertTrue(result["primary_ready"])
         self.assertTrue(result["fallback_ready"])
+        self.assertTrue(result["gemini_config_ready"])
+        self.assertTrue(result["gemini_request_shape_ready"])
+        self.assertEqual(result["gemini_live_canary_verified"], "unknown")
         self.assertFalse(result["schema_mutation_detected"])
         self.assertEqual(result["normalized_error_locations"], [])
         self.assertEqual(result["normalized_error_types"], [])
@@ -138,12 +145,10 @@ class GeminiCapabilityTests(unittest.TestCase):
             model=settings.gemini_primary_model,
             structured_schema=True,
         )
-        self.assertIs(
-            primary["response_json_schema"],
-            CANONICAL_RECIPE_SCHEMA,
-        )
+        self.assertIn("response_schema", primary)
+        self.assertNotIn("response_json_schema", primary)
         self.assertIsNot(
-            primary["response_json_schema"],
+            primary["response_schema"],
             fallback["response_schema"],
         )
         self.assertEqual(CANONICAL_RECIPE_SCHEMA, original)
@@ -152,10 +157,12 @@ class GeminiCapabilityTests(unittest.TestCase):
             initial_fingerprint,
         )
         self.assertEqual(
-            structural_schema_fingerprint(primary["response_json_schema"]),
-            structural_schema_fingerprint(
-                second_primary["response_json_schema"]
-            ),
+            primary["response_schema"],
+            CanonicalRecipeResponse,
+        )
+        self.assertIs(
+            primary["response_schema"],
+            second_primary["response_schema"],
         )
         types.GenerateContentConfig(**second_primary)
 
@@ -164,6 +171,71 @@ class GeminiCapabilityTests(unittest.TestCase):
         startup = self._subprocess_validation(startup_order=True)
         self.assertEqual(isolated, startup)
         self.assertTrue(startup["ready"])
+
+    def test_primary_defaults_to_last_known_good_response_schema_shape(self) -> None:
+        settings = settings_for_case()
+        self.assertEqual(settings.gemini_primary_schema_mode, "response_schema")
+        with patch(
+            "app.ai.gemini_reliability.google_response_schema",
+            wraps=google_response_schema,
+        ) as fallback_converter:
+            config = build_gemini_generation_config(
+                settings,
+                model=settings.gemini_primary_model,
+                structured_schema=True,
+            )
+        fallback_converter.assert_not_called()
+        self.assertEqual(config["response_mime_type"], "application/json")
+        self.assertEqual(
+            config["thinking_config"],
+            {"thinking_level": "high"},
+        )
+        self.assertIn("response_schema", config)
+        self.assertNotIn("response_json_schema", config)
+        self.assertIs(config["response_schema"], CanonicalRecipeResponse)
+        model_schema = CanonicalRecipeResponse.model_json_schema()
+        canonical_properties = CANONICAL_RECIPE_SCHEMA["properties"]
+        self.assertEqual(
+            set(model_schema["properties"]),
+            set(canonical_properties),  # type: ignore[arg-type]
+        )
+        self.assertEqual(
+            set(model_schema["required"]),
+            set(CANONICAL_RECIPE_SCHEMA["required"]),  # type: ignore[arg-type]
+        )
+
+    def test_prepared_file_request_uses_explicit_sdk_parts(self) -> None:
+        from google.genai import types
+
+        uploaded = type(
+            "UploadedFile",
+            (),
+            {
+                "uri": "https://offline.invalid/files/fixture",
+                "mime_type": "video/mp4",
+            },
+        )()
+        prepared = build_prepared_gemini_request(
+            settings_for_case(),
+            model_id="gemini-3.1-flash-lite",
+            input_part=uploaded,
+            prompt="Offline request-shape fixture.",
+            input_mode="file_api",
+        )
+        self.assertIsInstance(prepared.config, types.GenerateContentConfig)
+        self.assertEqual(prepared.input_representation_category, "file_uri_part")
+        self.assertEqual(len(prepared.contents), 1)
+        content = prepared.contents[0]
+        self.assertIsInstance(content, types.Content)
+        self.assertEqual(len(content.parts or []), 2)
+        assert content.parts is not None
+        self.assertIsInstance(content.parts[0], types.Part)
+        self.assertIsNotNone(content.parts[0].file_data)
+        self.assertIsInstance(content.parts[1], types.Part)
+        self.assertEqual(
+            prepared.configuration_category,
+            "response_schema_thinking_level",
+        )
 
     def test_worker_qa_gemini_config_valid_and_invalid(self) -> None:
         valid = self._run_gemini_config_command({})
@@ -185,6 +257,28 @@ class GeminiCapabilityTests(unittest.TestCase):
         self.assertIn("normalized_error_types=literal_error", invalid.stdout)
         self.assertIn("provider_call_attempted=false", invalid.stdout)
         self.assertNotIn("Traceback", invalid.stderr)
+
+    def test_owner_live_diagnostic_refuses_without_development_gate(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "scripts/worker_qa.py",
+                "gemini-request",
+                "--mode",
+                "text",
+                "--variant",
+                "response-schema",
+            ],
+            cwd=PROJECT_ROOT,
+            env=self._diagnostic_env({}),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("APP_ENV=development", completed.stderr)
+        self.assertNotIn("sdk_invocation_started=true", completed.stdout)
+        self.assertNotIn("Traceback", completed.stderr)
 
     def test_fallback_25_full_configuration_validates(self) -> None:
         from google.genai import types
@@ -220,7 +314,8 @@ class GeminiCapabilityTests(unittest.TestCase):
             max_output_tokens=12_000,
             temperature=0.1,
         )
-        self.assertIn("response_json_schema", primary)
+        self.assertIn("response_schema", primary)
+        self.assertNotIn("response_json_schema", primary)
         self.assertEqual(primary["thinking_config"], {"thinking_level": "high"})
         self.assertIn("response_schema", fallback)
         self.assertNotIn("thinking_config", fallback)
@@ -285,6 +380,40 @@ class GeminiCapabilityTests(unittest.TestCase):
             "gemini_server_error",
         )
 
+    def test_sdk_failure_evidence_separates_local_and_provider_status(self) -> None:
+        from google.genai import types
+        from pydantic import ValidationError
+
+        try:
+            types.Part.model_validate({"text": 123})
+        except ValidationError as exc:
+            local = sdk_failure_evidence(
+                exc,
+                sdk_invocation_attempted=True,
+            )
+        else:
+            self.fail("Fixture must produce a real Pydantic ValidationError.")
+        self.assertEqual(local["failure_stage"], "sdk_request_transformation")
+        self.assertEqual(local["provider_status_class"], "none")
+        self.assertFalse(local["http_status_observed"])
+
+        class ProviderError(Exception):
+            def __init__(self, status_code: int) -> None:
+                self.status_code = status_code
+
+        rejected = sdk_failure_evidence(
+            ProviderError(400),
+            sdk_invocation_attempted=True,
+        )
+        server = sdk_failure_evidence(
+            ProviderError(503),
+            sdk_invocation_attempted=True,
+        )
+        self.assertEqual(rejected["failure_stage"], "provider_rejection")
+        self.assertEqual(rejected["provider_status_class"], "4xx")
+        self.assertEqual(server["failure_stage"], "provider_server")
+        self.assertEqual(server["provider_status_class"], "5xx")
+
     def _subprocess_validation(self, *, startup_order: bool) -> dict[str, object]:
         imports = (
             "import app.workers.combined_worker; import app.main;"
@@ -301,7 +430,8 @@ class GeminiCapabilityTests(unittest.TestCase):
             "supabase_service_role_key='offline',app_env='production');"
             "r=validate_production_gemini_configs(s);"
             "print(json.dumps({k:r[k] for k in "
-            "('ready','primary_ready','fallback_ready',"
+            "('ready','primary_ready','fallback_ready','gemini_config_ready',"
+            "'gemini_request_shape_ready',"
             "'primary_schema_fingerprint','fallback_schema_fingerprint',"
             "'schema_mutation_detected')},sort_keys=True))"
         )

@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     gemini_fallback_model: str = worker_config_value(
         "gemini_fallback_model", "gemini-2.5-flash"
     )
+    gemini_primary_schema_mode: str = worker_config_value(
+        "gemini_primary_schema_mode", "response_schema"
+    )
     gemini_thinking_level: str = worker_config_value("gemini_thinking_level", "high")
     gemini_structured_output_enabled: bool = worker_config_value(
         "gemini_structured_output_enabled", True

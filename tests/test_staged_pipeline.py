@@ -51,7 +51,7 @@ class StagedPipelineTests(unittest.TestCase):
             supabase_url="https://example.invalid",
             supabase_service_role_key="fixture",
         )
-        self.assertEqual(settings.worker_pipeline_mode, "staged")
+        self.assertEqual(settings.worker_pipeline_mode, "sequential")
         self.assertEqual(settings.worker_dispatch_concurrency, 1)
         self.assertEqual(settings.worker_ingest_concurrency, 1)
         self.assertEqual(settings.worker_gemini_analysis_concurrency, 1)

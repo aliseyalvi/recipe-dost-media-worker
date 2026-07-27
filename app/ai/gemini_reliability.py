@@ -78,6 +78,11 @@ _ALLOWED_VALIDATION_LOCATION_PARTS = frozenset(
         "thinking_level",
         "temperature",
         "max_output_tokens",
+        "contents",
+        "parts",
+        "file_data",
+        "file_uri",
+        "text",
         "properties",
         "items",
         "type",
@@ -148,7 +153,7 @@ def model_capabilities(model: str) -> GeminiModelCapabilities:
             family="gemini_3",
             supports_json_schema=True,
             supports_json_mime=True,
-            schema_field="response_json_schema",
+            schema_field="response_schema",
             thinking_mode="level",
             max_output_tokens=65_536,
         )
@@ -168,13 +173,24 @@ def model_capabilities(model: str) -> GeminiModelCapabilities:
 def build_model_generation_config(
     *,
     model: str,
-    response_schema: dict[str, object] | None,
+    response_schema: object | None,
     structured_output_enabled: bool,
     thinking_level: str | None,
     max_output_tokens: int,
     temperature: float,
+    schema_field_override: Literal[
+        "response_schema", "response_json_schema"
+    ]
+    | None = None,
 ) -> dict[str, object]:
     capabilities = model_capabilities(model)
+    schema_field = schema_field_override or capabilities.schema_field
+    if schema_field not in {"response_schema", "response_json_schema"}:
+        raise GeminiRequestConfigurationError(
+            "Unsupported Gemini schema field.",
+            normalized_error_locations=("response_schema",),
+            normalized_error_types=("literal_error",),
+        )
     config: dict[str, object] = {
         "temperature": min(2.0, max(0.0, float(temperature))),
         "max_output_tokens": min(
@@ -193,11 +209,20 @@ def build_model_generation_config(
                 raise GeminiRequestConfigurationError(
                     "Configured model does not support JSON schema."
                 )
-            config[capabilities.schema_field] = (
-                response_schema
-                if capabilities.schema_field == "response_json_schema"
-                else google_response_schema(response_schema)
-            )
+            if schema_field == "response_json_schema":
+                if not isinstance(response_schema, dict):
+                    raise GeminiRequestConfigurationError(
+                        "Gemini JSON schema must be an object."
+                    )
+                config[schema_field] = response_schema
+            elif capabilities.family == "gemini_3":
+                config[schema_field] = response_schema
+            else:
+                if not isinstance(response_schema, dict):
+                    raise GeminiRequestConfigurationError(
+                        "Gemini fallback schema must be an object."
+                    )
+                config[schema_field] = google_response_schema(response_schema)
     if capabilities.thinking_mode == "level" and thinking_level:
         normalized_level = str(thinking_level).strip().lower()
         if normalized_level not in {"minimal", "low", "medium", "high"}:
@@ -213,7 +238,7 @@ def build_model_generation_config(
 
 
 def google_response_schema(schema: dict[str, object]) -> dict[str, object]:
-    """Translate JSON Schema nullable unions to the Gemini Schema dialect.
+    """Build the Gemini 2.5 response-schema representation without mutation.
 
     ``response_json_schema`` accepts standard JSON Schema. The older
     ``response_schema`` field is parsed by the SDK's ``Schema`` model and
@@ -258,10 +283,14 @@ def google_response_schema(schema: dict[str, object]) -> dict[str, object]:
     return result
 
 
-def validate_generation_config(config: dict[str, object]) -> object:
+def validate_generation_config(config: object) -> object:
     try:
         from google.genai import types
 
+        if isinstance(config, types.GenerateContentConfig):
+            return config
+        if not isinstance(config, dict):
+            raise TypeError("Gemini generation configuration must be typed.")
         return types.GenerateContentConfig(**config)
     except (TypeError, ValueError) as exc:
         locations, error_types = normalize_generation_config_error(exc)
@@ -270,6 +299,43 @@ def validate_generation_config(config: dict[str, object]) -> object:
             normalized_error_locations=locations,
             normalized_error_types=error_types,
         ) from exc
+
+
+def validate_generate_content_request_shape(
+    *,
+    model: str,
+    contents: object,
+    config: object,
+) -> None:
+    """Exercise the pinned SDK's complete pre-HTTP request transformation."""
+
+    client = None
+    try:
+        from google import genai
+        from google.genai import models, types
+
+        client = genai.Client(api_key="offline-request-shape-validation")
+        parameters = types._GenerateContentParameters(
+            model=model,
+            contents=contents,
+            config=config,
+        )
+        models._GenerateContentParameters_to_mldev(
+            client._api_client,
+            parameters,
+            None,
+            parameters,
+        )
+    except (TypeError, ValueError) as exc:
+        locations, error_types = normalize_generation_config_error(exc)
+        raise GeminiRequestConfigurationError(
+            "Gemini request shape was rejected locally.",
+            normalized_error_locations=locations,
+            normalized_error_types=error_types,
+        ) from exc
+    finally:
+        if client is not None:
+            client.close()
 
 
 def structural_schema_fingerprint(schema: object) -> str:
@@ -370,10 +436,18 @@ def _normalize_validation_error_type(
     return "unknown_validation_error"
 
 
-def effective_configuration_category(model: str) -> str:
+def effective_configuration_category(
+    model: str,
+    *,
+    schema_field: str | None = None,
+) -> str:
     capabilities = model_capabilities(model)
     if capabilities.family == "gemini_3":
-        return "json_schema_thinking_level"
+        return (
+            "json_schema_thinking_level"
+            if schema_field == "response_json_schema"
+            else "response_schema_thinking_level"
+        )
     if capabilities.family == "gemini_2_5":
         return "response_schema_model_default_thinking"
     return "unsupported"
@@ -500,7 +574,44 @@ def exception_status(exc: Exception) -> int | None:
 
 def provider_status_class(exc: Exception) -> str:
     status = exception_status(exc)
-    return f"{status // 100}xx" if status is not None and 100 <= status <= 599 else "unknown"
+    return f"{status // 100}xx" if status is not None and 100 <= status <= 599 else "none"
+
+
+def sdk_failure_evidence(
+    exc: Exception,
+    *,
+    sdk_invocation_attempted: bool,
+) -> dict[str, object]:
+    status = exception_status(exc)
+    name = type(exc).__name__.lower()
+    if type(exc).__name__ in {"ValidationError", "SchemaError"}:
+        failure_stage = "sdk_request_transformation"
+    elif any(marker in name for marker in ("timeout", "deadline")):
+        failure_stage = "provider_timeout"
+    elif status is not None and 400 <= status <= 499:
+        failure_stage = "provider_rejection"
+    elif status is not None and 500 <= status <= 599:
+        failure_stage = "provider_server"
+    elif isinstance(exc, (TypeError, ValueError, AttributeError)):
+        failure_stage = "sdk_request_transformation"
+    else:
+        failure_stage = "sdk_invocation"
+    locations, error_types = (
+        normalize_generation_config_error(exc)
+        if failure_stage == "sdk_request_transformation"
+        else ((), ())
+    )
+    return {
+        "sdk_exception_category": sdk_exception_category(exc),
+        "sdk_method_category": "models.generate_content_sync",
+        "normalized_error_locations": list(locations),
+        "normalized_error_types": list(error_types),
+        "normalized_sdk_status_code": status if status is not None else "none",
+        "provider_status_class": provider_status_class(exc),
+        "failure_stage": failure_stage,
+        "sdk_invocation_attempted": sdk_invocation_attempted,
+        "http_status_observed": status is not None,
+    }
 
 
 def response_length_bucket(length: int) -> str:

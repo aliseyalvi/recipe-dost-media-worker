@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import platform
@@ -22,6 +23,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Deterministic worker QA harness.")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("gemini-config")
+    gemini_request = subparsers.add_parser("gemini-request")
+    gemini_request.add_argument("--mode", choices=("text", "file"), required=True)
+    gemini_request.add_argument(
+        "--variant",
+        choices=("response-schema", "response-json-schema", "both"),
+        required=True,
+    )
 
     replay = subparsers.add_parser("replay")
     replay.add_argument("--case", required=True)
@@ -52,6 +60,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "gemini-config":
         return run_gemini_config_diagnostic()
+    if args.command == "gemini-request":
+        return run_gemini_request_diagnostic(args.mode, args.variant)
 
     _load_qa_runtime()
     if args.command == "replay":
@@ -106,6 +116,13 @@ def run_gemini_config_diagnostic() -> int:
         "pydantic_core_version": result["pydantic_core_version"],
         "primary_ready": _safe_bool(result["primary_ready"]),
         "fallback_ready": _safe_bool(result["fallback_ready"]),
+        "gemini_config_ready": _safe_bool(result["gemini_config_ready"]),
+        "gemini_request_shape_ready": _safe_bool(
+            result["gemini_request_shape_ready"]
+        ),
+        "gemini_live_canary_verified": result[
+            "gemini_live_canary_verified"
+        ],
         "schema_mutation_detected": _safe_bool(
             result["schema_mutation_detected"]
         ),
@@ -126,6 +143,221 @@ def run_gemini_config_diagnostic() -> int:
     for key, value in values.items():
         print(f"{key}={value}")
     return 0 if bool(result["ready"]) else 1
+
+
+def run_gemini_request_diagnostic(mode: str, variant: str) -> int:
+    _validate_gemini_request_live_gate()
+    from app.ai.gemini_reliability import (
+        sdk_failure_evidence,
+        validate_generation_config,
+    )
+    from app.config import Settings
+    from app.queue_worker import (
+        CANONICAL_RECIPE_PROMPT,
+        build_gemini_generation_config,
+        build_prepared_gemini_request,
+        create_gemini_client,
+        extract_gemini_text,
+        parse_structured_response,
+        upload_gemini_video_file,
+        validate_and_normalize_canonical_recipe,
+        wait_for_gemini_file_active,
+    )
+
+    settings = Settings(
+        _env_file=None,
+        app_env="development",
+        worker_api_secret="owner-live-diagnostic",
+        supabase_url="https://offline.invalid",
+        supabase_service_role_key="owner-live-diagnostic",
+    )
+    if settings.gemini_api_key is None:
+        raise SystemExit("Gemini request diagnostic requires owner credentials.")
+    client = create_gemini_client(
+        settings.gemini_api_key.get_secret_value(),
+        settings.gemini_file_upload_timeout_seconds,
+    )
+    variants = (
+        ("response-schema", "response_schema"),
+        ("response-json-schema", "response_json_schema"),
+    )
+    selected = (
+        variants
+        if variant == "both"
+        else tuple(item for item in variants if item[0] == variant)
+    )
+    results: list[dict[str, object]] = [
+        {
+            "variant": display_variant,
+            "config_ready": False,
+            "request_shape_ready": False,
+            "sdk_invocation_started": False,
+            "http_status_observed": False,
+            "provider_status_class": "none",
+            "response_received": False,
+            "structured_result_valid": False,
+            "normalized_failure_stage": "none",
+            "cleanup_success": False,
+        }
+        for display_variant, _schema_mode in selected
+    ]
+    uploaded_file: object | None = None
+    cleanup_success = mode == "text"
+    input_part: object | None = None
+    input_mode = "text"
+    try:
+        if mode == "file":
+            entered_path = getpass.getpass("Local media path: ")
+            media_path = Path(entered_path).expanduser()
+            if not media_path.is_file() or media_path.stat().st_size <= 0:
+                raise ValueError("Local media input is unavailable.")
+            uploaded_file = upload_gemini_video_file(
+                client=client,
+                temp_file_path=str(media_path),
+                mime_type="video/mp4",
+            )
+            uploaded_file = wait_for_gemini_file_active(
+                client=client,
+                uploaded_file=uploaded_file,
+                settings=settings,
+            )
+            input_part = uploaded_file
+            input_mode = "file_api"
+            prompt = CANONICAL_RECIPE_PROMPT
+        else:
+            prompt = (
+                CANONICAL_RECIPE_PROMPT
+                + "\n\nRecipe evidence: Whisk two eggs with salt. Cook diced "
+                "tomato briefly, add the eggs, fold, and serve."
+            )
+        for result, (_display_variant, schema_mode) in zip(results, selected):
+            try:
+                validate_generation_config(
+                    build_gemini_generation_config(
+                        settings,
+                        model=settings.gemini_primary_model,
+                        structured_schema=True,
+                        primary_schema_mode=schema_mode,
+                    )
+                )
+                result["config_ready"] = True
+                prepared = build_prepared_gemini_request(
+                    settings,
+                    model_id=settings.gemini_primary_model,
+                    input_part=input_part,
+                    prompt=prompt,
+                    input_mode=input_mode,
+                    primary_schema_mode=schema_mode,
+                )
+                result["request_shape_ready"] = True
+                result["sdk_invocation_started"] = True
+                response = client.models.generate_content(
+                    model=prepared.model_id,
+                    contents=prepared.contents,
+                    config=prepared.config,
+                )
+                result["response_received"] = True
+                parsed = parse_structured_response(extract_gemini_text(response))
+                _recipe, errors = validate_and_normalize_canonical_recipe(
+                    parsed,
+                    {"platform": "diagnostic", "title": "Owner diagnostic"},
+                    settings,
+                )
+                result["structured_result_valid"] = not errors
+                if errors:
+                    result["normalized_failure_stage"] = "response_parse"
+            except Exception as exc:
+                evidence = sdk_failure_evidence(
+                    exc,
+                    sdk_invocation_attempted=bool(
+                        result["sdk_invocation_started"]
+                    ),
+                )
+                result["http_status_observed"] = evidence[
+                    "http_status_observed"
+                ]
+                result["provider_status_class"] = evidence[
+                    "provider_status_class"
+                ]
+                result["normalized_failure_stage"] = evidence[
+                    "failure_stage"
+                ]
+    except Exception as exc:
+        evidence = sdk_failure_evidence(
+            exc,
+            sdk_invocation_attempted=False,
+        )
+        for result in results:
+            result["http_status_observed"] = evidence[
+                "http_status_observed"
+            ]
+            result["provider_status_class"] = evidence[
+                "provider_status_class"
+            ]
+            result["normalized_failure_stage"] = evidence["failure_stage"]
+    finally:
+        if uploaded_file is not None:
+            try:
+                files_api = getattr(client, "files")
+                name = getattr(uploaded_file, "name", None)
+                if name:
+                    try:
+                        files_api.delete(name=name)
+                    except TypeError:
+                        files_api.delete(name)
+                    cleanup_success = True
+            except Exception:
+                cleanup_success = False
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    for result in results:
+        result["cleanup_success"] = cleanup_success
+        for key in (
+            "variant",
+            "config_ready",
+            "request_shape_ready",
+            "sdk_invocation_started",
+            "http_status_observed",
+            "provider_status_class",
+            "response_received",
+            "structured_result_valid",
+            "normalized_failure_stage",
+            "cleanup_success",
+        ):
+            value = result[key]
+            print(f"{key}={_safe_bool(value) if isinstance(value, bool) else value}")
+    return (
+        0
+        if all(
+            bool(result["structured_result_valid"])
+            and bool(result["cleanup_success"])
+            for result in results
+        )
+        else 1
+    )
+
+
+def _validate_gemini_request_live_gate() -> None:
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if branch != "develop":
+        raise SystemExit("Gemini request diagnostic requires branch develop.")
+    if os.getenv("APP_ENV") != "development":
+        raise SystemExit("Gemini request diagnostic requires APP_ENV=development.")
+    if os.getenv("ALLOW_LIVE_GEMINI_DIAGNOSTIC", "").lower() != "true":
+        raise SystemExit(
+            "Gemini request diagnostic requires ALLOW_LIVE_GEMINI_DIAGNOSTIC=true."
+        )
+    if str(os.getenv("RENDER_GIT_BRANCH") or "").strip().lower() == "main":
+        raise SystemExit("Gemini request diagnostic refuses main.")
+    if not os.getenv("GEMINI_API_KEY"):
+        raise SystemExit("Gemini request diagnostic requires owner credentials.")
 
 
 def _load_qa_runtime() -> None:

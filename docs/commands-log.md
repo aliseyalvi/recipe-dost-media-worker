@@ -2,6 +2,17 @@
 
 Keep only commands that future turns may need.
 
+## M23.W7C-RP3 Gemini request boundary
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py gemini-config
+# config/request shape ready; live canary unknown; no provider call
+```
+
+Targeted 26 tests and compile passed. Full discovery remained 216/217 because
+the pre-existing staged-default test expects `staged` while rollback defaults
+remain `sequential`; pip, batch, staged pipeline, parity, and diff checks passed.
+
 ## M23.W7C-RP2 Gemini runtime parity
 
 ```bash

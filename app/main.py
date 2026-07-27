@@ -464,6 +464,7 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
         "gemini_file_max_size_bytes": settings.gemini_file_max_size_bytes,
         "gemini_video_model": settings.effective_gemini_video_model,
         "gemini_text_model": settings.effective_gemini_text_model,
+        "gemini_primary_schema_mode": settings.gemini_primary_schema_mode,
         "gemini_request_config": gemini_request_config_readiness(settings),
         "raw_url_logging_enabled": settings.allow_raw_url_logs,
         "config_source": safe_config_source_summary(settings),
@@ -617,6 +618,14 @@ async def wake(settings: Settings = Depends(get_settings)) -> dict[str, object]:
         "worker_execution_mode": settings.worker_execution_mode,
         "queue_loop_enabled": queue_loop_enabled(settings),
         "gemini_request_config_ready": bool(readiness.get("ready")),
+        "gemini_config_ready": bool(readiness.get("gemini_config_ready")),
+        "gemini_request_shape_ready": bool(
+            readiness.get("gemini_request_shape_ready")
+        ),
+        "gemini_live_canary_verified": readiness.get(
+            "gemini_live_canary_verified",
+            "unknown",
+        ),
         "configuration_not_ready": not bool(readiness.get("ready")),
         "worker_start_requested": started,
     }

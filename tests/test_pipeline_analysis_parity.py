@@ -34,7 +34,7 @@ from app.queue_worker import (
     CANONICAL_RECIPE_SCHEMA,
     QueueJobFailure,
     _GEMINI_CALL_CONTEXT,
-    build_gemini_generation_config,
+    build_prepared_gemini_request,
     finalize_quota_transition_safely,
     guarded_generate_content,
     make_gemini_runtime_context,
@@ -45,18 +45,58 @@ from app.quota_finalization import ensure_quota_reservation_event
 
 
 class RecordingGeminiClient(FixtureGeminiClient):
-    def __init__(self, responses: list[object], media_path: Path) -> None:
+    def __init__(
+        self,
+        responses: list[object],
+        media_path: Path,
+        repository: OfflineRepository,
+        job_id: object,
+    ) -> None:
         super().__init__(responses)
         self.media_path = media_path
+        self.repository = repository
+        self.job_id = job_id
         self.request_shapes: list[dict[str, object]] = []
 
     def generate_content(self, **kwargs: object) -> object:
+        from google.genai import types
+
         if not self.media_path.is_file():
             raise FileNotFoundError("fixture media was removed before analysis")
         config = kwargs.get("config")
-        config_dict = config if isinstance(config, dict) else {}
+        config_dict = (
+            config.model_dump(exclude_none=True)
+            if isinstance(config, types.GenerateContentConfig)
+            else config
+            if isinstance(config, dict)
+            else {}
+        )
         contents = kwargs.get("contents")
         content_values = contents if isinstance(contents, list) else []
+        sdk_events = [
+            event
+            for event in self.repository.events
+            if event["media_job_id"] == self.job_id
+            and event["event_type"] == "gemini_sdk_invocation_started"
+        ]
+        sdk_entry = (
+            dict(sdk_events[-1]["metadata"])
+            if sdk_events and isinstance(sdk_events[-1]["metadata"], dict)
+            else {}
+        )
+        part_categories: list[str] = []
+        for content in content_values:
+            if not isinstance(content, types.Content):
+                part_categories.append(type(content).__name__)
+                continue
+            for part in content.parts or []:
+                part_categories.append(
+                    "file_uri_part"
+                    if part.file_data is not None
+                    else "text_part"
+                    if part.text is not None
+                    else "other_part"
+                )
         self.request_shapes.append(
             {
                 "model": str(kwargs.get("model") or ""),
@@ -70,9 +110,14 @@ class RecordingGeminiClient(FixtureGeminiClient):
                 ),
                 "thinking": "level" if "thinking_config" in config_dict else "default",
                 "content_shape": [
-                    "text" if isinstance(value, str) else "file"
-                    for value in content_values
+                    type(value).__name__ for value in content_values
                 ],
+                "part_categories": part_categories,
+                "sdk_started_before_method": bool(sdk_events),
+                "entry_call_number": int(sdk_entry.get("call_number") or 0),
+                "entry_calls_remaining": int(
+                    sdk_entry.get("calls_remaining") or 0
+                ),
             }
         )
         return super().generate_content(**kwargs)
@@ -124,10 +169,28 @@ class PipelineAnalysisParityTests(unittest.TestCase):
         self.assertEqual(result["call_purposes"], ["analysis"])
         self.assertEqual(result["call_numbers"], [1])
         self.assertIn("gemini_api_call_started", result["analysis_events"])
+        self.assertIn("gemini_request_shape_prepared", result["analysis_events"])
+        self.assertIn("gemini_sdk_invocation_started", result["analysis_events"])
         self.assertEqual(
             result["request_shapes"][0]["model"],  # type: ignore[index]
             "gemini-3.1-flash-lite",
         )
+        self.assertTrue(
+            result["request_shapes"][0]["sdk_started_before_method"]  # type: ignore[index]
+        )
+        self.assertEqual(
+            result["request_shapes"][0]["entry_call_number"],  # type: ignore[index]
+            1,
+        )
+        self.assertEqual(
+            result["request_shapes"][0]["entry_calls_remaining"],  # type: ignore[index]
+            2,
+        )
+        self.assertEqual(
+            result["request_shapes"][0]["part_categories"],  # type: ignore[index]
+            ["file_uri_part", "text_part"],
+        )
+        self.assertNotIn("offline-file-reference", result["event_payload"])
         self.assertTrue(result["cleanup"])
 
     def test_sequential_and_staged_analysis_are_identical(self) -> None:
@@ -183,7 +246,7 @@ class PipelineAnalysisParityTests(unittest.TestCase):
                     "malformed_repaired": ["analysis", "repair"],
                     "provider_503_retry_success": ["analysis", "transient_retry"],
                     "fallback_success": ["analysis", "model_fallback"],
-                    "primary_capability_preflight": ["model_fallback"],
+                    "primary_capability_preflight": [],
                 }[case_name]
                 self.assertEqual(staged["call_purposes"], expected_purposes)
                 self.assertEqual(
@@ -196,7 +259,7 @@ class PipelineAnalysisParityTests(unittest.TestCase):
         self.assertIn("gemini_api_call_started", success["analysis_events"])
         self.assertEqual(
             success["request_shapes"][0]["schema_field"],  # type: ignore[index]
-            "response_json_schema",
+            "response_schema",
         )
         self.assertEqual(
             success["request_shapes"][0]["thinking"],  # type: ignore[index]
@@ -232,6 +295,64 @@ class PipelineAnalysisParityTests(unittest.TestCase):
                     result["analysis_events"],
                 )
                 self.assertTrue(result["cleanup"])
+
+    def test_sdk_and_provider_failures_are_classified_at_the_boundary(self) -> None:
+        from google.genai import types
+        from pydantic import ValidationError
+
+        try:
+            types.Part.model_validate({"text": 123})
+        except ValidationError as validation_error:
+            local_error = validation_error
+        else:
+            self.fail("Fixture must produce a Pydantic ValidationError.")
+        cases = (
+            (
+                "local_validation",
+                local_error,
+                "sdk_request_transformation",
+                "none",
+                False,
+            ),
+            (
+                "provider_400",
+                FixtureClientError(400),
+                "provider_rejection",
+                "4xx",
+                True,
+            ),
+            (
+                "provider_503",
+                FixtureClientError(503),
+                "provider_server",
+                "5xx",
+                True,
+            ),
+        )
+        for name, failure, stage, status_class, http_observed in cases:
+            with self.subTest(case=name):
+                result = self._run(
+                    "sequential",
+                    [failure],
+                    {
+                        "gemini_max_retries": 0,
+                        "gemini_fallback_model": "",
+                        "recipe_repair_enabled": False,
+                    },
+                )
+                self.assertEqual(result["terminal_status"], "failed")
+                self.assertEqual(result["call_numbers"], [1])
+                evidence = result["sdk_failures"][0]  # type: ignore[index]
+                self.assertEqual(evidence["failure_stage"], stage)
+                self.assertEqual(
+                    evidence["provider_status_class"],
+                    status_class,
+                )
+                self.assertEqual(
+                    evidence["http_status_observed"],
+                    http_observed,
+                )
+                self.assertTrue(evidence["sdk_invocation_attempted"])
 
     def test_per_job_call_budgets_are_independent(self) -> None:
         settings = settings_for_case(gemini_max_calls_per_job=3)
@@ -345,13 +466,13 @@ class PipelineAnalysisParityTests(unittest.TestCase):
         for mode in ("sequential", "staged"):
             with self.subTest(mode=mode):
                 with patch(
-                    "app.queue_worker.build_gemini_generation_config",
-                    wraps=build_gemini_generation_config,
+                    "app.queue_worker.build_prepared_gemini_request",
+                    wraps=build_prepared_gemini_request,
                 ) as builder:
                     result = self._run(mode, [valid], {})
                 self.assertEqual(result["terminal_status"], "completed")
                 models = {
-                    str(call.kwargs.get("model") or "")
+                    str(call.kwargs.get("model_id") or "")
                     for call in builder.call_args_list
                 }
                 self.assertIn("gemini-3.1-flash-lite", models)
@@ -410,7 +531,12 @@ class PipelineAnalysisParityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             media_path = Path(root) / "video.mp4"
             media_path.write_bytes(b"fixture-media")
-            client = RecordingGeminiClient(responses, media_path)
+            client = RecordingGeminiClient(
+                responses,
+                media_path,
+                repository,
+                job.id,
+            )
             uploaded = (
                 object()
                 if missing_file_reference
@@ -582,6 +708,13 @@ class PipelineAnalysisParityTests(unittest.TestCase):
             ),
             {},
         )
+        sdk_failures = [
+            dict(event["metadata"])
+            for event in repository.events
+            if event["media_job_id"] == job.id
+            and event["event_type"] == "gemini_sdk_invocation_failed"
+            and isinstance(event["metadata"], dict)
+        ]
         return {
             "terminal_status": final.status,
             "call_purposes": call_purposes,
@@ -590,6 +723,8 @@ class PipelineAnalysisParityTests(unittest.TestCase):
             "request_shapes": client.request_shapes,
             "analysis_events": analysis_events,
             "primary_preflight": primary_preflight,
+            "sdk_failures": sdk_failures,
+            "event_payload": json.dumps(repository.events, default=str),
             "quota_success": events.count("ai_quota_success_committed"),
             "cleanup": cleanup,
         }
@@ -597,12 +732,16 @@ class PipelineAnalysisParityTests(unittest.TestCase):
     def _invalid_readiness(self) -> dict[str, object]:
         return {
             "ready": False,
+            "gemini_config_ready": False,
+            "gemini_request_shape_ready": False,
+            "local_request_shape_ready": False,
+            "gemini_live_canary_verified": "unknown",
             "google_genai_version": "2.13.0",
             "pydantic_version": "2.13.4",
             "pydantic_core_version": "2.46.4",
             "primary_ready": False,
             "fallback_ready": True,
-            "primary_configuration_category": "json_schema_thinking_level",
+            "primary_configuration_category": "response_schema_thinking_level",
             "fallback_configuration_category": (
                 "response_schema_model_default_thinking"
             ),

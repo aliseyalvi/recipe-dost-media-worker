@@ -1,5 +1,12 @@
 # Decision Log
 
+## 2026-07-27 — M23.W7C-RP3 Gemini request boundary
+
+- Gemini 3.1 primary requests again use `response_schema` plus explicit thinking,
+  with typed `Content`/`Part.from_uri` input and SDK-boundary failure evidence.
+- Offline startup validates the complete SDK request transformation; live
+  compatibility remains owner-gated and unverified.
+
 ## 2026-07-27 — M23.W7C-RP2 Gemini runtime readiness
 
 - `google-genai==2.13.0` and `pydantic==2.13.4` are the shared local/Render
