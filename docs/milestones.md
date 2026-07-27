@@ -63,6 +63,7 @@
 | 59 | M23.W3I-IG2 Instagram split-AV compatibility repair | Done locally | Preserve unknown declarations for secure probe, keep roles separate, accept verified H.264 MP4, conditionally mux audio, and add an owner-only live gate |
 | 60 | M23.W6A-W6C Deterministic replay, Gemini reliability, queue finalization audit | Done locally | Offline replay/batch harness, model-specific structured extraction, closed failures, implicit quota-finalization proof, and private metadata fix |
 | 61 | M23.W7A-W7C Staged combined worker architecture | Done locally; durable lease migration blocked | Typed stages, bounded in-process transport, resource admission, combined/fail-closed standalone entry points, ACTIVE-point cleanup, deterministic staged/concurrency-two QA; cross-process lease recovery needs approval |
+| 61a | M23.W7C-R Staged analyzer parity repair | Targeted checkpoint passed | Shared primary invocation, safe preflight exception record, Gemini 2.5 schema conversion, retained local media, and independent per-job budget targeted tests pass |
 | 62 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
 | 63 | M15 Auth + Account Linking | Later | Email/Google auth |
 | 64 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |

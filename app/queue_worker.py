@@ -4,11 +4,13 @@ import asyncio
 import io
 import json
 import logging
+import random
 import re
 import shutil
+import threading
 import time
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -23,10 +25,14 @@ from app.ai.gemini_reliability import (
     StructuredResponseError,
     build_model_generation_config,
     classify_gemini_exception,
+    effective_configuration_category,
+    exception_status,
+    model_capabilities,
     normalize_finish_reason,
     parse_structured_response,
     provider_status_class,
     response_length_bucket,
+    sdk_exception_category,
     validate_generation_config,
 )
 from app.config import Settings, get_settings
@@ -72,8 +78,32 @@ from app.supabase_client import MediaJobRepository, create_repository
 
 logger = logging.getLogger("recipe_dost.worker")
 
+@dataclass
+class GeminiCallBudget:
+    repository: MediaJobRepository
+    job_id: UUID
+    settings: Settings
+    lock: threading.Lock = dataclass_field(default_factory=threading.Lock)
+
+    def used(self) -> int:
+        return self.repository.count_job_gemini_calls(self.job_id)
+
+    def remaining(self) -> int:
+        return max(0, self.settings.gemini_max_calls_per_job - self.used())
+
+
+@dataclass
+class GeminiRuntimeContext:
+    repository: MediaJobRepository
+    job: MediaJobRecord
+    settings: Settings
+    budget: GeminiCallBudget
+
+
 _GEMINI_CALL_CONTEXT: ContextVar[
-    tuple[MediaJobRepository, MediaJobRecord, Settings] | None
+    GeminiRuntimeContext
+    | tuple[MediaJobRepository, MediaJobRecord, Settings]
+    | None
 ] = ContextVar("queue_gemini_call_context", default=None)
 
 PROMPT_VERSION = "m22e_recipe_tags_v1"
@@ -81,7 +111,7 @@ TWO_STEP_PROMPT_VERSION = "m20_recipe_video_v1"
 STRUCTURED_EXTRACTION_USER_MESSAGE = (
     "Recipe extraction could not understand this video well enough."
 )
-STRUCTURED_FAILURE_UNKNOWN = "gemini_server_error"
+STRUCTURED_FAILURE_UNKNOWN = "gemini_local_preflight_failed"
 
 CANONICAL_RECIPE_PROMPT = """Perform exhaustive line-by-line recipe extraction.
 Do not summarize. Explicitly list every ingredient, including minor spices.
@@ -342,16 +372,40 @@ class StructuredExtractionFailure(QueueJobFailure):
 
 @dataclass(frozen=True)
 class DeferredGeminiRecipe:
-    job: MediaJobRecord
     result: GeminiRecipeResult
     model: str
     platform: str
     resolver: str
     uploaded_thumbnail_url: str | None
-    source_metadata: dict[str, object]
     used_fallback: bool = False
     brief_text: str | None = None
-    client: object | None = None
+
+
+def make_gemini_runtime_context(
+    repository: MediaJobRepository,
+    job: MediaJobRecord,
+    settings: Settings,
+) -> GeminiRuntimeContext:
+    return GeminiRuntimeContext(
+        repository=repository,
+        job=job,
+        settings=settings,
+        budget=GeminiCallBudget(
+            repository=repository,
+            job_id=job.id,
+            settings=settings,
+        ),
+    )
+
+
+def current_gemini_runtime_context() -> GeminiRuntimeContext | None:
+    context = _GEMINI_CALL_CONTEXT.get()
+    if context is None:
+        return None
+    if isinstance(context, GeminiRuntimeContext):
+        return context
+    repository, job, settings = context
+    return make_gemini_runtime_context(repository, job, settings)
 
 
 async def run_queue_loop(_build_job_runner: Callable[[Settings], object]) -> None:
@@ -422,8 +476,8 @@ def process_queue_job(
     started_at = perf_counter()
     current_stage = "queue_claim"
     platform = job.platform or "unknown"
-    gemini_context_token: Token[tuple[MediaJobRepository, MediaJobRecord, Settings] | None] = (
-        _GEMINI_CALL_CONTEXT.set((repository, job, settings))
+    gemini_context_token = _GEMINI_CALL_CONTEXT.set(
+        make_gemini_runtime_context(repository, job, settings)
     )
     try:
         previous_status = "queued" if already_claimed else job.status
@@ -1804,6 +1858,13 @@ def build_gemini_generation_config(
     )
 
 
+def safe_effective_configuration_category(model: str) -> str:
+    try:
+        return effective_configuration_category(model)
+    except GeminiRequestConfigurationError:
+        return "unsupported"
+
+
 def guarded_generate_content(
     client: object,
     *,
@@ -1829,18 +1890,38 @@ def guarded_generate_content(
                     "provider_request_attempted": False,
                 },
             ) from exc
-    context = _GEMINI_CALL_CONTEXT.get()
+    context = current_gemini_runtime_context()
+    if context is None:
+        raise QueueJobFailure(
+            "gemini_request_configuration_error",
+            STRUCTURED_EXTRACTION_USER_MESSAGE,
+            stage=stage,
+            metadata={
+                "failure_category": "gemini_local_preflight_failed",
+                "preflight_category": "missing_runtime_context",
+                "call_purpose": call_purpose,
+                "provider_request_attempted": False,
+            },
+        )
+    repository = context.repository
+    job = context.job
+    settings = context.settings
+    if model in settings.gemini_disabled_models:
+        raise QueueJobFailure(
+            "gemini_model_disabled",
+            "This AI model is temporarily disabled.",
+            stage=stage,
+            metadata={
+                "failure_category": "gemini_request_configuration_error",
+                "preflight_category": "invalid_model_configuration",
+                "call_purpose": call_purpose,
+                "provider_request_attempted": False,
+            },
+        )
     call_number: int | None = None
-    if context is not None:
-        repository, job, settings = context
-        if model in settings.gemini_disabled_models:
-            raise QueueJobFailure(
-                "gemini_model_disabled",
-                "This AI model is temporarily disabled.",
-                stage=stage,
-            )
+    with context.budget.lock:
         try:
-            job_count = repository.count_job_gemini_calls(job.id)
+            job_count = context.budget.used()
             if job_count >= settings.gemini_max_calls_per_job:
                 raise QueueJobFailure(
                     "gemini_call_budget_exhausted",
@@ -1884,6 +1965,9 @@ def guarded_generate_content(
                     "model": model,
                     "stage": stage,
                     "call_purpose": call_purpose,
+                    "effective_configuration_category": (
+                        safe_effective_configuration_category(model)
+                    ),
                     "call_number": call_number,
                     "calls_remaining": max(
                         0,
@@ -1901,6 +1985,12 @@ def guarded_generate_content(
                 "Gemini quota guard could not be verified.",
                 stage=stage,
                 exception_type=type(exc).__name__,
+                metadata={
+                    "failure_category": "gemini_local_preflight_failed",
+                    "preflight_category": "call_budget_initialization_failed",
+                    "call_purpose": call_purpose,
+                    "provider_request_attempted": False,
+                },
             ) from exc
     generate = getattr(getattr(client, "models"), "generate_content")
     try:
@@ -1910,46 +2000,74 @@ def guarded_generate_content(
             else generate(model=model, contents=contents, config=config)
         )
     except Exception as exc:
-        if context is not None:
-            repository, job, settings = context
-            repository.insert_event(
-                job.id,
-                event_type="gemini_api_call_failed",
-                message="Gemini API call failed.",
-                metadata={
-                    "model": model,
-                    "stage": stage,
-                    "call_purpose": call_purpose,
-                    "call_number": call_number or 0,
-                    "calls_remaining": max(
-                        0,
-                        settings.gemini_max_calls_per_job - (call_number or 0),
-                    ),
-                    "provider_request_attempted": True,
-                    "provider_status_class": provider_status_class(exc),
-                    "failure_category": classify_gemini_exception(exc),
-                },
-            )
-        raise
-    if context is not None:
-        repository, job, settings = context
+        attempted = not (
+            type(exc).__name__ in {"ValidationError", "SchemaError"}
+            and exception_status(exc) is None
+        )
+        failure_category = classify_gemini_exception(
+            exc,
+            provider_request_attempted=attempted,
+        )
         repository.insert_event(
             job.id,
-            event_type="gemini_api_call_completed",
-            message="Gemini API call completed.",
+            event_type="gemini_api_call_failed",
+            message="Gemini API call failed.",
             metadata={
                 "model": model,
                 "stage": stage,
                 "call_purpose": call_purpose,
+                "effective_configuration_category": (
+                    safe_effective_configuration_category(model)
+                ),
                 "call_number": call_number or 0,
                 "calls_remaining": max(
                     0,
                     settings.gemini_max_calls_per_job - (call_number or 0),
                 ),
-                "provider_request_attempted": True,
-                **gemini_response_metadata(response),
+                "provider_request_attempted": attempted,
+                "provider_status_class": provider_status_class(exc),
+                "sdk_exception_category": sdk_exception_category(exc),
+                "validation_stage": (
+                    "provider_response" if attempted else "sdk_request_construction"
+                ),
+                "failure_category": failure_category,
             },
         )
+        if not attempted:
+            raise QueueJobFailure(
+                "gemini_request_configuration_error",
+                STRUCTURED_EXTRACTION_USER_MESSAGE,
+                stage=stage,
+                exception_type=type(exc).__name__,
+                metadata={
+                    "failure_category": failure_category,
+                    "call_purpose": call_purpose,
+                    "provider_request_attempted": False,
+                    "sdk_exception_category": sdk_exception_category(exc),
+                    "validation_stage": "sdk_request_construction",
+                },
+            ) from exc
+        raise
+    repository.insert_event(
+        job.id,
+        event_type="gemini_api_call_completed",
+        message="Gemini API call completed.",
+        metadata={
+            "model": model,
+            "stage": stage,
+            "call_purpose": call_purpose,
+            "effective_configuration_category": (
+                safe_effective_configuration_category(model)
+            ),
+            "call_number": call_number or 0,
+            "calls_remaining": max(
+                0,
+                settings.gemini_max_calls_per_job - (call_number or 0),
+            ),
+            "provider_request_attempted": True,
+            **gemini_response_metadata(response),
+        },
+    )
     return response
 
 
@@ -2206,7 +2324,9 @@ def structured_event_metadata(
         "model": model,
         "input_mode": input_mode,
         "extraction_mode": settings.gemini_extraction_mode,
-        "thinking_level": settings.gemini_thinking_level,
+        "effective_configuration_category": (
+            safe_effective_configuration_category(model)
+        ),
     }
     if fallback_model is not None:
         metadata["fallback_model"] = fallback_model
@@ -2271,10 +2391,10 @@ def structured_failure_category(
             "gemini_request_configuration_error",
         }:
             return exc.code
+    if exc is not None and type(exc).__name__ in {"ValidationError", "SchemaError"}:
+        return "gemini_request_configuration_error"
     if isinstance(exc, ValueError):
         return "gemini_json_parse_failed"
-    if exc is not None and type(exc).__name__ in {"ValidationError", "SchemaError"}:
-        return "gemini_schema_validation_failed"
     return classify_gemini_exception(exc) if exc is not None else STRUCTURED_FAILURE_UNKNOWN
 
 
@@ -2391,6 +2511,181 @@ def _bounded_source_context_text(value: object, limit: int) -> str:
     return re.sub(r"\s+", " ", text).strip()[:limit].rstrip()
 
 
+PRIMARY_PREFLIGHT_CATEGORIES = frozenset(
+    {
+        "missing_runtime_context",
+        "missing_gemini_file_reference",
+        "invalid_schema_configuration",
+        "invalid_model_configuration",
+        "call_budget_initialization_failed",
+        "invalid_analysis_input",
+        "local_file_unavailable",
+        "unsupported_model_capability",
+    }
+)
+
+
+def primary_preflight_failure(
+    category: str,
+    *,
+    exception_type: str | None = None,
+) -> QueueJobFailure:
+    if category not in PRIMARY_PREFLIGHT_CATEGORIES:
+        category = "invalid_analysis_input"
+    failure_category = (
+        "gemini_schema_validation_failed"
+        if category == "invalid_schema_configuration"
+        else "gemini_request_configuration_error"
+    )
+    return QueueJobFailure(
+        "gemini_request_configuration_error",
+        STRUCTURED_EXTRACTION_USER_MESSAGE,
+        stage="gemini_structured_extraction",
+        exception_type=exception_type,
+        metadata={
+            "failure_category": failure_category,
+            "preflight_category": category,
+            "provider_request_attempted": False,
+            "validation_stage": "primary_preflight",
+            "call_purpose": "analysis",
+        },
+    )
+
+
+def preflight_structured_extraction(
+    *,
+    client: object,
+    input_part: object,
+    input_mode: str,
+    model: str,
+    settings: Settings,
+    source_metadata: dict[str, object],
+    local_media_path: str | None,
+) -> None:
+    context = current_gemini_runtime_context()
+    if context is None or not hasattr(client, "models"):
+        raise primary_preflight_failure("missing_runtime_context")
+    if not isinstance(source_metadata, dict) or not str(
+        source_metadata.get("platform") or ""
+    ).strip():
+        raise primary_preflight_failure("invalid_analysis_input")
+    try:
+        build_untrusted_source_context_prompt(
+            source_metadata,
+            str(source_metadata.get("platform") or ""),
+        )
+    except Exception as exc:
+        raise primary_preflight_failure(
+            "invalid_analysis_input",
+            exception_type=type(exc).__name__,
+        ) from exc
+    if input_part is None:
+        raise primary_preflight_failure("invalid_analysis_input")
+    if input_mode == "file_api":
+        has_file_reference = bool(
+            get_gemini_file_name(input_part)
+            or str(getattr(input_part, "uri", "") or "").strip()
+        )
+        if not has_file_reference:
+            raise primary_preflight_failure("missing_gemini_file_reference")
+        if local_media_path is not None and (
+            not Path(local_media_path).is_file()
+            or Path(local_media_path).stat().st_size <= 0
+        ):
+            raise primary_preflight_failure("local_file_unavailable")
+    try:
+        model_capabilities(model)
+    except GeminiRequestConfigurationError as exc:
+        raise primary_preflight_failure(
+            "unsupported_model_capability",
+            exception_type=type(exc).__name__,
+        ) from exc
+    if model in settings.gemini_disabled_models:
+        raise primary_preflight_failure("invalid_model_configuration")
+    if not isinstance(CANONICAL_RECIPE_SCHEMA, dict):
+        raise primary_preflight_failure("invalid_schema_configuration")
+    try:
+        config = build_gemini_generation_config(
+            settings,
+            model=model,
+            structured_schema=True,
+        )
+        validate_generation_config(config)
+    except GeminiRequestConfigurationError as exc:
+        cause = exc.__cause__
+        validation_locations = (
+            getattr(cause, "errors", lambda **_kwargs: [])(
+                include_url=False,
+                include_context=False,
+                include_input=False,
+            )
+            if cause is not None and hasattr(cause, "errors")
+            else []
+        )
+        schema_rejected = any(
+            isinstance(item, dict)
+            and item.get("loc")
+            and str(item["loc"][0]).startswith(("properties", "items"))
+            for item in validation_locations
+        )
+        raise primary_preflight_failure(
+            (
+                "invalid_schema_configuration"
+                if schema_rejected
+                else "invalid_model_configuration"
+            ),
+            exception_type=type(cause or exc).__name__,
+        ) from exc
+    try:
+        context.budget.used()
+    except Exception as exc:
+        raise primary_preflight_failure(
+            "call_budget_initialization_failed",
+            exception_type=type(exc).__name__,
+        ) from exc
+
+
+def run_structured_extraction_with_transient_retry(
+    *,
+    client: object,
+    input_part: object,
+    model: str,
+    settings: Settings,
+    source_metadata: dict[str, object],
+    platform: str,
+) -> tuple[dict, object]:
+    retry_number = 0
+    while True:
+        purpose = "analysis" if retry_number == 0 else "transient_retry"
+        try:
+            return run_structured_extraction_call(
+                client=client,
+                input_part=input_part,
+                model=model,
+                settings=settings,
+                source_metadata=source_metadata,
+                platform=platform,
+                call_purpose=purpose,
+            )
+        except Exception as exc:
+            category = structured_failure_category(exc)
+            context = current_gemini_runtime_context()
+            calls_remaining = context.budget.remaining() if context is not None else 0
+            retryable = category in {"gemini_server_error", "gemini_timeout"}
+            if (
+                not retryable
+                or retry_number >= max(0, settings.gemini_max_retries)
+                or calls_remaining <= 0
+            ):
+                raise
+            delay = max(0.0, settings.gemini_retry_base_seconds) * (
+                2**retry_number
+            )
+            delay += random.uniform(0.0, min(0.5, max(0.0, delay * 0.25)))
+            time.sleep(delay)
+            retry_number += 1
+
+
 def run_structured_extraction_call(
     *,
     client: object,
@@ -2455,6 +2750,7 @@ def run_single_pass_structured_extraction(
     input_mode: str,
     source_metadata: dict[str, object],
     platform: str,
+    local_media_path: str | None = None,
 ) -> tuple[GeminiRecipeResult, str, bool]:
     model = settings.gemini_primary_model
     repair_used = False
@@ -2485,8 +2781,24 @@ def run_single_pass_structured_extraction(
     failure_exception_type: str | None = None
     invalid_text: str | None = None
     repairable_failure = True
+    primary_preflight_category: str | None = None
+    runtime_context = current_gemini_runtime_context()
+    calls_before_primary = 0
     try:
-        canonical, _response = run_structured_extraction_call(
+        preflight_structured_extraction(
+            client=client,
+            input_part=input_part,
+            input_mode=input_mode,
+            model=model,
+            settings=settings,
+            source_metadata=source_metadata,
+            local_media_path=local_media_path,
+        )
+        runtime_context = current_gemini_runtime_context()
+        calls_before_primary = (
+            runtime_context.budget.used() if runtime_context is not None else 0
+        )
+        canonical, _response = run_structured_extraction_with_transient_retry(
             client=client,
             input_part=input_part,
             model=model,
@@ -2504,12 +2816,50 @@ def run_single_pass_structured_extraction(
     except Exception as exc:
         failure_category = structured_failure_category(exc)
         failure_exception_type = type(exc).__name__
+        if isinstance(exc, QueueJobFailure):
+            category = exc.metadata.get("preflight_category")
+            if isinstance(category, str):
+                primary_preflight_category = category
+                repository.insert_event(
+                    job.id,
+                    event_type="gemini_primary_preflight_failed",
+                    message="Gemini primary request preflight failed.",
+                    metadata={
+                        "platform": platform,
+                        "model": model,
+                        "input_mode": input_mode,
+                        "failure_category": failure_category,
+                        "preflight_category": category,
+                        "provider_request_attempted": False,
+                        "validation_stage": "primary_preflight",
+                        "call_purpose": "analysis",
+                        "sdk_exception_category": (
+                            "local_validation"
+                            if exc.exception_type in {"ValidationError", "SchemaError"}
+                            else "local_configuration"
+                        ),
+                        "exception_type": (
+                            exc.exception_type or type(exc).__name__
+                        ),
+                        "effective_configuration_category": (
+                            safe_effective_configuration_category(model)
+                        ),
+                    },
+                )
         repairable_failure = (
             isinstance(exc, StructuredExtractionFailure)
             or not technical_gemini_failure(exc)
         )
         if isinstance(exc, StructuredExtractionFailure):
             invalid_text = exc.raw_text
+    runtime_context = current_gemini_runtime_context()
+    try:
+        calls_after_primary = (
+            runtime_context.budget.used() if runtime_context is not None else 0
+        )
+    except Exception:
+        calls_after_primary = calls_before_primary
+    primary_provider_attempted = calls_after_primary > calls_before_primary
 
     quality_passed = (
         result is not None
@@ -2625,11 +2975,24 @@ def run_single_pass_structured_extraction(
         "gemini_quality_gate_failed",
         "gemini_repair_failed",
     }
-    if not quality_passed and fallback_available and fallback_recoverable:
+    fallback_precondition_met = primary_provider_attempted or (
+        primary_preflight_category
+        in {"invalid_model_configuration", "unsupported_model_capability"}
+    )
+    if (
+        not quality_passed
+        and fallback_available
+        and fallback_recoverable
+        and fallback_precondition_met
+    ):
         calls_remaining = max(
             0,
             settings.gemini_max_calls_per_job
-            - repository.count_job_gemini_calls(job.id),
+            - (
+                runtime_context.budget.used()
+                if runtime_context is not None
+                else repository.count_job_gemini_calls(job.id)
+            ),
         )
         if calls_remaining <= 0:
             failure_category = "gemini_call_budget_exhausted"
@@ -2656,11 +3019,12 @@ def run_single_pass_structured_extraction(
             )
         else:
             try:
-                build_gemini_generation_config(
+                fallback_config = build_gemini_generation_config(
                     settings,
                     model=fallback_model,
                     structured_schema=True,
                 )
+                validate_generation_config(fallback_config)
             except GeminiRequestConfigurationError as exc:
                 failure_category = "gemini_request_configuration_error"
                 failure_exception_type = type(exc).__name__
@@ -2687,6 +3051,8 @@ def run_single_pass_structured_extraction(
                         "call_purpose": "model_fallback",
                         "calls_remaining": calls_remaining,
                         "provider_request_attempted": False,
+                        "validation_stage": "fallback_preflight",
+                        "sdk_exception_category": "local_validation",
                     },
                 )
             else:
@@ -2711,7 +3077,7 @@ def run_single_pass_structured_extraction(
                     | {
                         "call_purpose": "model_fallback",
                         "calls_remaining": calls_remaining,
-                        "provider_request_attempted": True,
+                        "provider_request_attempted": False,
                     },
                 )
                 model = fallback_model
@@ -2784,6 +3150,38 @@ def run_single_pass_structured_extraction(
                             "provider_request_attempted": fallback_model_used,
                         },
                     )
+    elif (
+        not quality_passed
+        and fallback_available
+        and fallback_recoverable
+        and not fallback_precondition_met
+    ):
+        repository.insert_event(
+            job.id,
+            event_type="gemini_structured_extraction_fallback_skipped",
+            message="Gemini structured extraction fallback was not invoked.",
+            metadata=structured_event_metadata(
+                platform=platform,
+                model=model,
+                fallback_model=fallback_model,
+                input_mode=input_mode,
+                settings=settings,
+                repair_attempted=repair_attempted,
+                fallback_attempted=False,
+                fallback_model_used=False,
+                failure_category=failure_category,
+            )
+            | {
+                "call_purpose": "model_fallback",
+                "calls_remaining": (
+                    runtime_context.budget.remaining()
+                    if runtime_context is not None
+                    else 0
+                ),
+                "provider_request_attempted": False,
+                "retry_recovery_category": "primary_not_invoked",
+            },
+        )
 
     if result is None:
         repository.insert_event(
@@ -3623,19 +4021,8 @@ def run_gemini_video_poc_analysis(
                 "file_state": "ACTIVE",
             },
         )
-        # ACTIVE proves the Files API has finished ingesting the uploaded bytes.
-        # Structured extraction and fallback use the Gemini file object only;
-        # the local file is therefore no longer an input and can be removed.
-        if delete_temp_media(temp_file_path):
-            repository.insert_event(
-                job.id,
-                event_type="temp_video_deleted",
-                message="Temporary video file deleted.",
-                metadata={
-                    "stage": "gemini_file_processing",
-                    "cleanup_point": "after_gemini_file_active",
-                },
-            )
+        # Preserve the proven sequential lifecycle: the local source remains
+        # available through primary extraction, repair, and model fallback.
         if settings.gemini_extraction_mode == "single_pass_structured":
             result, accepted_model, repair_used = run_single_pass_structured_extraction(
                 repository=repository,
@@ -3646,6 +4033,7 @@ def run_gemini_video_poc_analysis(
                 input_mode=settings.gemini_video_input_mode,
                 source_metadata=extract_result,
                 platform=platform,
+                local_media_path=temp_file_path,
             )
             parsed = {"save_mode": "single_pass_structured"}
             repository.insert_event(
@@ -3905,16 +4293,13 @@ def complete_or_defer_gemini_recipe(
 ) -> MediaJobRecord | DeferredGeminiRecipe:
     if defer_finalization:
         return DeferredGeminiRecipe(
-            job=job,
             result=result,
             model=model,
             platform=platform,
             resolver=resolver,
             uploaded_thumbnail_url=uploaded_thumbnail_url,
-            source_metadata=source_metadata,
             used_fallback=used_fallback,
             brief_text=brief_text,
-            client=client,
         )
     return save_gemini_recipe_card(
         repository=repository,

@@ -1,5 +1,15 @@
 # Decision Log
 
+## 2026-07-27 — M23.W7C-R analyzer parity checkpoint
+
+- Staged and sequential analysis use the same Gemini orchestration. Local media
+  remains through primary extraction, repair, and fallback, then cleanup runs.
+- Gemini 2.5 `response_schema` now converts nullable JSON-Schema unions to the
+  SDK Schema dialect. Primary preflight failures record safe exception/category
+  fields before fallback; per-job call budgets are independent.
+- Only four targeted regressions and Python 3.12 compile validation were run.
+  Broader W7C-R telemetry, ordering, QA, documentation, and soak work is deferred.
+
 ## 2026-07-27 — M23.W7A-W7C staged combined worker
 
 - One Render service now has sequential compatibility and bounded staged modes;

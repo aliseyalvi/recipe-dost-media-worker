@@ -29,6 +29,7 @@ GEMINI_FAILURE_CATEGORIES = frozenset(
         "gemini_schema_validation_failed",
         "gemini_non_recipe_content",
         "gemini_call_budget_exhausted",
+        "gemini_local_preflight_failed",
         "gemini_repair_failed",
         "gemini_fallback_failed",
     }
@@ -110,7 +111,11 @@ def build_model_generation_config(
                 raise GeminiRequestConfigurationError(
                     "Configured model does not support JSON schema."
                 )
-            config[capabilities.schema_field] = response_schema
+            config[capabilities.schema_field] = (
+                response_schema
+                if capabilities.schema_field == "response_json_schema"
+                else google_response_schema(response_schema)
+            )
     if capabilities.thinking_mode == "level" and thinking_level:
         normalized_level = str(thinking_level).strip().lower()
         if normalized_level not in {"minimal", "low", "medium", "high"}:
@@ -119,6 +124,52 @@ def build_model_generation_config(
     # Gemini 2.5 uses a model-specific thinking budget rather than the Gemini 3
     # thinking-level contract. Omit it here and retain the model default.
     return config
+
+
+def google_response_schema(schema: dict[str, object]) -> dict[str, object]:
+    """Translate JSON Schema nullable unions to the Gemini Schema dialect.
+
+    ``response_json_schema`` accepts standard JSON Schema. The older
+    ``response_schema`` field is parsed by the SDK's ``Schema`` model and
+    requires a scalar enum value for ``type`` plus ``nullable=true``.
+    """
+
+    def convert(value: object) -> object:
+        if isinstance(value, list):
+            return [convert(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        converted: dict[str, object] = {}
+        for key, item in value.items():
+            if key == "type" and isinstance(item, list):
+                non_null = [
+                    str(candidate)
+                    for candidate in item
+                    if str(candidate).lower() != "null"
+                ]
+                nullable = len(non_null) != len(item)
+                if not non_null:
+                    raise GeminiRequestConfigurationError(
+                        "Gemini response schema has an unsupported type union."
+                    )
+                if len(non_null) == 1:
+                    converted[key] = non_null[0]
+                else:
+                    converted["anyOf"] = [
+                        {"type": candidate} for candidate in non_null
+                    ]
+                if nullable:
+                    converted["nullable"] = True
+                continue
+            converted[key] = convert(item)
+        return converted
+
+    result = convert(schema)
+    if not isinstance(result, dict):
+        raise GeminiRequestConfigurationError(
+            "Gemini response schema must be an object."
+        )
+    return result
 
 
 def validate_generation_config(config: dict[str, object]) -> None:
@@ -130,6 +181,15 @@ def validate_generation_config(config: dict[str, object]) -> None:
         raise GeminiRequestConfigurationError(
             "Gemini generation configuration was rejected locally."
         ) from exc
+
+
+def effective_configuration_category(model: str) -> str:
+    capabilities = model_capabilities(model)
+    if capabilities.family == "gemini_3":
+        return "json_schema_thinking_level"
+    if capabilities.family == "gemini_2_5":
+        return "response_schema_model_default_thinking"
+    return "unsupported"
 
 
 def parse_structured_response(
@@ -176,7 +236,11 @@ def parse_structured_response(
     return value
 
 
-def classify_gemini_exception(exc: Exception) -> str:
+def classify_gemini_exception(
+    exc: Exception,
+    *,
+    provider_request_attempted: bool | None = None,
+) -> str:
     if isinstance(exc, GeminiRequestConfigurationError):
         return "gemini_request_configuration_error"
     if isinstance(exc, StructuredResponseError):
@@ -187,6 +251,8 @@ def classify_gemini_exception(exc: Exception) -> str:
     code = str(getattr(exc, "code", "") or "").strip().upper()
     status = exception_status(exc)
     name = type(exc).__name__.lower()
+    if type(exc).__name__ in {"ValidationError", "SchemaError"}:
+        return "gemini_request_configuration_error"
     if status in {401, 403} or code in {
         "UNAUTHENTICATED",
         "PERMISSION_DENIED",
@@ -194,8 +260,11 @@ def classify_gemini_exception(exc: Exception) -> str:
         return "gemini_authentication_error"
     if status == 429 or code == "RESOURCE_EXHAUSTED":
         return "gemini_rate_limited"
-    if status in {408, 499, 504} or any(
+    if status in {408, 499} or (
+        status is None
+        and any(
         marker in name for marker in ("timeout", "deadline", "cancelled")
+        )
     ):
         return "gemini_timeout"
     if status == 404 or code == "NOT_FOUND":
@@ -207,13 +276,26 @@ def classify_gemini_exception(exc: Exception) -> str:
         return "gemini_request_configuration_error"
     if status is not None and status >= 500:
         return "gemini_server_error"
-    if code in {"INTERNAL", "UNAVAILABLE"} or any(
-        marker in name for marker in ("servererror", "internalserver")
-    ):
+    if code in {"INTERNAL", "UNAVAILABLE"}:
         return "gemini_server_error"
     if "clienterror" in name:
         return "gemini_request_configuration_error"
-    return "gemini_server_error"
+    if provider_request_attempted is False:
+        return "gemini_local_preflight_failed"
+    return "gemini_request_configuration_error"
+
+
+def sdk_exception_category(exc: Exception) -> str:
+    name = type(exc).__name__.lower()
+    if type(exc).__name__ in {"ValidationError", "SchemaError"}:
+        return "local_validation"
+    if any(marker in name for marker in ("timeout", "deadline")):
+        return "timeout"
+    if exception_status(exc) is not None:
+        return "provider_status"
+    if isinstance(exc, (TypeError, ValueError, AttributeError)):
+        return "local_configuration"
+    return "unknown"
 
 
 def exception_status(exc: Exception) -> int | None:

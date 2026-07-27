@@ -22,6 +22,7 @@ from app.qa.replay import (  # noqa: E402
     run_case,
 )
 from app.qa.staged import run_staged_batch  # noqa: E402
+from app.qa.parity import run_pipeline_parity  # noqa: E402
 from app.queue_worker import process_queue_job  # noqa: E402
 
 DEFAULT_REPORT = PROJECT_ROOT / ".worker-qa" / "latest" / "summary.json"
@@ -48,6 +49,10 @@ def main() -> int:
     )
     pipeline.add_argument("--report", type=Path, default=DEFAULT_REPORT)
 
+    parity = subparsers.add_parser("pipeline-parity")
+    parity.add_argument("--manifest", type=Path, required=True)
+    parity.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+
     live = subparsers.add_parser("live")
     live.add_argument("--manifest", type=Path, required=True)
     live.add_argument("--max-total-calls", type=int, required=True)
@@ -64,6 +69,8 @@ def main() -> int:
         report = {"mode": "offline_batch", **run_batch(load_manifest(args.manifest))}
     elif args.command == "pipeline":
         report = run_staged_batch(load_manifest(args.manifest))
+    elif args.command == "pipeline-parity":
+        report = run_pipeline_parity(load_manifest(args.manifest))
     else:
         report = run_live(args.manifest, args.max_total_calls)
     write_safe_report(args.report, report)

@@ -2,6 +2,13 @@
 
 ## Current Status
 
+- M23.W7C-R targeted checkpoint restores the staged analyzer to the shared
+  sequential Gemini invocation. The exact reproducible fallback defect was an
+  SDK `ValidationError` caused by nullable JSON-Schema unions passed through
+  `response_schema`; Gemini 2.5 now receives its own Schema representation.
+  Primary preflight failures now record safe exception/category metadata, and
+  local media remains available until analysis/fallback finishes.
+
 - M23.W7A-W7C separates the active queue into dispatch, ingest, Gemini analysis,
   and finalization services while retaining one combined Render process and a
   sequential rollback mode. In staged mode, local media is removed after the

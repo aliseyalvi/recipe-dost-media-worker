@@ -84,6 +84,13 @@ class InProcessStageTransport:
             self._finalize.join(),
         )
 
+    async def join_stage(self, stage: str) -> None:
+        await {
+            "ingest": self._ingest,
+            "analysis": self._analysis,
+            "finalize": self._finalize,
+        }[stage].join()
+
 
 class SupabaseStageTransport:
     """Reserved durable boundary; intentionally unavailable without a migration."""

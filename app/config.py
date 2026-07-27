@@ -373,6 +373,12 @@ class Settings(BaseSettings):
     worker_admission_retry_seconds: float = worker_config_value(
         "worker_admission_retry_seconds", 5.0
     )
+    worker_backpressure_log_interval_seconds: float = worker_config_value(
+        "worker_backpressure_log_interval_seconds", 30.0
+    )
+    worker_delete_temp_after_gemini_active: bool = worker_config_value(
+        "worker_delete_temp_after_gemini_active", False
+    )
     enable_unified_ytdlp_stream_extractor: bool = worker_config_value(
         "enable_unified_ytdlp_stream_extractor", False
     )
@@ -611,6 +617,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 "worker_dispatch_concurrency must remain 1 to preserve FIFO claims"
             )
+        if self.worker_gemini_analysis_concurrency > 2:
+            raise ValueError(
+                "worker_gemini_analysis_concurrency is limited to 2"
+            )
         queue_sizes = (
             self.worker_ingest_queue_size,
             self.worker_analysis_queue_size,
@@ -630,6 +640,14 @@ class Settings(BaseSettings):
             )
         if not 0.25 <= self.worker_admission_retry_seconds <= 60:
             raise ValueError("worker_admission_retry_seconds is outside safe bounds")
+        if not 1 <= self.worker_backpressure_log_interval_seconds <= 300:
+            raise ValueError(
+                "worker_backpressure_log_interval_seconds is outside safe bounds"
+            )
+        if self.worker_delete_temp_after_gemini_active and self.app_env != "development":
+            raise ValueError(
+                "worker_delete_temp_after_gemini_active is development-only"
+            )
         return self
 
     @field_validator("media_resolver_mode", mode="before")

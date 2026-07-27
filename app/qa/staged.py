@@ -78,7 +78,6 @@ async def run_staged_batch_async(
             envelope = DispatchEnvelope(
                 job_id=job.id,
                 platform=job.platform,
-                runtime_job=job,
             )
             await transport.enqueue_ingest(envelope)
             enqueued_order.append(case_by_id[job.id])
@@ -131,9 +130,7 @@ async def run_staged_batch_async(
                     serialized = envelope.model_dump(mode="json")
                     durable_job = repository.get_job(envelope.job_id)
                     assert durable_job is not None
-                    envelope = DispatchEnvelope.model_validate(serialized).model_copy(
-                        update={"runtime_job": durable_job}
-                    )
+                    envelope = DispatchEnvelope.model_validate(serialized)
                     restart_rematerialized = True
                 analysis = GeminiAnalysisResult(
                     dispatch=envelope,

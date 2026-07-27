@@ -8,10 +8,12 @@ from app.ai.gemini_reliability import (
     StructuredResponseError,
     build_model_generation_config,
     classify_gemini_exception,
+    google_response_schema,
     parse_structured_response,
 )
 from app.qa.replay import canonical_recipe, settings_for_case
 from app.queue_worker import (
+    build_gemini_generation_config,
     validate_and_normalize_canonical_recipe,
 )
 
@@ -76,6 +78,22 @@ class GeminiStructuredParserTests(unittest.TestCase):
 
 
 class GeminiCapabilityTests(unittest.TestCase):
+    def test_fallback_25_full_configuration_validates(self) -> None:
+        from google.genai import types
+
+        settings = settings_for_case()
+        config = build_gemini_generation_config(
+            settings,
+            model="gemini-2.5-flash",
+            structured_schema=True,
+        )
+        validated = types.GenerateContentConfig(**config)
+        self.assertIsNotNone(validated.response_schema)
+        self.assertIsNone(validated.thinking_config)
+        servings = config["response_schema"]["properties"]["servings"]  # type: ignore[index]
+        self.assertEqual(servings["nullable"], True)
+        self.assertIn("anyOf", servings)
+
     def test_model_specific_schema_and_thinking_configuration(self) -> None:
         schema = {"type": "object", "properties": {}}
         primary = build_model_generation_config(
@@ -98,6 +116,19 @@ class GeminiCapabilityTests(unittest.TestCase):
         self.assertEqual(primary["thinking_config"], {"thinking_level": "high"})
         self.assertIn("response_schema", fallback)
         self.assertNotIn("thinking_config", fallback)
+        nullable = {
+            "type": "object",
+            "properties": {"servings": {"type": ["string", "null"]}},
+        }
+        converted = google_response_schema(nullable)
+        self.assertEqual(
+            converted["properties"]["servings"],  # type: ignore[index]
+            {"type": "string", "nullable": True},
+        )
+
+        from google.genai import types
+
+        types.Schema.model_validate(converted)
 
     def test_unknown_model_rejected_before_request(self) -> None:
         with self.assertRaises(GeminiRequestConfigurationError):
@@ -121,12 +152,30 @@ class GeminiCapabilityTests(unittest.TestCase):
             403: "gemini_authentication_error",
             404: "gemini_file_unavailable",
             429: "gemini_rate_limited",
-            504: "gemini_timeout",
+            504: "gemini_server_error",
             500: "gemini_server_error",
         }
         for status, category in expected.items():
             with self.subTest(status=status):
                 self.assertEqual(classify_gemini_exception(Error(status)), category)
+
+        class ValidationError(Exception):
+            pass
+
+        self.assertEqual(
+            classify_gemini_exception(
+                ValidationError(),
+                provider_request_attempted=False,
+            ),
+            "gemini_request_configuration_error",
+        )
+        self.assertNotEqual(
+            classify_gemini_exception(
+                RuntimeError(),
+                provider_request_attempted=False,
+            ),
+            "gemini_server_error",
+        )
 
 
 if __name__ == "__main__":
