@@ -2,45 +2,6 @@
 
 Keep only commands that future turns may need.
 
-## M23.W7C-RP3 Gemini request boundary
-
-```bash
-PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py gemini-config
-# config/request shape ready; live canary unknown; no provider call
-```
-
-Targeted 26 tests and compile passed. Full discovery remained 216/217 because
-the pre-existing staged-default test expects `staged` while rollback defaults
-remain `sequential`; pip, batch, staged pipeline, parity, and diff checks passed.
-
-## M23.W7C-RP2 Gemini runtime parity
-
-```bash
-PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py gemini-config
-# primary/fallback ready; no mutation; provider_call_attempted=false
-```
-
-Targeted tests and compile passed. Full discovery ran 212 tests with one
-pre-existing staged-default mismatch; pip check, batch, staged pipeline,
-pipeline parity, and diff check passed.
-
-## M23.W7C-R analyzer parity checkpoint
-
-```bash
-PATH="$PWD/.venv/bin:$PATH" python -m unittest -v \
-  tests.test_pipeline_analysis_parity.PipelineAnalysisParityTests.test_primary_preflight_records_exact_safe_exception_category \
-  tests.test_gemini_reliability.GeminiCapabilityTests.test_fallback_25_full_configuration_validates \
-  tests.test_pipeline_analysis_parity.PipelineAnalysisParityTests.test_staged_known_success_starts_primary_31_request \
-  tests.test_pipeline_analysis_parity.PipelineAnalysisParityTests.test_per_job_call_budgets_are_independent
-# 4 passed
-
-PATH="$PWD/.venv/bin:$PATH" python -m compileall -q app scripts tests
-# passed on Python 3.12.13
-```
-
-No live provider, Gemini, Supabase, Sentry, Render, deployment, branch switch,
-main merge, mobile/schema/quota/direct-CDN/cookie/secret operation occurred.
-
 ## M23.W7A-W7C staged combined worker
 
 ```bash

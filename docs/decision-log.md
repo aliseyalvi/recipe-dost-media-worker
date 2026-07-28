@@ -1,28 +1,5 @@
 # Decision Log
 
-## 2026-07-27 — M23.W7C-RP3 Gemini request boundary
-
-- Gemini 3.1 primary requests again use `response_schema` plus explicit thinking,
-  with typed `Content`/`Part.from_uri` input and SDK-boundary failure evidence.
-- Offline startup validates the complete SDK request transformation; live
-  compatibility remains owner-gated and unverified.
-
-## 2026-07-27 — M23.W7C-RP2 Gemini runtime readiness
-
-- `google-genai==2.13.0` and `pydantic==2.13.4` are the shared local/Render
-  contract. Startup validates and fingerprints the full primary/fallback
-  configurations; invalid readiness keeps HTTP healthy and leaves queues unclaimed.
-
-## 2026-07-27 — M23.W7C-R analyzer parity checkpoint
-
-- Staged and sequential analysis use the same Gemini orchestration. Local media
-  remains through primary extraction, repair, and fallback, then cleanup runs.
-- Gemini 2.5 `response_schema` now converts nullable JSON-Schema unions to the
-  SDK Schema dialect. Primary preflight failures record safe exception/category
-  fields before fallback; per-job call budgets are independent.
-- Only four targeted regressions and Python 3.12 compile validation were run.
-  Broader W7C-R telemetry, ordering, QA, documentation, and soak work is deferred.
-
 ## 2026-07-27 — M23.W7A-W7C staged combined worker
 
 - One Render service now has sequential compatibility and bounded staged modes;

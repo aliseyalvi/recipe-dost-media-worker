@@ -15,7 +15,6 @@ from app.pipeline.dispatch import dispatcher_loop
 from app.pipeline.finalizer import finalizer_loop
 from app.pipeline.ingest import ingest_loop
 from app.pipeline.transport import InProcessStageTransport
-from app.pipeline.telemetry import PipelineTransitionRecorder
 
 logger = logging.getLogger("recipe_dost.worker")
 
@@ -34,7 +33,6 @@ class CombinedPipeline:
         )
         self.stop_event = asyncio.Event()
         self.active_counts = {"ingest": 0, "analysis": 0, "finalize": 0}
-        self.transitions = PipelineTransitionRecorder()
         self.tasks: list[asyncio.Task[None]] = []
         self._shutting_down = False
 
@@ -62,7 +60,6 @@ class CombinedPipeline:
                     stop_event=self.stop_event,
                     admission=ResourceAdmissionController(self.settings),
                     active_counts=self.active_counts,
-                    transitions=self.transitions,
                 ),
                 name="worker-dispatcher",
             ),
@@ -72,7 +69,6 @@ class CombinedPipeline:
                         settings=self.settings,
                         transport=self.transport,
                         active_counts=self.active_counts,
-                        transitions=self.transitions,
                     ),
                     name=f"worker-ingest-{index + 1}",
                 )
@@ -84,8 +80,6 @@ class CombinedPipeline:
                         settings=self.settings,
                         transport=self.transport,
                         active_counts=self.active_counts,
-                        transitions=self.transitions,
-                        worker_slot=index + 1,
                     ),
                     name=f"worker-analysis-{index + 1}",
                 )
@@ -99,7 +93,6 @@ class CombinedPipeline:
                         settings=self.settings,
                         transport=self.transport,
                         active_counts=self.active_counts,
-                        transitions=self.transitions,
                     ),
                     name=f"worker-finalize-{index + 1}",
                 )
