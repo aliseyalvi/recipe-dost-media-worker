@@ -2,22 +2,6 @@
 
 ## Current Status
 
-- M23.W7C-RP3 restores Gemini 3.1 `response_schema` with explicit thinking and
-  converts ACTIVE file URIs into typed SDK parts. Offline full request
-  transformation passes; the owner-gated live canary remains unrun.
-
-- M23.W7C-RP2 pins the Gemini/Pydantic runtime and validates the full production
-  primary/fallback schema at startup. Failed readiness keeps probes responsive
-  but does not start either queue consumer; schema mutation also fails preflight
-  before call accounting or fallback.
-
-- M23.W7C-R targeted checkpoint restores the staged analyzer to the shared
-  sequential Gemini invocation. The exact reproducible fallback defect was an
-  SDK `ValidationError` caused by nullable JSON-Schema unions passed through
-  `response_schema`; Gemini 2.5 now receives its own Schema representation.
-  Primary preflight failures now record safe exception/category metadata, and
-  local media remains available until analysis/fallback finishes.
-
 - M23.W7A-W7C separates the active queue into dispatch, ingest, Gemini analysis,
   and finalization services while retaining one combined Render process and a
   sequential rollback mode. In staged mode, local media is removed after the

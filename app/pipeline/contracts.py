@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas import GeminiRecipeResult
+from app.schemas import GeminiRecipeResult, MediaJobRecord
 
 PipelineStage = Literal["dispatch", "ingest", "analysis", "finalize", "cleanup"]
 MediaMode = Literal[
@@ -35,14 +35,6 @@ class SourceContext(BaseModel):
     title: str | None = None
     caption: str | None = None
     author: str | None = None
-    creator_display_name: str | None = None
-    creator_handle: str | None = None
-    text_language: str | None = None
-    music_title: str | None = None
-    music_author: str | None = None
-    duration_seconds: int | None = None
-    hashtags: list[str] = Field(default_factory=list)
-    on_screen_text: list[str] = Field(default_factory=list)
 
 
 class DispatchEnvelope(BaseModel):
@@ -56,6 +48,11 @@ class DispatchEnvelope(BaseModel):
             started_at=utc_now(),
         )
     )
+    # The durable job row is authoritative. This snapshot is an in-process
+    # optimization and is deliberately omitted from serialization.
+    runtime_job: MediaJobRecord | None = Field(default=None, exclude=True)
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class IngestedMedia(BaseModel):
@@ -64,11 +61,6 @@ class IngestedMedia(BaseModel):
     resolver_category: str
     media_mode: MediaMode = "unknown"
     output_mode: str
-    video_bytes_verified: bool = False
-    size_bytes: int | None = None
-    duration_seconds: int | None = None
-    width: int | None = None
-    height: int | None = None
     size_category: str
     duration_category: str
     dimension_category: str
@@ -77,6 +69,10 @@ class IngestedMedia(BaseModel):
     timestamps: StageTimestamps
     local_media_path: str | None = Field(default=None, exclude=True)
     thumbnail_url: str | None = Field(default=None, exclude=True)
+    runtime_extract_result: dict[str, object] | None = Field(
+        default=None,
+        exclude=True,
+    )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -96,12 +92,17 @@ class GeminiAnalysisResult(BaseModel):
     recipe: GeminiRecipeResult | None = None
     model: str | None = None
     used_fallback: bool = False
-    brief_text: str | None = None
     source_context: SourceContext
     cleanup_obligations: list[str] = Field(default_factory=list)
     timestamps: StageTimestamps
     local_media_path: str | None = Field(default=None, exclude=True)
     thumbnail_url: str | None = Field(default=None, exclude=True)
+    runtime_source_metadata: dict[str, object] | None = Field(
+        default=None,
+        exclude=True,
+    )
+    runtime_client: Any = Field(default=None, exclude=True)
+    terminal_job: MediaJobRecord | None = Field(default=None, exclude=True)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
