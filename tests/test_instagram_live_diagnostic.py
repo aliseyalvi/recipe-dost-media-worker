@@ -35,12 +35,16 @@ class InstagramLiveDiagnosticTests(unittest.TestCase):
             final_path.write_bytes(b"\x00\x00\x00\x18ftypmp42fixture")
             result = {
                 "temp_file_path": str(final_path),
+                "success": True,
                 "provider_status_class": "2xx",
                 "contract_complete": True,
                 "provider_media_mode": "split_av",
                 "instagram_candidate_summary": {
                     "raw_video_count": 1,
                     "raw_audio_count": 1,
+                    "normalized_video_count": 1,
+                    "normalized_audio_count": 1,
+                    "normalized_thumbnail_count": 1,
                     "unknown_role_count": 0,
                     "eligible_declared_video_count": 0,
                     "probe_required_video_count": 1,
@@ -89,6 +93,13 @@ class InstagramLiveDiagnosticTests(unittest.TestCase):
             self.assertNotIn(credential, rendered)
             self.assertNotIn(str(final_path), rendered)
             self.assertNotIn("provider.invalid", rendered)
+            self.assertIn("success=true", rendered)
+            self.assertIn("media_type=video", rendered)
+            self.assertIn("video_candidate_count=1", rendered)
+            self.assertIn("audio_candidate_count=1", rendered)
+            self.assertIn("thumbnail_candidate_count=1", rendered)
+            self.assertIn("duration_within_limit=true", rendered)
+            self.assertIn("size_within_limit=true", rendered)
             keys = {line.partition("=")[0] for line in rendered.splitlines()}
             self.assertEqual(keys, set(diagnostic.OUTPUT_KEYS))
 

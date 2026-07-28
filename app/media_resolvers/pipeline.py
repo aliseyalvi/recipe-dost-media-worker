@@ -96,12 +96,17 @@ def resolve_external_media(
             )
             break
         base_event = {
-            "platform": platform,
             "resolver_adapter": adapter_id,
             "route_audience": audience_route,
             "provider_attempt": attempt,
-            "fallback_used": fallback_used,
         }
+        if adapter_id != "rapidapi_instagram_unified_v1":
+            base_event.update(
+                {
+                    "platform": platform,
+                    "fallback_used": fallback_used,
+                }
+            )
         repository.insert_event(
             media_job_id,
             event_type="external_resolver_started",
@@ -113,6 +118,7 @@ def resolve_external_media(
         job_directory: Path | None = None
         tiktok_diagnostics_emitted = False
         instagram_diagnostics_emitted = False
+        instagram_contract_diagnostics_emitted = False
         resolution = None
         eligible_videos = []
         try:
@@ -124,24 +130,47 @@ def resolve_external_media(
                     base_event,
                     resolution.contract_diagnostic,
                 )
+            if (
+                platform == "instagram"
+                and adapter_id == "rapidapi_instagram_unified_v1"
+            ):
+                _emit_instagram_contract_diagnostic(
+                    repository,
+                    media_job_id,
+                    base_event,
+                    resolution.contract_diagnostic,
+                )
+                instagram_contract_diagnostics_emitted = True
+            completion_metadata = (
+                {
+                    **base_event,
+                    "provider_status_class": str(
+                        resolution.contract_diagnostic.get(
+                            "provider_status_class"
+                        )
+                        or "unknown"
+                    ),
+                    "latency_bucket": _latency_bucket(started),
+                }
+                if adapter_id == "rapidapi_instagram_unified_v1"
+                else {
+                    **base_event,
+                    "media_mode": resolution.media_mode,
+                    "external_resolution_latency_bucket": _latency_bucket(
+                        started
+                    ),
+                    "candidate_count": len(resolution.candidates),
+                }
+            )
             repository.insert_event(
                 media_job_id,
                 event_type="external_resolver_completed",
                 message="External media resolver completed.",
-                metadata={
-                    **base_event,
-                    "media_mode": resolution.media_mode,
-                    "external_resolution_latency_bucket": _latency_bucket(started),
-                    "candidate_count": len(resolution.candidates),
-                },
+                metadata=completion_metadata,
             )
             logger.info(
                 "external_resolver_completed",
-                extra={
-                    **base_event,
-                    "media_mode": resolution.media_mode,
-                    "latency_bucket": _latency_bucket(started),
-                },
+                extra=completion_metadata,
             )
             provider_circuit_breaker.record_success(adapter_id)
             suffixes = tuple(
@@ -170,6 +199,7 @@ def resolve_external_media(
                     repository,
                     media_job_id,
                     instagram_summary,
+                    unified=adapter_id == "rapidapi_instagram_unified_v1",
                 )
                 instagram_diagnostics_emitted = True
             if platform == "tiktok":
@@ -606,9 +636,14 @@ def resolve_external_media(
         except ResolverError as exc:
             exc.adapter_id = adapter_id
             exc.provider_attempt = attempt
-            contract_diagnostic = (
-                resolution.contract_diagnostic if resolution is not None else {}
-            )
+            contract_diagnostic = {
+                **getattr(exc, "contract_diagnostic", {}),
+                **(
+                    resolution.contract_diagnostic
+                    if resolution is not None
+                    else {}
+                ),
+            }
             exc.diagnostic_state.update(
                 {
                     "provider_call_attempted": bool(
@@ -689,16 +724,38 @@ def resolve_external_media(
                         ),
                     )
             if platform == "instagram" and not instagram_diagnostics_emitted:
+                if (
+                    adapter_id == "rapidapi_instagram_unified_v1"
+                    and not instagram_contract_diagnostics_emitted
+                ):
+                    _emit_instagram_contract_diagnostic(
+                        repository,
+                        media_job_id,
+                        base_event,
+                        contract_diagnostic,
+                    )
                 _emit_instagram_candidate_summary(
                     repository,
                     media_job_id,
-                    getattr(exc, "contract_diagnostic", {}).get(
-                        "instagram_candidate_normalization_summary", {}
+                    (
+                        contract_diagnostic.get(
+                            "instagram_candidate_normalization_summary", {}
+                        )
+                        if adapter_id != "rapidapi_instagram_unified_v1"
+                        else contract_diagnostic.get(
+                            "instagram_candidate_normalization_summary",
+                            contract_diagnostic,
+                        )
                     ),
+                    unified=adapter_id == "rapidapi_instagram_unified_v1",
                 )
             if exc.code in {
                 "resolver_rate_limited",
                 "resolver_temporarily_unavailable",
+                "provider_rate_limited",
+                "provider_server_error",
+                "provider_authentication_failed",
+                "provider_contract_invalid",
                 "media_download_failed",
                 "media_validation_failed",
                 "media_merge_failed",
@@ -707,35 +764,33 @@ def resolve_external_media(
             }:
                 provider_circuit_breaker.record_failure(
                     adapter_id,
-                    immediate=exc.code == "resolver_configuration_error",
+                    immediate=exc.code
+                    in {
+                        "resolver_configuration_error",
+                        "provider_authentication_failed",
+                    },
                 )
             cleanup_job_directory(job_directory)
+            failure_metadata = {
+                **base_event,
+                "normalized_error_code": exc.code,
+                "failure_stage": exc.failure_stage
+                or "final_media_validation",
+                "provider_status_class": exc.diagnostic_state.get(
+                    "provider_status_class", "unknown"
+                ),
+            }
+            if adapter_id != "rapidapi_instagram_unified_v1":
+                failure_metadata["terminal"] = not (
+                    exc.fallback_allowed and attempt < len(chain[:2])
+                )
             repository.insert_event(
                 media_job_id,
                 event_type="external_resolver_failed",
                 message="External media resolver failed.",
-                metadata={
-                    **base_event,
-                    "normalized_error_code": exc.code,
-                    "failure_stage": exc.failure_stage or "final_media_validation",
-                    "provider_status_class": exc.diagnostic_state.get(
-                        "provider_status_class", "unknown"
-                    ),
-                    "terminal": not (exc.fallback_allowed and attempt < len(chain[:2])),
-                },
+                metadata=failure_metadata,
             )
-            logger.warning(
-                "external_resolver_failed",
-                extra={
-                    **base_event,
-                    "error_code": exc.code,
-                    "failure_stage": exc.failure_stage or "final_media_validation",
-                    "provider_status_class": exc.diagnostic_state.get(
-                        "provider_status_class", "unknown"
-                    ),
-                    "terminal": not (exc.fallback_allowed and attempt < len(chain[:2])),
-                },
-            )
+            logger.warning("external_resolver_failed", extra=failure_metadata)
             if not exc.fallback_allowed or attempt >= len(chain[:2]):
                 break
         except BaseException:
@@ -768,10 +823,67 @@ def _emit_tiktok_contract_diagnostic(
     )
 
 
+def _emit_instagram_contract_diagnostic(
+    repository: EventRepository,
+    media_job_id: UUID,
+    base_event: dict[str, object],
+    diagnostic: dict[str, object],
+) -> None:
+    if not diagnostic:
+        return
+    metadata = {
+        "resolver_adapter": base_event["resolver_adapter"],
+        "route_audience": base_event["route_audience"],
+        "provider_attempt": base_event["provider_attempt"],
+        "provider_status_class": str(
+            diagnostic.get("provider_status_class") or "unknown"
+        ),
+        "json_parsed": bool(diagnostic.get("json_parsed")),
+        "success_present": bool(diagnostic.get("success_present")),
+        "success_value": (
+            diagnostic.get("success_value")
+            if isinstance(diagnostic.get("success_value"), bool)
+            else None
+        ),
+        "media_type": str(diagnostic.get("media_type") or "unknown"),
+        "data_present": bool(diagnostic.get("data_present")),
+        "content_present": bool(diagnostic.get("content_present")),
+        "media_url_present": bool(diagnostic.get("media_url_present")),
+        "thumbnail_url_present": bool(
+            diagnostic.get("thumbnail_url_present")
+        ),
+        "audio_object_present": bool(diagnostic.get("audio_object_present")),
+        "audio_url_present": bool(diagnostic.get("audio_url_present")),
+        "audio_downloadable": (
+            diagnostic.get("audio_downloadable")
+            if isinstance(diagnostic.get("audio_downloadable"), bool)
+            else None
+        ),
+        "normalized_video_count": max(
+            0, int(diagnostic.get("normalized_video_count") or 0)
+        ),
+        "normalized_audio_count": max(
+            0, int(diagnostic.get("normalized_audio_count") or 0)
+        ),
+        "normalized_thumbnail_count": max(
+            0, int(diagnostic.get("normalized_thumbnail_count") or 0)
+        ),
+    }
+    repository.insert_event(
+        media_job_id,
+        event_type="instagram_unified_contract_inspected",
+        message="Instagram Unified v1 contract shape inspected.",
+        metadata=metadata,
+    )
+    logger.info("instagram_unified_contract_inspected", extra=metadata)
+
+
 def _emit_instagram_candidate_summary(
     repository: EventRepository,
     media_job_id: UUID,
     diagnostic: object,
+    *,
+    unified: bool = False,
 ) -> None:
     if not isinstance(diagnostic, dict):
         return
@@ -789,28 +901,38 @@ def _emit_instagram_candidate_summary(
     }
     raw_rejections = diagnostic.get("rejection_counts")
     rejections = raw_rejections if isinstance(raw_rejections, dict) else {}
-    metadata = {
-        key: max(0, int(diagnostic.get(key) or 0))
-        for key in (
-            "raw_candidate_count",
-            "raw_video_count",
-            "raw_audio_count",
-            "unknown_role_count",
-            "declared_codec_present_count",
-            "declared_container_present_count",
-            "declared_mime_present_count",
-            "size_present_count",
-            "dimensions_present_count",
-            "eligible_declared_video_count",
-            "probe_required_video_count",
-            "eligible_audio_count",
-        )
-    }
-    metadata["rejection_counts"] = {
-        str(key): max(0, int(value))
-        for key, value in rejections.items()
-        if key in allowed_rejections
-    }
+    if unified:
+        metadata = {
+            key: max(0, int(diagnostic.get(key) or 0))
+            for key in (
+                "normalized_video_count",
+                "normalized_audio_count",
+                "normalized_thumbnail_count",
+            )
+        }
+    else:
+        metadata = {
+            key: max(0, int(diagnostic.get(key) or 0))
+            for key in (
+                "raw_candidate_count",
+                "raw_video_count",
+                "raw_audio_count",
+                "unknown_role_count",
+                "declared_codec_present_count",
+                "declared_container_present_count",
+                "declared_mime_present_count",
+                "size_present_count",
+                "dimensions_present_count",
+                "eligible_declared_video_count",
+                "probe_required_video_count",
+                "eligible_audio_count",
+            )
+        }
+        metadata["rejection_counts"] = {
+            str(key): max(0, int(value))
+            for key, value in rejections.items()
+            if key in allowed_rejections
+        }
     repository.insert_event(
         media_job_id,
         event_type="instagram_candidate_normalization_summary",

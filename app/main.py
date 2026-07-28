@@ -68,6 +68,7 @@ class JsonFormatter(logging.Formatter):
             "from_resolution",
             "to_resolution",
             "error_code",
+            "normalized_error_code",
             "source_platform",
             "attempts",
             "duration_bucket",
@@ -100,7 +101,17 @@ class JsonFormatter(logging.Formatter):
             "success_present",
             "success_type",
             "success_value",
+            "media_type",
             "data_present",
+            "content_present",
+            "media_url_present",
+            "thumbnail_url_present",
+            "audio_object_present",
+            "audio_url_present",
+            "audio_downloadable",
+            "normalized_video_count",
+            "normalized_audio_count",
+            "normalized_thumbnail_count",
             "data_type",
             "item_info_present",
             "item_struct_present",
@@ -450,8 +461,30 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
         "cookie_media_fallback_enabled": settings.cookie_media_fallback_enabled,
         "youtube_direct_gemini_enabled": settings.youtube_direct_gemini_enabled,
         "external_provider_credentials_configured": {
-            "rapidapi_instagram_reels13": settings.instagram_rapidapi_key is not None,
+            "rapidapi_instagram_unified_v1": (
+                settings.instagram_rapidapi_key is not None
+            ),
             "akng_tiktok": settings.tiktok_akng_access_token is not None,
+        },
+        "instagram_external_resolver": {
+            "adapter_identifier": (
+                settings.instagram_resolver_chain[0]
+                if len(settings.instagram_resolver_chain) == 1
+                else "disabled"
+            ),
+            "enabled": (
+                settings.external_resolver_enabled
+                and settings.instagram_resolver_chain
+                == ["rapidapi_instagram_unified_v1"]
+            ),
+            "endpoint_configured": bool(
+                settings.instagram_rapidapi_host.strip()
+                and settings.instagram_rapidapi_base_url.strip()
+            ),
+            "credential_present": settings.instagram_rapidapi_key is not None,
+            "approved_host_suffix_categories": _instagram_host_categories(
+                settings.instagram_media_host_suffixes
+            ),
         },
         "min_video_height": settings.min_video_height,
         "max_video_height": settings.max_video_height,
@@ -471,6 +504,22 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
             ),
         },
     }
+
+
+def _instagram_host_categories(suffixes: list[str]) -> list[str]:
+    categories: list[str] = []
+    for suffix in suffixes:
+        normalized = suffix.lower().lstrip(".")
+        category = (
+            "meta_fbcdn"
+            if normalized == "fbcdn.net"
+            else "instagram_cdn"
+            if normalized == "cdninstagram.com"
+            else "other_approved"
+        )
+        if category not in categories:
+            categories.append(category)
+    return categories
 
 
 def safe_config_source_summary(settings: Settings) -> dict[str, object]:

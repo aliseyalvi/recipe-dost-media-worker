@@ -3,11 +3,15 @@ from __future__ import annotations
 import json
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from uuid import UUID
 
 from app.media_resolvers.contracts import MediaResolutionRequest, ResolverError
 from app.media_resolvers.instagram_reels13 import InstagramReels13Resolver
+from app.media_resolvers.instagram_unified_v1 import InstagramUnifiedV1Resolver
+from app.media_resolvers.pipeline import _emit_instagram_contract_diagnostic
 from app.media_resolvers.selection import (
+    declared_video_compatibility,
     evaluate_video_candidates,
     rank_video_candidates,
     select_video_candidate,
@@ -41,6 +45,13 @@ class SequencedClient(FakeClient):
 
 def fixture(adapter: str, name: str) -> dict[str, object]:
     return json.loads((FIXTURES / adapter / name).read_text(encoding="utf-8"))
+
+
+def unified_fixture(name: str) -> dict[str, object]:
+    values = fixture("rapidapi_instagram_unified_v1", "contracts.json")
+    value = values[name]
+    assert isinstance(value, dict)
+    return value
 
 
 def request(platform: str) -> MediaResolutionRequest:
@@ -99,6 +110,290 @@ class InstagramAdapterTests(unittest.TestCase):
         with self.assertRaises(ResolverError) as invalid:
             self.resolver("invalid_url.json").resolve(request("instagram"))
         self.assertEqual(invalid.exception.code, "media_unavailable")
+
+
+class InstagramUnifiedV1AdapterTests(unittest.TestCase):
+    def resolver(
+        self,
+        name: str,
+        *,
+        client: FakeClient | None = None,
+    ) -> InstagramUnifiedV1Resolver:
+        return InstagramUnifiedV1Resolver(
+            client=client or FakeClient(unified_fixture(name)),  # type: ignore[arg-type]
+            base_url="https://provider.invalid",
+            rapidapi_host="provider.invalid",
+            rapidapi_key="fixture-secret",
+            allowed_media_host_suffixes=("fbcdn.net", "cdninstagram.com"),
+        )
+
+    def test_video_audio_thumbnail_and_title_normalize_without_declarations(
+        self,
+    ) -> None:
+        client = FakeClient(unified_fixture("valid_split_av"))
+        result = self.resolver("valid_split_av", client=client).resolve(
+            request("instagram")
+        )
+        videos = [
+            candidate
+            for candidate in result.candidates
+            if candidate.media_type == "video"
+        ]
+        audios = [
+            candidate
+            for candidate in result.candidates
+            if candidate.media_type == "audio"
+        ]
+        self.assertEqual(len(videos), 1)
+        self.assertEqual(len(audios), 1)
+        self.assertEqual(result.media_mode, "split_av")
+        self.assertEqual(result.metadata.title, "Fixture recipe")
+        self.assertIsNotNone(result.metadata.thumbnail_url)
+        self.assertIsNone(result.metadata.author)
+        self.assertIsNone(videos[0].codec)
+        self.assertIsNone(videos[0].mime_type)
+        self.assertIsNone(videos[0].width)
+        self.assertIsNone(videos[0].height)
+        self.assertIsNone(videos[0].size_bytes)
+        self.assertEqual(videos[0].container, "mp4")
+        self.assertEqual(
+            declared_video_compatibility(videos[0]),
+            "probe_required",
+        )
+        suffixless_payload = unified_fixture("valid_video_only")
+        suffixless_payload["data"]["content"]["media_url"] = (
+            "https://media.fbcdn.net/fixture/video"
+        )
+        suffixless_result = InstagramUnifiedV1Resolver(
+            client=FakeClient(suffixless_payload),  # type: ignore[arg-type]
+            base_url="https://provider.invalid",
+            rapidapi_host="provider.invalid",
+            rapidapi_key="fixture-secret",
+            allowed_media_host_suffixes=("fbcdn.net", "cdninstagram.com"),
+        ).resolve(request("instagram"))
+        self.assertIsNone(suffixless_result.candidates[0].container)
+        self.assertEqual(
+            declared_video_compatibility(suffixless_result.candidates[0]),
+            "probe_required",
+        )
+        self.assertEqual(client.kwargs["path"], "/unified/index")
+        self.assertEqual(
+            client.kwargs["params"],
+            {"url": request("instagram").canonical_source_url},
+        )
+
+        safe = json.dumps(
+            {
+                "resolution": result.safe_to_dict(),
+                "diagnostic": result.contract_diagnostic,
+            }
+        )
+        self.assertNotIn("cdninstagram.com", safe)
+        self.assertNotIn("fixture-secret", safe)
+        self.assertNotIn("Fixture recipe", safe)
+        self.assertNotIn("shortcode", safe)
+        self.assertNotIn("provider message", safe)
+
+        repository = MagicMock()
+        _emit_instagram_contract_diagnostic(
+            repository,
+            UUID("00000000-0000-0000-0000-000000000123"),
+            {
+                "resolver_adapter": "rapidapi_instagram_unified_v1",
+                "route_audience": "development_test",
+                "provider_attempt": 1,
+            },
+            {
+                **result.contract_diagnostic,
+                "source_url": "https://must-not-appear.invalid/source",
+                "provider_body": {"media_url": "https://must-not-appear.invalid/media"},
+                "api_key": "must-not-appear-secret",
+            },
+        )
+        event_metadata = repository.insert_event.call_args.kwargs["metadata"]
+        self.assertEqual(
+            set(event_metadata),
+            {
+                "resolver_adapter",
+                "route_audience",
+                "provider_attempt",
+                "provider_status_class",
+                "json_parsed",
+                "success_present",
+                "success_value",
+                "media_type",
+                "data_present",
+                "content_present",
+                "media_url_present",
+                "thumbnail_url_present",
+                "audio_object_present",
+                "audio_url_present",
+                "audio_downloadable",
+                "normalized_video_count",
+                "normalized_audio_count",
+                "normalized_thumbnail_count",
+            },
+        )
+        rendered_event = json.dumps(event_metadata)
+        self.assertNotIn("must-not-appear", rendered_event)
+        self.assertNotIn("fixture-secret", rendered_event)
+
+        signed_payload = unified_fixture("valid_split_av")
+        signed_content = signed_payload["data"]["content"]
+        signed_content["media_url"] += "?signature=memory-only"
+        signed_content["audio"]["audio_url"] += "?signature=memory-only"
+        signed_result = InstagramUnifiedV1Resolver(
+            client=FakeClient(signed_payload),  # type: ignore[arg-type]
+            base_url="https://provider.invalid",
+            rapidapi_host="provider.invalid",
+            rapidapi_key="fixture-secret",
+            allowed_media_host_suffixes=("fbcdn.net", "cdninstagram.com"),
+        ).resolve(request("instagram"))
+        self.assertNotIn(
+            "signature=memory-only",
+            json.dumps(signed_result.safe_to_dict()),
+        )
+
+    def test_video_without_separate_audio_still_proceeds_to_probe(self) -> None:
+        result = self.resolver("valid_video_only").resolve(request("instagram"))
+        self.assertEqual(result.media_mode, "progressive")
+        self.assertEqual(
+            [candidate.media_type for candidate in result.candidates],
+            ["video"],
+        )
+        self.assertEqual(
+            result.contract_diagnostic["normalized_audio_count"],
+            0,
+        )
+        self.assertEqual(
+            declared_video_compatibility(result.candidates[0]),
+            "probe_required",
+        )
+
+    def test_null_non_https_and_disallowed_media_urls_are_contract_invalid(
+        self,
+    ) -> None:
+        for name in (
+            "null_media_url",
+            "non_https_media_url",
+            "disallowed_media_hostname",
+        ):
+            with self.subTest(name=name), self.assertRaises(
+                ResolverError
+            ) as captured:
+                self.resolver(name).resolve(request("instagram"))
+            self.assertEqual(
+                captured.exception.code,
+                "provider_contract_invalid",
+            )
+            self.assertEqual(
+                captured.exception.failure_stage,
+                "provider_contract",
+            )
+
+    def test_provider_errors_map_without_exposing_provider_message(self) -> None:
+        cases = {
+            "private_url": (
+                "provider_media_unavailable",
+                "This Instagram post is private or unavailable.",
+            ),
+            "url_processing_error": (
+                "provider_processing_failed",
+                "Instagram media could not be processed.",
+            ),
+            "parsing_error": (
+                "provider_contract_invalid",
+                "The Instagram resolver returned an invalid response.",
+            ),
+        }
+        for name, expected in cases.items():
+            with self.subTest(name=name), self.assertRaises(
+                ResolverError
+            ) as captured:
+                self.resolver(name).resolve(request("instagram"))
+            self.assertEqual(
+                (captured.exception.code, captured.exception.safe_message),
+                expected,
+            )
+            self.assertNotIn(
+                "fixture provider message",
+                captured.exception.safe_message,
+            )
+
+    def test_photo_and_sidecar_have_exact_safe_policy_messages(self) -> None:
+        cases = {
+            "photo": (
+                "Instagram photo posts are not supported for AI video recipes."
+            ),
+            "sidecar": "Instagram carousel posts are not supported yet.",
+        }
+        for name, message in cases.items():
+            with self.subTest(name=name), self.assertRaises(
+                ResolverError
+            ) as captured:
+                self.resolver(name).resolve(request("instagram"))
+            self.assertEqual(captured.exception.code, "unsupported_media")
+            self.assertEqual(captured.exception.safe_message, message)
+
+    def test_malformed_contract_types_are_rejected(self) -> None:
+        for name in (
+            "malformed_success_type",
+            "malformed_data_type",
+            "malformed_content_type",
+        ):
+            with self.subTest(name=name), self.assertRaises(
+                ResolverError
+            ) as captured:
+                self.resolver(name).resolve(request("instagram"))
+            self.assertEqual(
+                captured.exception.code,
+                "provider_contract_invalid",
+            )
+
+    def test_http_status_errors_are_provider_specific(self) -> None:
+        cases = (
+            (
+                "http_401",
+                ResolverError(
+                    "resolver_configuration_error",
+                    "safe",
+                    http_status_class="4xx",
+                ),
+                "provider_authentication_failed",
+            ),
+            (
+                "http_429",
+                ResolverError(
+                    "resolver_rate_limited",
+                    "safe",
+                    http_status_class="4xx",
+                ),
+                "provider_rate_limited",
+            ),
+            (
+                "http_500",
+                ResolverError(
+                    "resolver_temporarily_unavailable",
+                    "safe",
+                    http_status_class="5xx",
+                ),
+                "provider_server_error",
+            ),
+        )
+        for name, error, code in cases:
+            self.assertIn(
+                unified_fixture(name)["_http_status"],
+                {401, 429, 500},
+            )
+            client = FakeClient({})
+            client.get_json = lambda **_kwargs: (_ for _ in ()).throw(error)  # type: ignore[method-assign]
+            with self.subTest(code=code), self.assertRaises(
+                ResolverError
+            ) as captured:
+                self.resolver(name, client=client).resolve(
+                    request("instagram")
+                )
+            self.assertEqual(captured.exception.code, code)
 
 
 class TikTokAdapterTests(unittest.TestCase):

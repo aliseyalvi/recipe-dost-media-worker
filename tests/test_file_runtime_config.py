@@ -12,6 +12,7 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from app.config import Settings, validate_external_resolver_runtime_config
+from app.main import safe_config_summary
 from app.runtime_config import (
     PROJECT_ROOT,
     clear_worker_config_cache,
@@ -67,10 +68,42 @@ class FileRuntimeConfigTests(unittest.TestCase):
             report = worker_config_report("development")
         self.assertEqual(settings.media_resolver_mode, "external")
         self.assertEqual(settings.external_media_resolver_audience, "all_authorized_ai")
-        self.assertEqual(settings.instagram_resolver_chain, ["rapidapi_instagram_reels13"])
+        self.assertEqual(
+            settings.instagram_resolver_chain,
+            ["rapidapi_instagram_unified_v1"],
+        )
+        self.assertFalse(settings.instagram_reels13_enabled)
         self.assertEqual(settings.tiktok_resolver_chain, ["akng_tiktok"])
         self.assertFalse(settings.cookie_media_fallback_enabled)
         self.assertTrue(settings.youtube_direct_gemini_enabled)
+        safe_instagram = safe_config_summary(settings)[
+            "instagram_external_resolver"
+        ]
+        self.assertEqual(
+            set(safe_instagram),
+            {
+                "adapter_identifier",
+                "enabled",
+                "endpoint_configured",
+                "credential_present",
+                "approved_host_suffix_categories",
+            },
+        )
+        self.assertEqual(
+            safe_instagram["adapter_identifier"],
+            "rapidapi_instagram_unified_v1",
+        )
+        self.assertTrue(safe_instagram["enabled"])
+        self.assertTrue(safe_instagram["endpoint_configured"])
+        self.assertTrue(safe_instagram["credential_present"])
+        self.assertEqual(
+            safe_instagram["approved_host_suffix_categories"],
+            ["meta_fbcdn", "instagram_cdn"],
+        )
+        self.assertNotIn(
+            settings.instagram_rapidapi_host,
+            json.dumps(safe_instagram),
+        )
         self.assertEqual(
             report["selected_config_display_path"],
             "config/worker.development.json",
@@ -159,12 +192,12 @@ class FileRuntimeConfigTests(unittest.TestCase):
         ):
             self.assertEqual(
                 build_settings().instagram_resolver_chain,
-                ["rapidapi_instagram_reels13"],
+                ["rapidapi_instagram_unified_v1"],
             )
         with self.copied_config("development") as root:
             path = root / "worker.development.json"
             values = json.loads(path.read_text(encoding="utf-8"))
-            values["INSTAGRAM_RESOLVER_CHAIN"] = "rapidapi_instagram_reels13"
+            values["INSTAGRAM_RESOLVER_CHAIN"] = "rapidapi_instagram_unified_v1"
             path.write_text(json.dumps(values), encoding="utf-8")
             with self.isolated_environment(
                 APP_ENV="development",
@@ -176,11 +209,14 @@ class FileRuntimeConfigTests(unittest.TestCase):
     def test_comma_environment_override_normalizes(self) -> None:
         with self.isolated_environment(
             APP_ENV="development",
-            INSTAGRAM_RESOLVER_CHAIN="rapidapi_instagram_reels13",
+            INSTAGRAM_RESOLVER_CHAIN="rapidapi_instagram_unified_v1",
             TIKTOK_RESOLVER_CHAIN="akng_tiktok",
         ):
             settings = build_settings()
-        self.assertEqual(settings.instagram_resolver_chain, ["rapidapi_instagram_reels13"])
+        self.assertEqual(
+            settings.instagram_resolver_chain,
+            ["rapidapi_instagram_unified_v1"],
+        )
         self.assertEqual(settings.tiktok_resolver_chain, ["akng_tiktok"])
 
     def test_blank_environment_override_preserves_file_value(self) -> None:
@@ -190,7 +226,10 @@ class FileRuntimeConfigTests(unittest.TestCase):
             TIKTOK_RESOLVER_CHAIN="",
         ):
             settings = build_settings()
-        self.assertEqual(settings.instagram_resolver_chain, ["rapidapi_instagram_reels13"])
+        self.assertEqual(
+            settings.instagram_resolver_chain,
+            ["rapidapi_instagram_unified_v1"],
+        )
         self.assertEqual(settings.tiktok_resolver_chain, ["akng_tiktok"])
 
     def test_unknown_adapter_fails_closed(self) -> None:
@@ -233,7 +272,10 @@ class FileRuntimeConfigTests(unittest.TestCase):
             validate_external_resolver_runtime_config(settings)
         self.assertEqual(settings.app_env, "development")
         self.assertEqual(report["environment_selection_source"], "RENDER_GIT_BRANCH")
-        self.assertEqual(settings.instagram_resolver_chain, ["rapidapi_instagram_reels13"])
+        self.assertEqual(
+            settings.instagram_resolver_chain,
+            ["rapidapi_instagram_unified_v1"],
+        )
 
         with patch.dict(
             os.environ,
@@ -250,6 +292,19 @@ class FileRuntimeConfigTests(unittest.TestCase):
             "RENDER_GIT_BRANCH",
         )
         self.assertEqual(production.external_media_resolver_audience, "disabled")
+
+    def test_deprecated_reels13_cannot_receive_external_traffic_by_default(
+        self,
+    ) -> None:
+        with self.isolated_environment(
+            APP_ENV="development",
+            INSTAGRAM_RESOLVER_CHAIN="rapidapi_instagram_reels13",
+            INSTAGRAM_RAPIDAPI_KEY="dummy-instagram",
+        ):
+            active = build_settings()
+            self.assertFalse(active.instagram_reels13_enabled)
+            with self.assertRaisesRegex(ValueError, "Reels13.*disabled"):
+                validate_external_resolver_runtime_config(active)
 
 
 if __name__ == "__main__":

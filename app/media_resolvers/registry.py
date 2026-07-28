@@ -4,8 +4,12 @@ from app.config import Settings
 from app.media_resolvers.contracts import MediaResolver, ResolverError
 from app.media_resolvers.http_client import SafeProviderHttpClient
 from app.media_resolvers.instagram_reels13 import (
-    ADAPTER_ID as INSTAGRAM_ADAPTER_ID,
+    ADAPTER_ID as INSTAGRAM_REELS13_ADAPTER_ID,
     InstagramReels13Resolver,
+)
+from app.media_resolvers.instagram_unified_v1 import (
+    ADAPTER_ID as INSTAGRAM_UNIFIED_V1_ADAPTER_ID,
+    InstagramUnifiedV1Resolver,
 )
 from app.media_resolvers.tiktok_akng import (
     ADAPTER_ID as TIKTOK_ADAPTER_ID,
@@ -14,7 +18,11 @@ from app.media_resolvers.tiktok_akng import (
 
 
 def registered_adapter_ids() -> set[str]:
-    return {INSTAGRAM_ADAPTER_ID, TIKTOK_ADAPTER_ID}
+    return {
+        INSTAGRAM_REELS13_ADAPTER_ID,
+        INSTAGRAM_UNIFIED_V1_ADAPTER_ID,
+        TIKTOK_ADAPTER_ID,
+    }
 
 
 def build_resolver(adapter_id: str, settings: Settings) -> MediaResolver:
@@ -22,7 +30,22 @@ def build_resolver(adapter_id: str, settings: Settings) -> MediaResolver:
         timeout_seconds=settings.external_provider_timeout_seconds,
         response_max_bytes=settings.external_provider_response_max_bytes,
     )
-    if adapter_id == INSTAGRAM_ADAPTER_ID:
+    if adapter_id == INSTAGRAM_UNIFIED_V1_ADAPTER_ID:
+        if settings.instagram_rapidapi_key is None:
+            raise _configuration_error()
+        return InstagramUnifiedV1Resolver(
+            client=client,
+            base_url=settings.instagram_rapidapi_base_url,
+            rapidapi_host=settings.instagram_rapidapi_host,
+            rapidapi_key=settings.instagram_rapidapi_key.get_secret_value(),
+            allowed_media_host_suffixes=tuple(
+                settings.instagram_media_host_suffixes
+            ),
+        )
+    if adapter_id == INSTAGRAM_REELS13_ADAPTER_ID:
+        # Deprecated and intentionally excluded from current/default routing.
+        if not settings.instagram_reels13_enabled:
+            raise _configuration_error()
         if settings.instagram_rapidapi_key is None:
             raise _configuration_error()
         return InstagramReels13Resolver(

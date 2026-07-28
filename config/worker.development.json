@@ -2,13 +2,14 @@
   "LOG_LEVEL": "debug",
   "MEDIA_RESOLVER_MODE": "external",
   "EXTERNAL_MEDIA_RESOLVER_AUDIENCE": "all_authorized_ai",
-  "INSTAGRAM_RESOLVER_CHAIN": ["rapidapi_instagram_reels13"],
+  "INSTAGRAM_RESOLVER_CHAIN": ["rapidapi_instagram_unified_v1"],
   "TIKTOK_RESOLVER_CHAIN": ["akng_tiktok"],
   "COOKIE_MEDIA_FALLBACK_ENABLED": false,
   "YOUTUBE_DIRECT_GEMINI_ENABLED": true,
-  "INSTAGRAM_RAPIDAPI_HOST": "instagram-reels-downloader13.p.rapidapi.com",
-  "INSTAGRAM_RAPIDAPI_BASE_URL": "https://instagram-reels-downloader13.p.rapidapi.com",
+  "INSTAGRAM_REELS13_ENABLED": false,
+  "INSTAGRAM_RAPIDAPI_HOST": "insta-reels-downloader-the-fastest-hd-reels-fetcher-api.p.rapidapi.com",
+  "INSTAGRAM_RAPIDAPI_BASE_URL": "https://insta-reels-downloader-the-fastest-hd-reels-fetcher-api.p.rapidapi.com",
   "TIKTOK_AKNG_BASE_URL": "https://api.akng.io.vn",
-  "INSTAGRAM_MEDIA_HOST_SUFFIXES": ["fbcdn.net", "cdninstagram.com", "instagram-reels-downloader13.p.rapidapi.com"],
+  "INSTAGRAM_MEDIA_HOST_SUFFIXES": ["fbcdn.net", "cdninstagram.com"],
   "TIKTOK_MEDIA_HOST_SUFFIXES": ["api.akng.io.vn", "tiktokcdn.com", "tiktokcdn-us.com", "tiktokv.com", "byteoversea.com", "ibytedtos.com"]
 }

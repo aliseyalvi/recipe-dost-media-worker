@@ -1,0 +1,132 @@
+{
+  "valid_split_av": {
+    "success": true,
+    "media_type": "video",
+    "shortcode": "fixture",
+    "data": {
+      "title": "Fixture recipe",
+      "content": {
+        "media_url": "https://media.cdninstagram.com/fixture/video.mp4",
+        "thumbnail_url": "https://media.cdninstagram.com/fixture/thumbnail.jpg",
+        "audio": {
+          "audio_url": "https://media.cdninstagram.com/fixture/audio.mp4",
+          "downloadable": true,
+          "has_audio": false
+        }
+      },
+      "metadata": {
+        "api_version": "unified_v1",
+        "processed_at": "2026-01-01T00:00:00Z"
+      }
+    }
+  },
+  "valid_video_only": {
+    "success": true,
+    "media_type": "video",
+    "data": {
+      "title": "Fixture recipe without separate audio",
+      "content": {
+        "media_url": "https://media.fbcdn.net/fixture/video.mp4",
+        "thumbnail_url": "https://media.fbcdn.net/fixture/thumbnail.jpg"
+      }
+    }
+  },
+  "null_media_url": {
+    "success": true,
+    "media_type": "video",
+    "data": {
+      "title": "Fixture null media",
+      "content": {
+        "media_url": null,
+        "thumbnail_url": "https://media.cdninstagram.com/fixture/thumbnail.jpg"
+      }
+    }
+  },
+  "private_url": {
+    "success": false,
+    "error": {
+      "message": "fixture provider message",
+      "code": "PRIVATE_URL"
+    }
+  },
+  "url_processing_error": {
+    "success": false,
+    "error": {
+      "message": "fixture provider message",
+      "code": "URL_PROCESSING_ERROR"
+    }
+  },
+  "parsing_error": {
+    "success": false,
+    "error": {
+      "message": "fixture provider message",
+      "code": "PARSING_ERROR"
+    }
+  },
+  "http_401": {
+    "_http_status": 401
+  },
+  "http_429": {
+    "_http_status": 429
+  },
+  "http_500": {
+    "_http_status": 500
+  },
+  "photo": {
+    "success": true,
+    "media_type": "photo",
+    "data": {
+      "content": {
+        "media_url": "https://media.cdninstagram.com/fixture/photo.jpg"
+      }
+    }
+  },
+  "sidecar": {
+    "success": true,
+    "media_type": "sidecar",
+    "data": {
+      "content": {
+        "media_url": "https://media.cdninstagram.com/fixture/carousel.mp4"
+      }
+    }
+  },
+  "malformed_success_type": {
+    "success": "true",
+    "media_type": "video",
+    "data": {
+      "content": {
+        "media_url": "https://media.cdninstagram.com/fixture/video.mp4"
+      }
+    }
+  },
+  "malformed_data_type": {
+    "success": true,
+    "media_type": "video",
+    "data": ["not", "an", "object"]
+  },
+  "malformed_content_type": {
+    "success": true,
+    "media_type": "video",
+    "data": {
+      "content": ["not", "an", "object"]
+    }
+  },
+  "non_https_media_url": {
+    "success": true,
+    "media_type": "video",
+    "data": {
+      "content": {
+        "media_url": "http://media.cdninstagram.com/fixture/video.mp4"
+      }
+    }
+  },
+  "disallowed_media_hostname": {
+    "success": true,
+    "media_type": "video",
+    "data": {
+      "content": {
+        "media_url": "https://media.example.invalid/fixture/video.mp4"
+      }
+    }
+  }
+}

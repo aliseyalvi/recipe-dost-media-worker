@@ -55,8 +55,12 @@ ExternalMediaResolverAudience = Literal[
 
 REGISTERED_EXTERNAL_MEDIA_ADAPTERS = {
     "rapidapi_instagram_reels13",
+    "rapidapi_instagram_unified_v1",
     "akng_tiktok",
 }
+INSTAGRAM_UNIFIED_V1_RAPIDAPI_HOST = (
+    "insta-reels-downloader-the-fastest-hd-reels-fetcher-api.p.rapidapi.com"
+)
 
 
 def _without_blank_values(source: object):
@@ -298,6 +302,11 @@ class Settings(BaseSettings):
         "external_media_max_redirects", 2
     )
     instagram_rapidapi_key: Optional[SecretStr] = None
+    # Deprecated provider remains available only for an explicit rollback audit.
+    # It is false by default and must never be placed behind Unified v1 as fallback.
+    instagram_reels13_enabled: bool = worker_config_value(
+        "instagram_reels13_enabled", False
+    )
     instagram_rapidapi_host: str = worker_config_value(
         "instagram_rapidapi_host", ""
     )
@@ -591,7 +600,11 @@ class Settings(BaseSettings):
         if not 10 <= self.external_media_download_total_timeout_seconds <= self.max_job_runtime_seconds:
             raise ValueError("external media total timeout exceeds the job budget")
         if any(
-            adapter != "rapidapi_instagram_reels13"
+            adapter
+            not in {
+                "rapidapi_instagram_reels13",
+                "rapidapi_instagram_unified_v1",
+            }
             for adapter in self.instagram_resolver_chain
         ):
             raise ValueError("Instagram resolver chain contains an incompatible adapter")
@@ -806,7 +819,14 @@ def validate_external_resolver_runtime_config(settings: Settings) -> None:
             f"but no social adapter chain was loaded from {selected_path}. Expected at "
             "least one of INSTAGRAM_RESOLVER_CHAIN or TIKTOK_RESOLVER_CHAIN."
         )
-    if "rapidapi_instagram_reels13" in settings.instagram_resolver_chain:
+    if any(
+        adapter
+        in {
+            "rapidapi_instagram_reels13",
+            "rapidapi_instagram_unified_v1",
+        }
+        for adapter in settings.instagram_resolver_chain
+    ):
         if settings.instagram_rapidapi_key is None:
             raise ValueError("active Instagram resolver credentials are missing")
         if not settings.instagram_rapidapi_host.strip() or not settings.instagram_rapidapi_base_url.strip():
@@ -818,8 +838,22 @@ def validate_external_resolver_runtime_config(settings: Settings) -> None:
             != settings.instagram_rapidapi_host.strip().lower()
         ):
             raise ValueError("active Instagram resolver endpoint must match its HTTPS host")
+        if (
+            "rapidapi_instagram_unified_v1"
+            in settings.instagram_resolver_chain
+            and settings.instagram_rapidapi_host.strip().lower()
+            != INSTAGRAM_UNIFIED_V1_RAPIDAPI_HOST
+        ):
+            raise ValueError(
+                "active Instagram Unified v1 resolver host is not approved"
+            )
         if not settings.instagram_media_host_suffixes:
             raise ValueError("active Instagram media host policy is missing")
+    if (
+        "rapidapi_instagram_reels13" in settings.instagram_resolver_chain
+        and not settings.instagram_reels13_enabled
+    ):
+        raise ValueError("deprecated Instagram Reels13 resolver is disabled")
     if "akng_tiktok" in settings.tiktok_resolver_chain:
         if settings.tiktok_akng_access_token is None:
             raise ValueError("active TikTok resolver credentials are missing")

@@ -2,6 +2,39 @@
 
 Keep only commands that future turns may need.
 
+## M23.W8A-W8D Instagram Unified v1 adapter
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python --version
+# Python 3.12.13
+
+PATH="$PWD/.venv/bin:$PATH" python -m unittest -q \
+  tests.test_media_resolver_adapters tests.test_file_runtime_config \
+  tests.test_instagram_live_diagnostic \
+  tests.test_instagram_candidate_compatibility \
+  tests.test_external_media_processing tests.test_external_media_security \
+  tests.test_provider_http_client tests.test_external_queue_routing \
+  tests.test_queue_gemini_guard tests.test_external_resolver_config
+# 86 focused tests passed
+
+PATH="$PWD/.venv/bin:$PATH" python -m compileall app scripts
+PATH="$PWD/.venv/bin:$PATH" python -m unittest discover \
+  -s tests -p "test_*.py"
+PATH="$PWD/.venv/bin:$PATH" python -m pip check
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/replay_manifest.json
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+git diff --check
+# passed: compile; 202 tests; no broken requirements; 11-case replay;
+# 7-case mixed batch; diff check.
+```
+
+The owner-only Instagram diagnostic was compile-tested and unit-tested but not
+executed. No live provider/media URL, Gemini, Supabase, Sentry, Render,
+deployment, main merge, mobile, schema, cookie, entitlement, quota, secret
+read, or secret output occurred.
+
 ## M23.W7A-W7C staged combined worker
 
 ```bash

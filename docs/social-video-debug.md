@@ -2,6 +2,16 @@
 
 ## Current Status
 
+- M23.W8A-W8D replaces the broken active Instagram Reels13 route with
+  `rapidapi_instagram_unified_v1` in development. Reels13 remains present but
+  false-gated and absent from the chain. Unified v1 strictly validates
+  success/media/data/content, normalizes one probe-required video plus optional
+  separate audio and thumbnail, maps provider/HTTP failures safely, rejects
+  photo/sidecar, and permits only the existing Instagram CDN categories.
+- The downloader, DNS/redirect checks, byte/signature guards, ffprobe,
+  conditional ffmpeg mux, final A/V validation, Gemini handoff, and cleanup are
+  unchanged. Offline Python 3.12 validation passed 202 tests plus both replay
+  batches. The owner-only live diagnostic was not run by Codex.
 - M23.W7A-W7C separates the active queue into dispatch, ingest, Gemini analysis,
   and finalization services while retaining one combined Render process and a
   sequential rollback mode. In staged mode, local media is removed after the

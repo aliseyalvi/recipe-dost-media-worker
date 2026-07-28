@@ -19,24 +19,22 @@ from app.media_resolvers.pipeline import resolve_external_media
 
 OUTPUT_KEYS = (
     "provider_status_class",
+    "success",
+    "media_type",
     "contract_complete",
-    "media_mode",
-    "raw_video_count",
-    "raw_audio_count",
-    "unknown_role_count",
-    "compatible_declared_video_count",
-    "probe_required_video_count",
-    "selected_role",
-    "actual_codec_category",
-    "actual_container_category",
-    "signature_valid",
-    "ffprobe_video_present",
-    "ffprobe_audio_present",
+    "video_candidate_count",
+    "audio_candidate_count",
+    "thumbnail_candidate_count",
+    "video_probe_valid",
+    "embedded_audio_present",
     "separate_audio_required",
     "audio_probe_valid",
+    "mux_required",
     "mux_succeeded",
     "final_video_present",
     "final_audio_present",
+    "duration_within_limit",
+    "size_within_limit",
     "cleanup_succeeded",
 )
 
@@ -110,6 +108,7 @@ def main() -> int:
             failure_stage = "final_media_validation"
     except ResolverError as exc:
         failure_stage = _safe_failure_stage(exc.failure_stage)
+        _populate_error_summary(summary, exc)
     except KeyboardInterrupt:
         failure_stage = "cleanup"
         exit_code = 130
@@ -165,6 +164,8 @@ def _validate_media_tools() -> None:
 def _diagnostic_settings(credential: str) -> Settings:
     return Settings(
         _env_file=None,
+        instagram_resolver_chain=["rapidapi_instagram_unified_v1"],
+        instagram_reels13_enabled=False,
         instagram_rapidapi_key=credential,
         tiktok_akng_access_token="diagnostic-unused",
         worker_api_secret="diagnostic-only",
@@ -177,24 +178,22 @@ def _diagnostic_settings(credential: str) -> Settings:
 def _empty_summary() -> dict[str, object]:
     return {
         "provider_status_class": "unknown",
+        "success": False,
+        "media_type": "unknown",
         "contract_complete": False,
-        "media_mode": "unknown",
-        "raw_video_count": 0,
-        "raw_audio_count": 0,
-        "unknown_role_count": 0,
-        "compatible_declared_video_count": 0,
-        "probe_required_video_count": 0,
-        "selected_role": "none",
-        "actual_codec_category": "unknown",
-        "actual_container_category": "unknown",
-        "signature_valid": False,
-        "ffprobe_video_present": False,
-        "ffprobe_audio_present": False,
+        "video_candidate_count": 0,
+        "audio_candidate_count": 0,
+        "thumbnail_candidate_count": 0,
+        "video_probe_valid": False,
+        "embedded_audio_present": False,
         "separate_audio_required": False,
         "audio_probe_valid": False,
+        "mux_required": False,
         "mux_succeeded": False,
         "final_video_present": False,
         "final_audio_present": False,
+        "duration_within_limit": False,
+        "size_within_limit": False,
         "cleanup_succeeded": True,
     }
 
@@ -207,41 +206,76 @@ def _populate_summary(summary: dict[str, object], result: dict[str, object]) -> 
     summary.update(
         {
             "provider_status_class": result.get("provider_status_class") or "unknown",
+            "success": bool(result.get("success")),
+            "media_type": "video" if result.get("success") else "unknown",
             "contract_complete": bool(result.get("contract_complete")),
-            "media_mode": result.get("provider_media_mode") or "unknown",
-            "raw_video_count": int(candidate.get("raw_video_count") or 0),
-            "raw_audio_count": int(candidate.get("raw_audio_count") or 0),
-            "unknown_role_count": int(candidate.get("unknown_role_count") or 0),
-            "compatible_declared_video_count": int(
-                candidate.get("eligible_declared_video_count") or 0
+            "video_candidate_count": int(
+                candidate.get("normalized_video_count")
+                or candidate.get("raw_video_count")
+                or 0
             ),
-            "probe_required_video_count": int(
-                candidate.get("probe_required_video_count") or 0
+            "audio_candidate_count": int(
+                candidate.get("normalized_audio_count")
+                or candidate.get("raw_audio_count")
+                or 0
             ),
-            "selected_role": "video",
-            "actual_codec_category": media.get("actual_video_codec") or "unknown",
-            "actual_container_category": media.get("actual_container") or "unknown",
-            "signature_valid": bool(media.get("media_signature_valid")),
-            "ffprobe_video_present": bool(media.get("initial_probe_video_present")),
-            "ffprobe_audio_present": bool(media.get("initial_probe_audio_present")),
+            "thumbnail_candidate_count": int(
+                candidate.get("normalized_thumbnail_count") or 0
+            ),
+            "video_probe_valid": bool(media.get("initial_probe_video_present")),
+            "embedded_audio_present": bool(
+                media.get("initial_probe_audio_present")
+            ),
             "separate_audio_required": bool(media.get("separate_audio_required")),
             "audio_probe_valid": bool(media.get("audio_download_verified")),
+            "mux_required": bool(media.get("separate_audio_required")),
             "mux_succeeded": bool(media.get("mux_succeeded")),
             "final_video_present": bool(media.get("final_video_present")),
             "final_audio_present": bool(media.get("final_audio_present")),
+            "duration_within_limit": bool(result.get("success")),
+            "size_within_limit": bool(result.get("success")),
+        }
+    )
+
+
+def _populate_error_summary(
+    summary: dict[str, object],
+    exc: ResolverError,
+) -> None:
+    diagnostic = exc.contract_diagnostic
+    summary.update(
+        {
+            "provider_status_class": (
+                exc.http_status_class
+                or diagnostic.get("provider_status_class")
+                or "unknown"
+            ),
+            "success": False,
+            "media_type": diagnostic.get("media_type") or "unknown",
+            "contract_complete": bool(diagnostic.get("contract_complete")),
+            "video_candidate_count": int(
+                diagnostic.get("normalized_video_count") or 0
+            ),
+            "audio_candidate_count": int(
+                diagnostic.get("normalized_audio_count") or 0
+            ),
+            "thumbnail_candidate_count": int(
+                diagnostic.get("normalized_thumbnail_count") or 0
+            ),
         }
     )
 
 
 def _ready_for_gemini(summary: dict[str, object], final_path: Path) -> bool:
     return bool(
-        summary["contract_complete"]
-        and summary["selected_role"] == "video"
-        and summary["actual_codec_category"] == "h264"
-        and summary["actual_container_category"] == "mp4"
-        and summary["signature_valid"]
+        summary["success"]
+        and summary["media_type"] == "video"
+        and summary["contract_complete"]
+        and summary["video_probe_valid"]
         and summary["final_video_present"]
         and summary["final_audio_present"]
+        and summary["duration_within_limit"]
+        and summary["size_within_limit"]
         and final_path.is_file()
     )
 
@@ -250,6 +284,8 @@ def _safe_failure_stage(value: str | None) -> str:
     allowed = {
         "input_validation",
         "candidate_selection",
+        "provider_http",
+        "provider_contract",
         "media_download",
         "media_redirect_validation",
         "media_content_validation",

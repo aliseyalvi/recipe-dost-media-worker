@@ -1,5 +1,26 @@
 # Decision Log
 
+## 2026-07-28 — M23.W8A-W8D Instagram Unified v1 adapter
+
+- Development Instagram routing now contains only
+  `rapidapi_instagram_unified_v1`. The Reels13 implementation remains present
+  but is false-gated by `INSTAGRAM_REELS13_ENABLED` and is not a fallback.
+- Unified v1 accepts only a boolean success contract and supported video
+  objects. Missing/null/unsafe media URLs and malformed contract types fail as
+  `provider_contract_invalid`; photo and sidecar retain exact safe
+  `unsupported_media` messages.
+- Video, optional separate audio, title, and thumbnail are normalized into the
+  existing provider-neutral contract. Unknown declarations remain
+  probe-required; the shared secure download, ffprobe, conditional mux, final
+  validation, and cleanup path is unchanged.
+- Instagram media URLs are limited to the existing `fbcdn.net` and
+  `cdninstagram.com` categories. Signed URLs remain in-memory candidates only,
+  and provider bodies, URLs, credentials, titles, shortcodes, creator data, and
+  temp paths are absent from telemetry.
+- Production remains external-disabled. No live provider, Gemini, Supabase,
+  Sentry, Render, schema, queue, quota, TikTok, YouTube, or mobile action was
+  performed.
+
 ## 2026-07-27 — M23.W7A-W7C staged combined worker
 
 - One Render service now has sequential compatibility and bounded staged modes;
