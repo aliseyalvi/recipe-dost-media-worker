@@ -1,5 +1,12 @@
 # Decision Log
 
+## 2026-07-29 — M23.GD7B minimal Gemini diagnostic schema
+
+- The protected tiny-schema diagnostic now uses an ordinary one-field Pydantic
+  response model so the Gemini Developer API `responseSchema` contains only the
+  required object/boolean shape and omits unsupported `additionalProperties`.
+  Endpoint request strictness and every production Gemini path remain unchanged.
+
 ## 2026-07-29 — M23.GD6 protected Gemini request ladder
 
 - Development may temporarily enable one shared-secret-protected diagnostic

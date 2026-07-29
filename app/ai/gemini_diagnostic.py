@@ -40,8 +40,6 @@ _RECIPE_TEXT_INPUT = (
 
 
 class TinyDiagnosticSchema(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
     ok: bool
 
 

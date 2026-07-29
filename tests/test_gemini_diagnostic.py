@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
+from google.genai import models, types
 from google.genai.errors import ClientError
 
 from app import main
@@ -176,7 +177,14 @@ class GeminiDiagnosticEndpointTests(unittest.TestCase):
             tiny_config["response_schema"],
             gemini_diagnostic.TinyDiagnosticSchema,
         )
+        self.assertEqual(tiny_config["response_mime_type"], "application/json")
+        self.assertEqual(tiny_config["temperature"], 0.0)
+        self.assertEqual(tiny_config["max_output_tokens"], 64)
         self.assertNotIn("response_json_schema", tiny_config)
+        self.assertNotIn("thinking_config", tiny_config)
+        self.assertNotIn("system_instruction", tiny_config)
+        self.assertNotIn("tools", tiny_config)
+        self.assertNotIn("media_resolution", tiny_config)
 
         recipe_client = MagicMock()
         recipe_client.models.generate_content.return_value = FakeGeminiResponse()
@@ -198,6 +206,42 @@ class GeminiDiagnosticEndpointTests(unittest.TestCase):
         )
         self.assertEqual(recipe_config, expected_config)
         self.assertIs(recipe_config["response_json_schema"], CANONICAL_RECIPE_SCHEMA)
+
+    def test_tiny_schema_is_minimal_and_gemini_compatible(self) -> None:
+        schema = gemini_diagnostic.TinyDiagnosticSchema.model_json_schema()
+
+        self.assertEqual(schema["type"], "object")
+        self.assertEqual(schema["properties"]["ok"]["type"], "boolean")
+        self.assertIn("ok", schema["required"])
+        self.assertNotIn("additionalProperties", schema)
+
+    def test_tiny_schema_sdk_serialization_omits_additional_properties(self) -> None:
+        config = types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=gemini_diagnostic.TinyDiagnosticSchema,
+            temperature=0.0,
+            max_output_tokens=64,
+        )
+        api_client = MagicMock(vertexai=False)
+        serialized = models._GenerateContentConfig_to_mldev(
+            api_client,
+            config,
+        )
+
+        self.assertIn("responseSchema", serialized)
+        self.assertNotIn("responseJsonSchema", serialized)
+        response_schema = serialized["responseSchema"].model_dump(
+            by_alias=True,
+            exclude_none=True,
+            exclude_unset=True,
+        )
+        self.assertEqual(response_schema["type"], types.Type.OBJECT)
+        self.assertEqual(
+            response_schema["properties"]["ok"]["type"],
+            types.Type.BOOLEAN,
+        )
+        self.assertIn("ok", response_schema["required"])
+        self.assertNotIn("additionalProperties", response_schema)
 
     def test_youtube_level_reuses_production_input_builder_and_request_config(self) -> None:
         self.assertIs(
