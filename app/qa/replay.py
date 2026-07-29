@@ -12,7 +12,7 @@ from postgrest.exceptions import APIError
 
 from app.config import Settings
 from app.media_resolvers.contracts import MediaResolutionRequest
-from app.media_resolvers.instagram_reels13 import InstagramReels13Resolver
+from app.media_resolvers.instagram_unified_v1 import InstagramUnifiedV1Resolver
 from app.media_resolvers.media_processing import (
     MediaProbe,
     validate_video_probe_compatibility,
@@ -645,16 +645,21 @@ def _exercise_resolver(case_name: str) -> None:
         )
     else:
         fixture_name = (
-            "split_h264_aac.json"
+            "valid_split_av"
             if case_name == "instagram_split_av_success"
-            else "explicit_h264_mp4.json"
+            else "valid_video_only"
         )
-        payload = _json_fixture("rapidapi_instagram_reels13", fixture_name)
-        resolver = InstagramReels13Resolver(
+        contracts = _json_fixture(
+            "rapidapi_instagram_unified_v1",
+            "contracts.json",
+        )
+        payload = contracts[fixture_name]
+        resolver = InstagramUnifiedV1Resolver(
             client=FixtureProviderClient(payload),  # type: ignore[arg-type]
             base_url="https://provider.invalid",
             rapidapi_host="provider.invalid",
             rapidapi_key="fixture",
+            allowed_media_host_suffixes=("fbcdn.net", "cdninstagram.com"),
         )
         request = MediaResolutionRequest(
             platform="instagram",
@@ -670,7 +675,11 @@ def _exercise_resolver(case_name: str) -> None:
         resolution.candidates,
         preferred_bytes=request.preferred_byte_target,
         hard_limit_bytes=request.byte_limit,
-        allowed_host_suffixes=("provider.invalid",),
+        allowed_host_suffixes=(
+            ("provider.invalid",)
+            if case_name.startswith("tiktok")
+            else ("fbcdn.net", "cdninstagram.com")
+        ),
         enforce_max_short_edge=False,
     )
     validate_video_probe_compatibility(

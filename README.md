@@ -137,13 +137,11 @@ PORT=8080 python -m app.workers.combined_worker
 curl http://localhost:8080/health
 ```
 
-The retired `WORKER_PIPELINE_MODE` compatibility input may be absent or set to
-`sequential`; `staged` and unsupported values fail startup before a queue task
-is created. W7 staged execution was reverted. Its design remains in Git
-history, while dormant source files are retained temporarily for a later
-deletion patch and are not imported by the active runtime. Any future
-concurrency design requires durable leases, fencing, and idempotent stage
-transitions.
+Sequential durable queue execution is the only supported runtime.
+`combined_worker` is only the Docker uvicorn façade for `app.main:app`. The W7
+staged implementation was reverted and removed from active source; its design
+remains in Git history. Any future concurrency design requires durable leases,
+heartbeats, fencing, and idempotent stage transitions.
 
 Wake the queue worker:
 
@@ -234,7 +232,6 @@ This endpoint does not call Gemini, does not create media jobs, does not downloa
   streaming/temp-file hard limit. The historical `*_MB` config names are binary
   MiB.
 - Gemini 3.1 Flash-Lite single-pass structured extraction is the documented default.
-- Cobalt is not used for TikTok or YouTube.
 - Temporary stream URLs are never stored or returned.
 - Raw video is not stored. Gemini prompts, raw responses, source URLs, stream URLs, recipe ingredients, and recipe steps must not be logged or written to events.
 - Detailed worker stages are tracked with `media_job_events` and `progress`; `media_jobs.status` stays one of `queued`, `resolving`, `downloading`, `analyzing`, `completed`, or `failed`.

@@ -21,7 +21,6 @@ from app.qa.replay import (  # noqa: E402
     run_batch,
     run_case,
 )
-from app.qa.staged import run_staged_batch  # noqa: E402
 from app.queue_worker import process_queue_job  # noqa: E402
 
 DEFAULT_REPORT = PROJECT_ROOT / ".worker-qa" / "latest" / "summary.json"
@@ -39,15 +38,6 @@ def main() -> int:
     batch.add_argument("--manifest", type=Path, required=True)
     batch.add_argument("--report", type=Path, default=DEFAULT_REPORT)
 
-    pipeline = subparsers.add_parser("pipeline")
-    pipeline.add_argument("--manifest", type=Path, required=True)
-    pipeline.add_argument(
-        "--pipeline-mode",
-        choices=("staged",),
-        required=True,
-    )
-    pipeline.add_argument("--report", type=Path, default=DEFAULT_REPORT)
-
     live = subparsers.add_parser("live")
     live.add_argument("--manifest", type=Path, required=True)
     live.add_argument("--max-total-calls", type=int, required=True)
@@ -62,8 +52,6 @@ def main() -> int:
         report["success_ratio"] = _success_ratio(report["cases"])
     elif args.command == "batch":
         report = {"mode": "offline_batch", **run_batch(load_manifest(args.manifest))}
-    elif args.command == "pipeline":
-        report = run_staged_batch(load_manifest(args.manifest))
     else:
         report = run_live(args.manifest, args.max_total_calls)
     write_safe_report(args.report, report)

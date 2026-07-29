@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import MagicMock
 from uuid import UUID
 
@@ -15,7 +11,6 @@ from app.config import (
     Settings,
     validate_external_resolver_runtime_config,
 )
-from app.media_resolvers.contracts import ResolverError
 from app.media_resolvers.instagram_unified_v1 import InstagramUnifiedV1Resolver
 from app.media_resolvers.registry import build_resolver, registered_adapter_ids
 from app.queue_worker import external_audience_route
@@ -75,20 +70,6 @@ class ExternalResolverConfigTests(unittest.TestCase):
                 )
             )
 
-    def test_retired_instagram_adapter_cannot_be_primary_or_fallback(self) -> None:
-        for chain in (
-            ["rapidapi_instagram_reels13"],
-            [
-                "rapidapi_instagram_unified_v1",
-                "rapidapi_instagram_reels13",
-            ],
-        ):
-            with self.subTest(chain=chain), self.assertRaisesRegex(
-                ValidationError,
-                "rapidapi_instagram_reels13 is retired and cannot be enabled",
-            ):
-                settings(instagram_resolver_chain=chain)
-
     def test_registry_exposes_and_constructs_only_active_adapters(self) -> None:
         self.assertEqual(
             registered_adapter_ids(),
@@ -106,32 +87,12 @@ class ExternalResolverConfigTests(unittest.TestCase):
             build_resolver("rapidapi_instagram_unified_v1", active),
             InstagramUnifiedV1Resolver,
         )
-        with self.assertRaises(ResolverError):
-            build_resolver("rapidapi_instagram_reels13", active)
-
-    def test_fresh_registry_import_does_not_import_reels13_module(self) -> None:
-        code = (
-            "import sys; import app.media_resolvers.registry; "
-            "assert 'app.media_resolvers.instagram_reels13' not in sys.modules"
-        )
-        completed = subprocess.run(
-            [sys.executable, "-c", code],
-            cwd=Path(__file__).resolve().parents[1],
-            env={"APP_ENV": "production", "PATH": os.environ.get("PATH", "")},
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-        )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-
     def test_owner_diagnostic_uses_unified_instagram_only(self) -> None:
         active = instagram_diagnostic._diagnostic_settings("test-only")
         self.assertEqual(
             active.instagram_resolver_chain,
             ["rapidapi_instagram_unified_v1"],
         )
-        self.assertNotIn("instagram_reels13_enabled", type(active).model_fields)
 
     def test_all_authorized_ai_uses_server_access_without_granting_it(self) -> None:
         repository = MagicMock()

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 import subprocess
@@ -16,10 +15,7 @@ from app.media_resolvers.contracts import (
     MediaResolutionRequest,
     ResolverError,
 )
-from app.media_resolvers.instagram_reels13 import (
-    InstagramReels13Resolver,
-    normalize_instagram_candidates,
-)
+from app.media_resolvers.instagram_unified_v1 import InstagramUnifiedV1Resolver
 from app.media_resolvers.media_fetch import DownloadedMedia, cleanup_job_directory
 from app.media_resolvers.media_processing import (
     mux_video_audio,
@@ -28,17 +24,14 @@ from app.media_resolvers.media_processing import (
     validate_video_probe_compatibility,
 )
 from app.media_resolvers.pipeline import resolve_external_media
-from app.media_resolvers.selection import (
-    declared_video_compatibility,
-    rank_video_candidates,
-)
 from app.main import JsonFormatter
 
-FIXTURES = (
+UNIFIED_FIXTURE = (
     Path(__file__).parent
     / "fixtures"
     / "media_resolvers"
-    / "rapidapi_instagram_reels13"
+    / "rapidapi_instagram_unified_v1"
+    / "contracts.json"
 )
 
 
@@ -48,10 +41,6 @@ class FixtureClient:
 
     def get_json(self, **_kwargs: object):
         return self.payload, "2xx", None
-
-
-def fixture(name: str) -> dict[str, object]:
-    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
 def request() -> MediaResolutionRequest:
@@ -66,110 +55,20 @@ def request() -> MediaResolutionRequest:
     )
 
 
-def resolver(name: str, *, secret: str = "fixture-secret") -> InstagramReels13Resolver:
-    return InstagramReels13Resolver(
-        client=FixtureClient(fixture(name)),  # type: ignore[arg-type]
+def resolver(name: str) -> InstagramUnifiedV1Resolver:
+    import json
+
+    fixtures = json.loads(UNIFIED_FIXTURE.read_text(encoding="utf-8"))
+    return InstagramUnifiedV1Resolver(
+        client=FixtureClient(fixtures[name]),  # type: ignore[arg-type]
         base_url="https://provider.invalid",
         rapidapi_host="provider.invalid",
-        rapidapi_key=secret,
+        rapidapi_key="fixture-secret",
+        allowed_media_host_suffixes=("fbcdn.net", "cdninstagram.com"),
     )
 
 
 class InstagramNormalizationTests(unittest.TestCase):
-    def test_unknown_codec_and_container_are_probe_required(self) -> None:
-        result = resolver("unknown_split_av.json").resolve(request())
-        video = next(item for item in result.candidates if item.media_type == "video")
-        self.assertIsNone(video.codec)
-        self.assertIsNone(video.container)
-        self.assertEqual(declared_video_compatibility(video), "probe_required")
-        summary = result.contract_diagnostic[
-            "instagram_candidate_normalization_summary"
-        ]
-        self.assertEqual(summary["probe_required_video_count"], 1)
-        self.assertEqual(summary["eligible_audio_count"], 1)
-
-    def test_explicit_h264_is_compatible_and_h265_is_incompatible(self) -> None:
-        compatible = resolver("explicit_h264_mp4.json").resolve(request())
-        self.assertEqual(
-            declared_video_compatibility(compatible.candidates[0]),
-            "compatible_declared",
-        )
-        raw = fixture("explicit_h265.json")["medias"]
-        candidates, summary = normalize_instagram_candidates(
-            raw,  # type: ignore[arg-type]
-            byte_limit=50 * 1024 * 1024,
-        )
-        self.assertEqual(candidates, ())
-        self.assertEqual(
-            summary["rejection_counts"],
-            {"explicit_unsupported_codec": 1},
-        )
-        h265 = MediaCandidate(
-            media_type="video",
-            _urls=("https://provider.invalid/media/video",),
-            codec="h265",
-            container="mp4",
-        )
-        self.assertEqual(declared_video_compatibility(h265), "incompatible_declared")
-
-    def test_roles_stay_separate_when_audio_is_first(self) -> None:
-        result = resolver("audio_before_video.json").resolve(request())
-        self.assertEqual(
-            [candidate.media_type for candidate in result.candidates],
-            ["audio", "video"],
-        )
-        ranked = rank_video_candidates(
-            result.candidates,
-            preferred_bytes=36 * 1024 * 1024,
-            hard_limit_bytes=50 * 1024 * 1024,
-            max_short_edge=720,
-            allowed_host_suffixes=("provider.invalid",),
-            enforce_max_short_edge=False,
-        )
-        self.assertEqual([candidate.media_type for candidate in ranked], ["video"])
-
-    def test_incident_1080_portrait_candidate_reaches_probe_path(self) -> None:
-        result = resolver("incident_two_candidates.json").resolve(request())
-        video = next(item for item in result.candidates if item.media_type == "video")
-        self.assertEqual((video.width, video.height), (1080, 1920))
-        self.assertEqual(declared_video_compatibility(video), "probe_required")
-        ranked = rank_video_candidates(
-            result.candidates,
-            preferred_bytes=36 * 1024 * 1024,
-            hard_limit_bytes=50 * 1024 * 1024,
-            max_short_edge=720,
-            allowed_host_suffixes=("provider.invalid",),
-            enforce_max_short_edge=False,
-        )
-        self.assertEqual(ranked, [video])
-
-    def test_suffixless_and_multiple_url_alternatives_are_preserved(self) -> None:
-        suffixless = resolver("url_without_suffix.json").resolve(request())
-        self.assertEqual(len(suffixless.candidates[0].urls()), 1)
-        alternatives = resolver("multiple_url_alternatives.json").resolve(request())
-        self.assertEqual(len(alternatives.candidates[0].urls()), 3)
-
-    def test_malformed_role_is_counted_without_becoming_video(self) -> None:
-        result = resolver("malformed_role.json").resolve(request())
-        summary = result.contract_diagnostic[
-            "instagram_candidate_normalization_summary"
-        ]
-        self.assertEqual(summary["unknown_role_count"], 1)
-        self.assertEqual(summary["rejection_counts"], {"role_not_video": 1})
-        self.assertEqual(
-            [candidate.media_type for candidate in result.candidates],
-            ["video"],
-        )
-
-    def test_safe_contract_never_serializes_url_secret_or_body(self) -> None:
-        secret = "fixture-sensitive-credential"
-        result = resolver("incident_two_candidates.json", secret=secret).resolve(request())
-        serialized = json.dumps(result.safe_to_dict())
-        self.assertNotIn("provider.invalid", serialized)
-        self.assertNotIn(secret, serialized)
-        self.assertNotIn("medias", serialized)
-        self.assertNotIn("provider.invalid", repr(result))
-
     def test_log_formatter_keeps_counts_and_drops_sensitive_values(self) -> None:
         record = logging.LogRecord(
             name="recipe_dost.worker",
@@ -309,15 +208,15 @@ class InstagramLocalMediaProofTests(unittest.TestCase):
 class InstagramPipelineTests(unittest.TestCase):
     def test_progressive_embedded_audio_skips_mux_and_cleans_on_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            resolution = resolver("incident_two_candidates.json").resolve(request())
+            resolution = resolver("valid_video_only").resolve(request())
             settings = SimpleNamespace(
-                instagram_resolver_chain=["rapidapi_instagram_reels13"],
+                instagram_resolver_chain=["rapidapi_instagram_unified_v1"],
                 tiktok_resolver_chain=[],
                 max_video_size_bytes=50 * 1024 * 1024,
                 preferred_video_size_bytes=36 * 1024 * 1024,
                 external_provider_timeout_seconds=15,
                 max_video_height=720,
-                instagram_media_host_suffixes=["provider.invalid"],
+                instagram_media_host_suffixes=["fbcdn.net", "cdninstagram.com"],
                 tiktok_media_host_suffixes=[],
                 temp_media_dir=directory,
                 external_media_download_connect_timeout_seconds=1,
@@ -397,28 +296,6 @@ class InstagramPipelineTests(unittest.TestCase):
             self.assertFalse(diagnostic["separate_audio_required"])
             self.assertEqual(diagnostic["actual_video_codec"], "h264")
             self.assertEqual(diagnostic["actual_container"], "mp4")
-            event = next(
-                call
-                for call in repository.insert_event.call_args_list
-                if call.kwargs.get("event_type")
-                == "instagram_candidate_normalization_summary"
-            )
-            allowed = {
-                "raw_candidate_count",
-                "raw_video_count",
-                "raw_audio_count",
-                "unknown_role_count",
-                "declared_codec_present_count",
-                "declared_container_present_count",
-                "declared_mime_present_count",
-                "size_present_count",
-                "dimensions_present_count",
-                "eligible_declared_video_count",
-                "probe_required_video_count",
-                "eligible_audio_count",
-                "rejection_counts",
-            }
-            self.assertEqual(set(event.kwargs["metadata"]), allowed)
             cleanup_job_directory(Path(str(result["temp_file_path"])).parent)
             self.assertFalse(Path(str(result["temp_file_path"])).parent.exists())
 

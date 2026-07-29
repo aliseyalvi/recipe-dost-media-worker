@@ -143,15 +143,7 @@ class JsonFormatter(logging.Formatter):
             "eligible_audio_count",
             "rejection_counts",
             "stale_directories_removed",
-            "pipeline_mode",
-            "configured_concurrency",
-            "queue_depth_bucket",
-            "active_stage_count",
-            "rss_bucket",
-            "temp_byte_bucket",
             "latency_bucket",
-            "retry_recovery_category",
-            "lease_state_category",
         ):
             value = getattr(record, field, None)
             if value is not None:
@@ -350,9 +342,6 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         tikwm_enabled_platforms=settings.tikwm_enabled_platforms,
         tikwm_hd=settings.tikwm_hd,
         tikwm_probe_bytes=settings.tikwm_probe_bytes,
-        enable_cobalt_resolver=settings.enable_cobalt_resolver,
-        cobalt_configured=settings.cobalt_configured,
-        cobalt_enabled_platforms=settings.cobalt_enabled_platforms,
         worker_execution_mode=settings.worker_execution_mode,
         worker_processing_model="sequential_queue",
         queue_loop_enabled=settings.worker_execution_mode == "queue"
@@ -555,7 +544,7 @@ def ensure_queue_worker_started(settings: Settings) -> None:
     if queue_task is not None and not queue_task.done():
         return
     try:
-        queue_task = asyncio.create_task(run_queue_loop(build_job_runner))
+        queue_task = asyncio.create_task(run_queue_loop())
     except Exception as exc:
         report_worker_error(
             exc,

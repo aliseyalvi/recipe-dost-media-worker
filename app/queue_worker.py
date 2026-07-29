@@ -30,7 +30,7 @@ from app.ai.gemini_reliability import (
     validate_generation_config,
 )
 from app.config import Settings, get_settings
-from app.job_runner import (
+from app.worker_runtime.job_helpers import (
     PipelineFailure,
     _caption_result_to_recipe_result,
     _extract_json_object,
@@ -354,7 +354,7 @@ class DeferredGeminiRecipe:
     client: object | None = None
 
 
-async def run_queue_loop(_build_job_runner: Callable[[Settings], object]) -> None:
+async def run_queue_loop() -> None:
     settings = get_settings()
     logger.info("queue_loop_started")
     while True:

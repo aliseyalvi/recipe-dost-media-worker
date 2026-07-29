@@ -84,7 +84,6 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_service_role_key: SecretStr
     gemini_api_key: Optional[SecretStr] = None
-    gemini_model: str = "gemini-3.5-flash"
     gemini_extraction_mode: GeminiExtractionMode = worker_config_value(
         "gemini_extraction_mode", "single_pass_structured"
     )
@@ -204,7 +203,6 @@ class Settings(BaseSettings):
     social_text_gemini_timeout_seconds: int = 45
     enable_gemini_repair_call: bool = False
     enable_gemini_fallbacks: bool = False
-    enable_auto_force_retry: bool = False
     gemini_disabled_models: Annotated[list[str], NoDecode] = Field(
         default_factory=list
     )
@@ -332,9 +330,6 @@ class Settings(BaseSettings):
         "queue_poll_interval_seconds", 5
     )
     queue_empty_sleep_seconds: int = worker_config_value("queue_empty_sleep_seconds", 5)
-    # Deprecated compatibility input. Sequential is the only supported value;
-    # remove this field after the development soak confirms no stale override.
-    worker_pipeline_mode: Literal["sequential"] = "sequential"
     enable_unified_ytdlp_stream_extractor: bool = worker_config_value(
         "enable_unified_ytdlp_stream_extractor", False
     )
@@ -357,19 +352,10 @@ class Settings(BaseSettings):
         "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     )
     tikwm_probe_bytes: int = 262144
-    enable_cobalt_resolver: bool = False
     enable_render_instagram_resolver: bool = worker_config_value(
         "enable_render_instagram_resolver", False
     )
     enable_render_facebook_resolver: bool = False
-    cobalt_api_url: Optional[str] = None
-    cobalt_timeout_seconds: int = 45
-    cobalt_always_proxy: bool = True
-    cobalt_video_quality: str = "720"
-    cobalt_enabled_platforms: Annotated[list[str], NoDecode] = Field(
-        default_factory=lambda: ["instagram", "facebook"]
-    )
-    cobalt_api_key: Optional[SecretStr] = None
     temp_media_dir: str = worker_config_value("temp_media_dir", "/tmp/recipe-dost-media")
 
     model_config = SettingsConfigDict(
@@ -426,10 +412,6 @@ class Settings(BaseSettings):
         return self.enable_tikwm_resolver and bool(self.tikwm_api_url.strip())
 
     @property
-    def cobalt_configured(self) -> bool:
-        return self.enable_cobalt_resolver and bool((self.cobalt_api_url or "").strip())
-
-    @property
     def external_resolver_enabled(self) -> bool:
         return (
             self.media_resolver_mode in {"external", "hybrid"}
@@ -452,7 +434,6 @@ class Settings(BaseSettings):
 
     @field_validator(
         "tikwm_enabled_platforms",
-        "cobalt_enabled_platforms",
         "instagram_resolver_chain",
         "tiktok_resolver_chain",
         "instagram_media_host_suffixes",
@@ -571,16 +552,6 @@ class Settings(BaseSettings):
         normalized = str(value).strip().lower()
         if normalized not in {"legacy", "external", "hybrid"}:
             raise ValueError("unknown media resolver mode")
-        return normalized
-
-    @field_validator("worker_pipeline_mode", mode="before")
-    @classmethod
-    def validate_worker_pipeline_mode(cls, value: object) -> object:
-        normalized = str(value).strip().lower()
-        if normalized != "sequential":
-            raise ValueError(
-                "WORKER_PIPELINE_MODE is retired; only sequential is supported"
-            )
         return normalized
 
     @field_validator("external_media_resolver_audience", mode="before")
