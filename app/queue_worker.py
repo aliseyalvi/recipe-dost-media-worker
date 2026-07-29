@@ -356,6 +356,35 @@ class DeferredGeminiRecipe:
     client: object | None = None
 
 
+@dataclass
+class GeminiProviderCallBudget:
+    max_calls: int
+    attempts: int = 0
+
+    @property
+    def calls_remaining(self) -> int:
+        return max(0, max(0, self.max_calls) - self.attempts)
+
+    def reserve(self, *, stage: str, call_purpose: str) -> int:
+        if self.calls_remaining <= 0:
+            raise QueueJobFailure(
+                "gemini_call_budget_exhausted",
+                "Gemini call limit reached for this job.",
+                stage=stage,
+                metadata={
+                    "failure_category": "gemini_call_budget_exhausted",
+                    "call_count": self.attempts,
+                    "max_calls_per_job": max(0, self.max_calls),
+                    "call_purpose": call_purpose,
+                    "calls_remaining": 0,
+                    "provider_request_attempted": False,
+                    "provider_attempt": self.attempts,
+                },
+            )
+        self.attempts += 1
+        return self.attempts
+
+
 async def run_queue_loop(_build_job_runner: Callable[[Settings], object]) -> None:
     settings = get_settings()
     logger.info("queue_loop_started")
@@ -753,7 +782,10 @@ def process_queue_job(
             source_platform=platform,
         )
     finally:
-        _GEMINI_CALL_CONTEXT.reset(gemini_context_token)
+        try:
+            _GEMINI_CALL_CONTEXT.reset(gemini_context_token)
+        except Exception as exc:
+            _log_gemini_telemetry_failure("context_reset", exc)
         if video_buffer is not None:
             video_buffer.close()
         deleted = delete_temp_media(temp_file_path)
@@ -1810,6 +1842,98 @@ def build_gemini_generation_config(
     )
 
 
+def _log_gemini_telemetry_failure(operation: str, exc: Exception) -> None:
+    try:
+        logger.warning(
+            "gemini_telemetry_failed",
+            extra={
+                "operation": operation,
+                "exception_type": type(exc).__name__,
+            },
+        )
+    except Exception:
+        pass
+
+
+def _optional_gemini_call_context() -> (
+    tuple[MediaJobRepository, MediaJobRecord, Settings] | None
+):
+    try:
+        return _GEMINI_CALL_CONTEXT.get(None)
+    except Exception as exc:
+        _log_gemini_telemetry_failure("context_lookup", exc)
+        return None
+
+
+def _emit_gemini_event_best_effort(
+    repository: object,
+    media_job_id: UUID,
+    *,
+    event_type: str,
+    message: str,
+    metadata_factory: Callable[[], dict[str, object]],
+) -> None:
+    try:
+        metadata = metadata_factory()
+        insert_event = getattr(repository, "insert_event")
+        insert_event(
+            media_job_id,
+            event_type=event_type,
+            message=message,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        _log_gemini_telemetry_failure(event_type, exc)
+
+
+def _emit_context_gemini_event_best_effort(
+    context: tuple[MediaJobRepository, MediaJobRecord, Settings] | None,
+    *,
+    event_type: str,
+    message: str,
+    metadata_factory: Callable[[Settings], dict[str, object]],
+) -> None:
+    if context is None:
+        return
+    try:
+        repository, job, settings = context
+        media_job_id = job.id
+    except Exception as exc:
+        _log_gemini_telemetry_failure("context_metadata", exc)
+        return
+    _emit_gemini_event_best_effort(
+        repository,
+        media_job_id,
+        event_type=event_type,
+        message=message,
+        metadata_factory=lambda: metadata_factory(settings),
+    )
+
+
+def _safe_attempt_failure_metadata(
+    exc: Exception,
+    *,
+    call_budget: GeminiProviderCallBudget,
+    attempts_before: int,
+    stage: str,
+    model: str,
+    input_mode: str,
+) -> dict[str, object]:
+    if call_budget.attempts <= attempts_before:
+        return {}
+    try:
+        return safe_gemini_provider_error(
+            exc,
+            provider_request_attempted=True,
+            failure_stage=stage,
+            model=model,
+            input_mode=input_mode,
+        )
+    except Exception as telemetry_exc:
+        _log_gemini_telemetry_failure("safe_error_metadata", telemetry_exc)
+        return {}
+
+
 def guarded_generate_content(
     client: object,
     *,
@@ -1818,8 +1942,9 @@ def guarded_generate_content(
     config: dict[str, object] | None = None,
     stage: str,
     call_purpose: str = "analysis",
+    call_budget: GeminiProviderCallBudget | None = None,
 ) -> object:
-    """Reserve the active queue's bounded Gemini call immediately before use."""
+    """Validate and execute exactly one SDK call with non-blocking telemetry."""
     if config is not None:
         try:
             validate_generation_config(config)
@@ -1835,80 +1960,38 @@ def guarded_generate_content(
                     "provider_request_attempted": False,
                 },
             ) from exc
-    context = _GEMINI_CALL_CONTEXT.get()
-    call_number: int | None = None
-    if context is not None:
-        repository, job, settings = context
-        if model in settings.gemini_disabled_models:
-            raise QueueJobFailure(
-                "gemini_model_disabled",
-                "This AI model is temporarily disabled.",
-                stage=stage,
-            )
-        try:
-            job_count = repository.count_job_gemini_calls(job.id)
-            if job_count >= settings.gemini_max_calls_per_job:
-                raise QueueJobFailure(
-                    "gemini_call_budget_exhausted",
-                    "Gemini call limit reached for this job.",
-                    stage=stage,
-                    metadata={
-                        "failure_category": "gemini_call_budget_exhausted",
-                        "call_count": job_count,
-                        "max_calls_per_job": settings.gemini_max_calls_per_job,
-                        "call_purpose": call_purpose,
-                        "calls_remaining": 0,
-                        "provider_request_attempted": False,
-                    },
-                )
-            day_start = datetime.now(timezone.utc).replace(
-                hour=0,
-                minute=0,
-                second=0,
-                microsecond=0,
-            )
-            daily_count = repository.count_daily_gemini_calls(day_start, model=model)
-            model_limit = settings.gemini_daily_dev_model_limits.get(model)
-            daily_limit = (
-                model_limit
-                if model_limit is not None
-                else settings.gemini_daily_dev_call_limit
-            )
-            if settings.app_env == "development" and daily_count >= daily_limit:
-                raise QueueJobFailure(
-                    "gemini_daily_dev_limit_reached",
-                    "Daily development Gemini limit reached.",
-                    stage=stage,
-                    metadata={"call_count": daily_count, "daily_dev_limit": daily_limit},
-                )
-            call_number = job_count + 1
-            repository.insert_event(
-                job.id,
-                event_type="gemini_api_call_started",
-                message="Gemini API call started.",
-                metadata={
-                    "model": model,
-                    "stage": stage,
-                    "call_purpose": call_purpose,
-                    "call_number": call_number,
-                    "calls_remaining": max(
-                        0,
-                        settings.gemini_max_calls_per_job - call_number,
-                    ),
-                    "max_calls_per_job": settings.gemini_max_calls_per_job,
-                    "provider_request_attempted": True,
-                },
-            )
-        except QueueJobFailure:
-            raise
-        except Exception as exc:
-            raise QueueJobFailure(
-                "gemini_call_guard_failed",
-                "Gemini quota guard could not be verified.",
-                stage=stage,
-                exception_type=type(exc).__name__,
-            ) from exc
     generate = getattr(getattr(client, "models"), "generate_content")
+    call_number = (
+        call_budget.reserve(stage=stage, call_purpose=call_purpose)
+        if call_budget is not None
+        else 1
+    )
+    calls_remaining = (
+        call_budget.calls_remaining if call_budget is not None else None
+    )
+    context = _optional_gemini_call_context()
+    _emit_context_gemini_event_best_effort(
+        context,
+        event_type="gemini_api_call_started",
+        message="Gemini API call started.",
+        metadata_factory=lambda settings: {
+            "model": model,
+            "stage": stage,
+            "call_purpose": call_purpose,
+            "call_number": call_number,
+            "calls_remaining": (
+                calls_remaining
+                if calls_remaining is not None
+                else max(0, settings.gemini_max_calls_per_job - call_number)
+            ),
+            "max_calls_per_job": (
+                max(0, call_budget.max_calls)
+                if call_budget is not None
+                else settings.gemini_max_calls_per_job
+            ),
+            "provider_request_attempted": True,
+        },
+    )
     request_started_at = perf_counter()
     try:
         response = (
@@ -1917,55 +2000,53 @@ def guarded_generate_content(
             else generate(model=model, contents=contents, config=config)
         )
     except Exception as exc:
-        if context is not None:
-            repository, job, settings = context
-            repository.insert_event(
-                job.id,
-                event_type="gemini_api_call_failed",
-                message="Gemini API call failed.",
-                metadata={
-                    "model": model,
-                    "stage": stage,
-                    "call_purpose": call_purpose,
-                    "call_number": call_number or 0,
-                    "calls_remaining": max(
-                        0,
-                        settings.gemini_max_calls_per_job - (call_number or 0),
-                    ),
-                    "provider_request_attempted": True,
-                    "provider_status_class": provider_status_class(exc),
-                    "failure_category": classify_gemini_exception(exc),
-                    **safe_gemini_provider_error(
-                        exc,
-                        provider_request_attempted=True,
-                        failure_stage=stage,
-                        model=model,
-                        latency_bucket=gemini_latency_bucket(
-                            perf_counter() - request_started_at
-                        ),
-                    ),
-                },
-            )
-        raise
-    if context is not None:
-        repository, job, settings = context
-        repository.insert_event(
-            job.id,
-            event_type="gemini_api_call_completed",
-            message="Gemini API call completed.",
-            metadata={
+        _emit_context_gemini_event_best_effort(
+            context,
+            event_type="gemini_api_call_failed",
+            message="Gemini API call failed.",
+            metadata_factory=lambda settings: {
                 "model": model,
                 "stage": stage,
                 "call_purpose": call_purpose,
-                "call_number": call_number or 0,
-                "calls_remaining": max(
-                    0,
-                    settings.gemini_max_calls_per_job - (call_number or 0),
+                "call_number": call_number,
+                "calls_remaining": (
+                    calls_remaining
+                    if calls_remaining is not None
+                    else max(0, settings.gemini_max_calls_per_job - call_number)
                 ),
                 "provider_request_attempted": True,
-                **gemini_response_metadata(response),
+                "provider_status_class": provider_status_class(exc),
+                "failure_category": classify_gemini_exception(exc),
+                **safe_gemini_provider_error(
+                    exc,
+                    provider_request_attempted=True,
+                    failure_stage=stage,
+                    model=model,
+                    latency_bucket=gemini_latency_bucket(
+                        perf_counter() - request_started_at
+                    ),
+                ),
             },
         )
+        raise
+    _emit_context_gemini_event_best_effort(
+        context,
+        event_type="gemini_api_call_completed",
+        message="Gemini API call completed.",
+        metadata_factory=lambda settings: {
+            "model": model,
+            "stage": stage,
+            "call_purpose": call_purpose,
+            "call_number": call_number,
+            "calls_remaining": (
+                calls_remaining
+                if calls_remaining is not None
+                else max(0, settings.gemini_max_calls_per_job - call_number)
+            ),
+            "provider_request_attempted": True,
+            **gemini_response_metadata(response),
+        },
+    )
     return response
 
 
@@ -1977,6 +2058,7 @@ def generate_content_json(
     settings: Settings,
     structured_schema: bool,
     call_purpose: str,
+    call_budget: GeminiProviderCallBudget | None = None,
 ) -> tuple[dict, object]:
     try:
         config = build_gemini_generation_config(
@@ -1996,6 +2078,7 @@ def generate_content_json(
         config=config,
         stage="gemini_structured_extraction",
         call_purpose=call_purpose,
+        call_budget=call_budget,
     )
     metadata = gemini_response_metadata(response)
     text = extract_gemini_text(response)
@@ -2416,6 +2499,7 @@ def run_structured_extraction_call(
     source_metadata: dict[str, object],
     platform: str,
     call_purpose: str = "analysis",
+    call_budget: GeminiProviderCallBudget | None = None,
 ) -> tuple[dict, object]:
     prompt = CANONICAL_RECIPE_PROMPT + build_untrusted_source_context_prompt(
         source_metadata,
@@ -2428,6 +2512,7 @@ def run_structured_extraction_call(
         settings=settings,
         structured_schema=True,
         call_purpose=call_purpose,
+        call_budget=call_budget,
     )
 
 
@@ -2441,6 +2526,7 @@ def run_structured_repair_call(
     invalid_canonical: dict | None,
     invalid_text: str | None = None,
     settings: Settings,
+    call_budget: GeminiProviderCallBudget | None = None,
 ) -> dict:
     invalid_payload = invalid_text if invalid_text is not None else canonical_to_safe_json(invalid_canonical)
     prompt = (
@@ -2457,6 +2543,7 @@ def run_structured_repair_call(
         settings=settings,
         structured_schema=True,
         call_purpose="repair",
+        call_budget=call_budget,
     )
     return parsed
 
@@ -2473,6 +2560,7 @@ def run_single_pass_structured_extraction(
     platform: str,
 ) -> tuple[GeminiRecipeResult, str, bool]:
     model = settings.gemini_primary_model
+    call_budget = GeminiProviderCallBudget(settings.gemini_max_calls_per_job)
     repair_used = False
     repair_attempted = False
     fallback_attempted = False
@@ -2483,16 +2571,18 @@ def run_single_pass_structured_extraction(
         else ""
     )
     fallback_available = bool(fallback_model and fallback_model != model)
-    repository.insert_event(
+    _emit_gemini_event_best_effort(
+        repository,
         job.id,
         event_type="gemini_structured_extraction_started",
         message="Gemini structured extraction started.",
-        metadata=structured_event_metadata(
+        metadata_factory=lambda: structured_event_metadata(
             platform=platform,
             model=model,
             input_mode=input_mode,
             settings=settings,
-        ),
+        )
+        | {"provider_attempt": call_budget.attempts},
     )
     canonical: dict | None = None
     result: GeminiRecipeResult | None = None
@@ -2501,6 +2591,8 @@ def run_single_pass_structured_extraction(
     failure_exception_type: str | None = None
     invalid_text: str | None = None
     repairable_failure = True
+    last_provider_error_metadata: dict[str, object] = {}
+    attempts_before = call_budget.attempts
     try:
         canonical, _response = run_structured_extraction_call(
             client=client,
@@ -2509,6 +2601,7 @@ def run_single_pass_structured_extraction(
             settings=settings,
             source_metadata=source_metadata,
             platform=platform,
+            call_budget=call_budget,
         )
         result, errors = validate_and_normalize_canonical_recipe(
             canonical,
@@ -2518,6 +2611,16 @@ def run_single_pass_structured_extraction(
         if errors:
             failure_category = structured_failure_category(validation_errors=errors)
     except Exception as exc:
+        attempt_failure_metadata = _safe_attempt_failure_metadata(
+            exc,
+            call_budget=call_budget,
+            attempts_before=attempts_before,
+            stage="gemini_structured_extraction",
+            model=model,
+            input_mode=input_mode,
+        )
+        if attempt_failure_metadata:
+            last_provider_error_metadata = attempt_failure_metadata
         failure_category = structured_failure_category(exc)
         failure_exception_type = type(exc).__name__
         repairable_failure = (
@@ -2546,11 +2649,12 @@ def run_single_pass_structured_extraction(
     ):
         repair_attempted = True
         repair_model = settings.effective_gemini_repair_model
-        repository.insert_event(
+        _emit_gemini_event_best_effort(
+            repository,
             job.id,
             event_type="recipe_card_repair_started",
             message="Recipe card repair started.",
-            metadata=structured_event_metadata(
+            metadata_factory=lambda: structured_event_metadata(
                 platform=platform,
                 model=repair_model,
                 input_mode=input_mode,
@@ -2560,8 +2664,11 @@ def run_single_pass_structured_extraction(
                 repair_attempted=True,
                 quality_passed=False,
                 failure_category=failure_category,
-            ),
+            )
+            | last_provider_error_metadata
+            | {"provider_attempt": call_budget.attempts},
         )
+        attempts_before = call_budget.attempts
         try:
             repair_errors = errors or [failure_category]
             repaired = run_structured_repair_call(
@@ -2573,6 +2680,7 @@ def run_single_pass_structured_extraction(
                 invalid_canonical=canonical,
                 invalid_text=invalid_text,
                 settings=settings,
+                call_budget=call_budget,
             )
             repaired_result, repaired_errors = validate_and_normalize_canonical_recipe(
                 repaired,
@@ -2587,11 +2695,12 @@ def run_single_pass_structured_extraction(
             quality_passed = not errors and recipe_quality_passed(result, settings)
             if errors:
                 failure_category = structured_failure_category(validation_errors=errors)
-            repository.insert_event(
+            _emit_gemini_event_best_effort(
+                repository,
                 job.id,
                 event_type="recipe_card_repair_completed",
                 message="Recipe card repair completed.",
-                metadata=structured_event_metadata(
+                metadata_factory=lambda: structured_event_metadata(
                     platform=platform,
                     model=repair_model,
                     input_mode=input_mode,
@@ -2602,17 +2711,29 @@ def run_single_pass_structured_extraction(
                     repair_used=True,
                     quality_passed=quality_passed,
                     failure_category=None if quality_passed else failure_category,
-                ),
+                )
+                | {"provider_attempt": call_budget.attempts},
             )
         except Exception as exc:
+            attempt_failure_metadata = _safe_attempt_failure_metadata(
+                exc,
+                call_budget=call_budget,
+                attempts_before=attempts_before,
+                stage="gemini_structured_extraction",
+                model=repair_model,
+                input_mode=input_mode,
+            )
+            if attempt_failure_metadata:
+                last_provider_error_metadata = attempt_failure_metadata
             underlying_failure_category = structured_failure_category(exc)
             failure_category = "gemini_repair_failed"
             failure_exception_type = type(exc).__name__
-            repository.insert_event(
+            _emit_gemini_event_best_effort(
+                repository,
                 job.id,
                 event_type="recipe_card_repair_failed",
                 message="Recipe card repair failed.",
-                metadata=structured_event_metadata(
+                metadata_factory=lambda: structured_event_metadata(
                     platform=platform,
                     model=repair_model,
                     input_mode=input_mode,
@@ -2626,7 +2747,10 @@ def run_single_pass_structured_extraction(
                     error_code="gemini_repair_failed",
                     exception_type=type(exc).__name__,
                 )
-                | {"underlying_failure_category": underlying_failure_category},
+                | {
+                    "underlying_failure_category": underlying_failure_category,
+                    "provider_attempt": call_budget.attempts,
+                },
             )
 
     fallback_recoverable = failure_category in {
@@ -2642,18 +2766,15 @@ def run_single_pass_structured_extraction(
         "gemini_repair_failed",
     }
     if not quality_passed and fallback_available and fallback_recoverable:
-        calls_remaining = max(
-            0,
-            settings.gemini_max_calls_per_job
-            - repository.count_job_gemini_calls(job.id),
-        )
+        calls_remaining = call_budget.calls_remaining
         if calls_remaining <= 0:
             failure_category = "gemini_call_budget_exhausted"
-            repository.insert_event(
+            _emit_gemini_event_best_effort(
+                repository,
                 job.id,
                 event_type="gemini_structured_extraction_fallback_skipped",
                 message="Gemini structured extraction fallback was not invoked.",
-                metadata=structured_event_metadata(
+                metadata_factory=lambda: structured_event_metadata(
                     platform=platform,
                     model=model,
                     fallback_model=fallback_model,
@@ -2668,6 +2789,7 @@ def run_single_pass_structured_extraction(
                     "call_purpose": "model_fallback",
                     "calls_remaining": 0,
                     "provider_request_attempted": False,
+                    "provider_attempt": call_budget.attempts,
                 },
             )
         else:
@@ -2680,11 +2802,12 @@ def run_single_pass_structured_extraction(
             except GeminiRequestConfigurationError as exc:
                 failure_category = "gemini_request_configuration_error"
                 failure_exception_type = type(exc).__name__
-                repository.insert_event(
+                _emit_gemini_event_best_effort(
+                    repository,
                     job.id,
                     event_type="gemini_structured_extraction_fallback_failed",
                     message="Gemini structured extraction fallback failed.",
-                    metadata=structured_failure_metadata(
+                    metadata_factory=lambda: structured_failure_metadata(
                         platform=platform,
                         model=fallback_model,
                         input_mode=input_mode,
@@ -2703,15 +2826,17 @@ def run_single_pass_structured_extraction(
                         "call_purpose": "model_fallback",
                         "calls_remaining": calls_remaining,
                         "provider_request_attempted": False,
+                        "provider_attempt": call_budget.attempts,
                     },
                 )
             else:
                 fallback_attempted = True
-                repository.insert_event(
+                _emit_gemini_event_best_effort(
+                    repository,
                     job.id,
                     event_type="gemini_structured_extraction_fallback_started",
                     message="Gemini structured extraction fallback started.",
-                    metadata=structured_event_metadata(
+                    metadata_factory=lambda: structured_event_metadata(
                         platform=platform,
                         model=model,
                         fallback_model=fallback_model,
@@ -2727,10 +2852,12 @@ def run_single_pass_structured_extraction(
                     | {
                         "call_purpose": "model_fallback",
                         "calls_remaining": calls_remaining,
-                        "provider_request_attempted": True,
+                        "provider_request_attempted": False,
+                        "provider_attempt": call_budget.attempts,
                     },
                 )
                 model = fallback_model
+                attempts_before = call_budget.attempts
                 try:
                     canonical, _response = run_structured_extraction_call(
                         client=client,
@@ -2740,6 +2867,7 @@ def run_single_pass_structured_extraction(
                         source_metadata=source_metadata,
                         platform=platform,
                         call_purpose="model_fallback",
+                        call_budget=call_budget,
                     )
                     result, errors = validate_and_normalize_canonical_recipe(
                         canonical,
@@ -2750,11 +2878,12 @@ def run_single_pass_structured_extraction(
                     fallback_model_used = True
                     if errors:
                         failure_category = structured_failure_category(validation_errors=errors)
-                    repository.insert_event(
+                    _emit_gemini_event_best_effort(
+                        repository,
                         job.id,
                         event_type="gemini_structured_extraction_fallback_completed",
                         message="Gemini structured extraction fallback completed.",
-                        metadata=structured_event_metadata(
+                        metadata_factory=lambda: structured_event_metadata(
                             platform=platform,
                             model=model,
                             input_mode=input_mode,
@@ -2767,9 +2896,22 @@ def run_single_pass_structured_extraction(
                             quality_passed=quality_passed,
                             failure_category=None if quality_passed else failure_category,
                         )
-                        | {"provider_request_attempted": True},
+                        | {
+                            "provider_request_attempted": True,
+                            "provider_attempt": call_budget.attempts,
+                        },
                     )
                 except Exception as exc:
+                    attempt_failure_metadata = _safe_attempt_failure_metadata(
+                        exc,
+                        call_budget=call_budget,
+                        attempts_before=attempts_before,
+                        stage="gemini_structured_extraction",
+                        model=model,
+                        input_mode=input_mode,
+                    )
+                    if attempt_failure_metadata:
+                        last_provider_error_metadata = attempt_failure_metadata
                     underlying_category = structured_failure_category(exc)
                     failure_category = "gemini_fallback_failed"
                     failure_exception_type = type(exc).__name__
@@ -2777,11 +2919,12 @@ def run_single_pass_structured_extraction(
                         isinstance(exc, QueueJobFailure)
                         and exc.metadata.get("provider_request_attempted") is False
                     )
-                    repository.insert_event(
+                    _emit_gemini_event_best_effort(
+                        repository,
                         job.id,
                         event_type="gemini_structured_extraction_fallback_failed",
                         message="Gemini structured extraction fallback failed.",
-                        metadata=structured_failure_metadata(
+                        metadata_factory=lambda: structured_failure_metadata(
                             platform=platform,
                             model=model,
                             input_mode=input_mode,
@@ -2798,15 +2941,17 @@ def run_single_pass_structured_extraction(
                         | {
                             "underlying_failure_category": underlying_category,
                             "provider_request_attempted": fallback_model_used,
+                            "provider_attempt": call_budget.attempts,
                         },
                     )
 
     if result is None:
-        repository.insert_event(
+        _emit_gemini_event_best_effort(
+            repository,
             job.id,
             event_type="gemini_structured_extraction_failed",
             message="Gemini structured extraction failed.",
-            metadata=structured_failure_metadata(
+            metadata_factory=lambda: structured_failure_metadata(
                 platform=platform,
                 model=model,
                 input_mode=input_mode,
@@ -2817,7 +2962,9 @@ def run_single_pass_structured_extraction(
                 fallback_model=fallback_model or None,
                 fallback_model_used=fallback_model_used,
                 exception_type=failure_exception_type,
-            ),
+            )
+            | last_provider_error_metadata
+            | {"provider_attempt": call_budget.attempts},
         )
         raise QueueJobFailure(
             "gemini_structured_extraction_failed",
@@ -2830,16 +2977,19 @@ def run_single_pass_structured_extraction(
                 "fallback_attempted": fallback_attempted,
                 "fallback_model": fallback_model,
                 "fallback_provider_request_attempted": fallback_model_used,
+                "provider_attempt": call_budget.attempts,
                 "safe_error_message": STRUCTURED_EXTRACTION_USER_MESSAGE,
-            },
+            }
+            | last_provider_error_metadata,
         )
 
     final_passed = recipe_quality_passed(result, settings) and not errors
-    repository.insert_event(
+    _emit_gemini_event_best_effort(
+        repository,
         job.id,
         event_type="recipe_quality_gate_checked",
         message="Recipe quality gate checked.",
-        metadata=structured_event_metadata(
+        metadata_factory=lambda: structured_event_metadata(
             platform=platform,
             model=model,
             input_mode=input_mode,
@@ -2851,15 +3001,17 @@ def run_single_pass_structured_extraction(
             fallback_attempted=fallback_attempted,
             fallback_model_used=fallback_model_used,
             quality_passed=final_passed,
-        ),
+        )
+        | {"provider_attempt": call_budget.attempts},
     )
     if settings.recipe_quality_gate_enabled and not final_passed:
         failure_category = structured_failure_category(validation_errors=errors)
-        repository.insert_event(
+        _emit_gemini_event_best_effort(
+            repository,
             job.id,
             event_type="recipe_quality_gate_failed",
             message="Recipe quality gate failed.",
-            metadata=structured_event_metadata(
+            metadata_factory=lambda: structured_event_metadata(
                 platform=platform,
                 model=model,
                 input_mode=input_mode,
@@ -2874,13 +3026,16 @@ def run_single_pass_structured_extraction(
                 quality_passed=False,
                 failure_category=failure_category,
                 error_code="recipe_quality_gate_failed",
-            ),
+            )
+            | last_provider_error_metadata
+            | {"provider_attempt": call_budget.attempts},
         )
-        repository.insert_event(
+        _emit_gemini_event_best_effort(
+            repository,
             job.id,
             event_type="gemini_structured_extraction_failed",
             message="Gemini structured extraction failed.",
-            metadata=structured_failure_metadata(
+            metadata_factory=lambda: structured_failure_metadata(
                 platform=platform,
                 model=model,
                 input_mode=input_mode,
@@ -2892,7 +3047,8 @@ def run_single_pass_structured_extraction(
                 fallback_model_used=fallback_model_used,
                 result=result,
                 validation_errors_count=len(errors),
-            ),
+            )
+            | {"provider_attempt": call_budget.attempts},
         )
         raise QueueJobFailure(
             "gemini_structured_extraction_failed",
@@ -2904,14 +3060,17 @@ def run_single_pass_structured_extraction(
                 "fallback_attempted": fallback_attempted,
                 "fallback_model": fallback_model,
                 "fallback_provider_request_attempted": fallback_model_used,
+                "provider_attempt": call_budget.attempts,
                 "safe_error_message": STRUCTURED_EXTRACTION_USER_MESSAGE,
-            },
+            }
+            | last_provider_error_metadata,
         )
-    repository.insert_event(
+    _emit_gemini_event_best_effort(
+        repository,
         job.id,
         event_type="gemini_structured_extraction_completed",
         message="Gemini structured extraction completed.",
-        metadata=structured_event_metadata(
+        metadata_factory=lambda: structured_event_metadata(
             platform=platform,
             model=model,
             input_mode=input_mode,
@@ -2923,7 +3082,8 @@ def run_single_pass_structured_extraction(
             fallback_attempted=fallback_attempted,
             fallback_model_used=fallback_model_used,
             quality_passed=final_passed,
-        ),
+        )
+        | {"provider_attempt": call_budget.attempts},
     )
     return result, model, repair_used
 

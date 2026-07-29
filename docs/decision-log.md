@@ -1,5 +1,16 @@
 # Decision Log
 
+## 2026-07-29 — M23.GD8Q2 direct queued Gemini invocation
+
+- Structured extraction now enforces its existing per-job call maximum with
+  local attempt state immediately before each SDK invocation. Gemini events,
+  context metadata, safe-error metadata, and their persistence are best-effort
+  observability and cannot suppress a valid provider request or trigger model
+  fallback.
+- The protected request ladder uses the same authoritative provider-call path
+  without clearing queue context. Production models, prompts, schema, thinking,
+  token limits, parsing, quota finalization, and queue sequencing are unchanged.
+
 ## 2026-07-29 — M23.GD7B minimal Gemini diagnostic schema
 
 - The protected tiny-schema diagnostic now uses an ordinary one-field Pydantic

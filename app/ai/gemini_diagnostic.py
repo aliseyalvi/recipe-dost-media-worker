@@ -13,7 +13,6 @@ from app.ai.gemini_reliability import (
 )
 from app.config import Settings
 from app.queue_worker import (
-    _GEMINI_CALL_CONTEXT,
     build_youtube_gemini_input_part,
     create_gemini_client,
     extract_gemini_text,
@@ -88,7 +87,6 @@ def run_gemini_request_ladder(
         None if request.level == "plain_text" else False
     )
     failure_stage = "client_configuration"
-    context_token = _GEMINI_CALL_CONTEXT.set(None)
     try:
         if settings.gemini_api_key is None:
             raise ValueError("Gemini diagnostic credential is not configured.")
@@ -216,8 +214,6 @@ def run_gemini_request_ladder(
             structured_parse_succeeded=structured_parse_succeeded,
             latency_bucket=str(safe_error["latency_bucket"]),
         )
-    finally:
-        _GEMINI_CALL_CONTEXT.reset(context_token)
 
 
 def _validate_tiny_response(response: object) -> None:
