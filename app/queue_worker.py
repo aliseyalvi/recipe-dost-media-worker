@@ -23,10 +23,12 @@ from app.ai.gemini_reliability import (
     StructuredResponseError,
     build_model_generation_config,
     classify_gemini_exception,
+    gemini_latency_bucket,
     normalize_finish_reason,
     parse_structured_response,
     provider_status_class,
     response_length_bucket,
+    safe_gemini_provider_error,
     validate_generation_config,
 )
 from app.config import Settings, get_settings
@@ -1440,10 +1442,7 @@ def process_youtube_gemini_url_job(
     }
     if settings.gemini_extraction_mode == "single_pass_structured":
         try:
-            from google.genai import types
-
-            uri_kwargs = {"file" + "_uri": job.source_url, "mime_type": "video/mp4"}
-            video_part = types.Part.from_uri(**uri_kwargs)
+            video_part = build_youtube_gemini_input_part(job.source_url)
             result, accepted_model, repair_used = run_single_pass_structured_extraction(
                 repository=repository,
                 job=job,
@@ -1579,6 +1578,13 @@ def create_gemini_client(api_key: str, timeout_seconds: int) -> object:
         )
     except TypeError:
         return genai.Client(api_key=api_key)
+
+
+def build_youtube_gemini_input_part(youtube_url: str) -> object:
+    from google.genai import types
+
+    uri_kwargs = {"file" + "_uri": youtube_url, "mime_type": "video/mp4"}
+    return types.Part.from_uri(**uri_kwargs)
 
 
 def upload_gemini_video_file(
@@ -1903,6 +1909,7 @@ def guarded_generate_content(
                 exception_type=type(exc).__name__,
             ) from exc
     generate = getattr(getattr(client, "models"), "generate_content")
+    request_started_at = perf_counter()
     try:
         response = (
             generate(model=model, contents=contents)
@@ -1928,6 +1935,15 @@ def guarded_generate_content(
                     "provider_request_attempted": True,
                     "provider_status_class": provider_status_class(exc),
                     "failure_category": classify_gemini_exception(exc),
+                    **safe_gemini_provider_error(
+                        exc,
+                        provider_request_attempted=True,
+                        failure_stage=stage,
+                        model=model,
+                        latency_bucket=gemini_latency_bucket(
+                            perf_counter() - request_started_at
+                        ),
+                    ),
                 },
             )
         raise
@@ -3076,10 +3092,7 @@ def generate_youtube_url_brief(
 ) -> str:
     settings = get_settings()
     try:
-        from google.genai import types
-
-        uri_kwargs = {"file" + "_uri": youtube_url, "mime_type": "video/mp4"}
-        video_part = types.Part.from_uri(**uri_kwargs)
+        video_part = build_youtube_gemini_input_part(youtube_url)
         response = guarded_generate_content(
             client,
             model=model,

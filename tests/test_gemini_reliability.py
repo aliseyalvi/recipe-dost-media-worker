@@ -9,6 +9,7 @@ from app.ai.gemini_reliability import (
     build_model_generation_config,
     classify_gemini_exception,
     parse_structured_response,
+    safe_gemini_provider_error,
 )
 from app.qa.replay import canonical_recipe, settings_for_case
 from app.queue_worker import (
@@ -127,6 +128,91 @@ class GeminiCapabilityTests(unittest.TestCase):
         for status, category in expected.items():
             with self.subTest(status=status):
                 self.assertEqual(classify_gemini_exception(Error(status)), category)
+
+    def test_safe_provider_error_taxonomy_uses_structured_sdk_fields(self) -> None:
+        from google.genai.errors import ClientError, ServerError
+
+        cases = (
+            (ClientError(400, {"error": {"status": "INVALID_ARGUMENT"}}), "invalid_argument"),
+            (
+                ClientError(400, {"error": {"status": "FAILED_PRECONDITION"}}),
+                "failed_precondition",
+            ),
+            (ClientError(401, {"error": {"status": "UNAUTHENTICATED"}}), "authentication_failed"),
+            (ClientError(403, {"error": {"status": "PERMISSION_DENIED"}}), "permission_denied"),
+            (ClientError(404, {"error": {"status": "NOT_FOUND"}}), "model_or_endpoint_not_found"),
+            (ClientError(409, {"error": {"status": "ABORTED"}}), "conflict"),
+            (ClientError(429, {"error": {"status": "RESOURCE_EXHAUSTED"}}), "rate_limited"),
+            (ServerError(500, {"error": {"status": "INTERNAL"}}), "provider_internal"),
+            (ServerError(503, {"error": {"status": "UNAVAILABLE"}}), "provider_unavailable"),
+        )
+        for error, expected in cases:
+            with self.subTest(expected=expected):
+                safe = safe_gemini_provider_error(
+                    error,
+                    provider_request_attempted=True,
+                    failure_stage="provider_request",
+                    model="gemini-3.1-flash-lite",
+                )
+                self.assertEqual(safe["provider_error_category"], expected)
+                self.assertEqual(safe["provider_http_status"], error.code)
+                self.assertNotIn("details", safe)
+                self.assertNotIn("message", safe)
+
+    def test_safe_provider_error_local_transport_and_parse_categories(self) -> None:
+        from pydantic import BaseModel, ValidationError
+
+        class TinyModel(BaseModel):
+            ok: bool
+
+        try:
+            TinyModel.model_validate({})
+        except ValidationError as validation_error:
+            local_validation = validation_error
+
+        cases = (
+            (
+                GeminiRequestConfigurationError("sensitive configuration"),
+                False,
+                "local_request_validation",
+            ),
+            (TimeoutError("sensitive timeout"), True, "timeout"),
+            (ConnectionError("sensitive connection"), True, "connection_error"),
+            (
+                StructuredResponseError("gemini_json_parse_failed", raw_text="sensitive"),
+                True,
+                "response_parse_error",
+            ),
+            (local_validation, True, "local_request_validation"),
+        )
+        for error, attempted, expected in cases:
+            with self.subTest(expected=expected):
+                safe = safe_gemini_provider_error(
+                    error,
+                    provider_request_attempted=attempted,
+                    failure_stage="diagnostic",
+                )
+                self.assertEqual(safe["provider_error_category"], expected)
+                if error is local_validation:
+                    self.assertFalse(safe["provider_request_attempted"])
+                serialized = json.dumps(safe)
+                self.assertNotIn("sensitive", serialized)
+
+    def test_safe_detail_does_not_change_production_failure_category(self) -> None:
+        class Error(Exception):
+            status_code = 500
+            status = "INTERNAL"
+
+        error = Error("sensitive")
+        self.assertEqual(classify_gemini_exception(error), "gemini_server_error")
+        self.assertEqual(
+            safe_gemini_provider_error(
+                error,
+                provider_request_attempted=True,
+                failure_stage="gemini_structured_extraction",
+            )["provider_error_category"],
+            "provider_internal",
+        )
 
 
 if __name__ == "__main__":

@@ -84,6 +84,7 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_service_role_key: SecretStr
     gemini_api_key: Optional[SecretStr] = None
+    allow_gemini_diagnostic: bool = False
     gemini_model: str = "gemini-3.5-flash"
     gemini_extraction_mode: GeminiExtractionMode = worker_config_value(
         "gemini_extraction_mode", "single_pass_structured"

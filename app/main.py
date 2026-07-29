@@ -15,6 +15,11 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.ai.gemini_diagnostic import (
+    GeminiRequestLadderRequest,
+    GeminiRequestLadderResponse,
+    run_gemini_request_ladder,
+)
 from app.ai.gemini_recipe import GeminiRecipeAnalyzer
 from app.config import Settings, get_settings, validate_external_resolver_runtime_config
 from app.job_runner import JobNotFoundError, JobRunner, WorkerProcessingError
@@ -770,6 +775,32 @@ class DebugTikWMRequest(BaseModel):
 class MetadataPreviewRequest(BaseModel):
     url: str
     platform: Optional[str] = None
+
+
+@app.post(
+    "/debug/gemini-request-ladder",
+    response_model=GeminiRequestLadderResponse,
+    responses={
+        401: {"model": ErrorResponse},
+        404: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+    },
+)
+def gemini_request_ladder_endpoint(
+    request: GeminiRequestLadderRequest,
+    _authorized: None = Depends(require_worker_secret),
+    settings: Settings = Depends(get_settings),
+) -> Union[GeminiRequestLadderResponse, JSONResponse]:
+    if (
+        settings.app_env != "development"
+        or settings.allow_gemini_diagnostic is not True
+    ):
+        return error_response(
+            "not_found",
+            "Diagnostic endpoint is not available.",
+            404,
+        )
+    return run_gemini_request_ladder(request, settings)
 
 
 @app.post(

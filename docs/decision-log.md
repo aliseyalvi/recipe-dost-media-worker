@@ -1,5 +1,18 @@
 # Decision Log
 
+## 2026-07-29 — M23.GD6 protected Gemini request ladder
+
+- Development may temporarily enable one shared-secret-protected diagnostic
+  route that performs exactly one Gemini call at a selected plain-text, tiny
+  schema, production recipe-schema text, or production-shaped YouTube level.
+  It has no queue, quota, Supabase, resolver, Sentry, fallback, retry, repair,
+  persistence, or response-content path.
+- Existing Gemini call-failure events retain their names and coarse production
+  classification while gaining bounded structured SDK status/category fields.
+  Exception text, provider bodies, prompts, schemas, URLs, keys, identifiers,
+  and paths remain excluded. Production request and terminal behavior are
+  unchanged.
+
 ## 2026-07-29 — M23.GD3A verified Gemini runtime pins
 
 - Render and Docker now install the owner-verified `google-genai`, Pydantic,
