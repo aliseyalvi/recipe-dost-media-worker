@@ -2,6 +2,39 @@
 
 Keep only commands that future turns may need.
 
+## M23.W10A-CFG queue-liveness configuration alignment
+
+```bash
+.venv/bin/python -m unittest \
+  tests.test_file_runtime_config tests.test_queue_liveness \
+  tests.test_fastapi_startup_config
+# 50 focused config/queue/startup/health tests passed
+
+.venv/bin/python -m unittest \
+  tests.test_queue_gemini_invocation tests.test_queue_gemini_guard \
+  tests.test_gemini_reliability tests.test_media_resolver_adapters \
+  tests.test_external_queue_routing tests.test_external_resolver_config
+# 63 unchanged Gemini/provider/resolver tests passed
+
+.venv/bin/python -m compileall app scripts
+.venv/bin/python -m unittest discover -s tests -p "test_*.py"
+.venv/bin/python -m pip check
+.venv/bin/python scripts/check_runtime_config.py development
+.venv/bin/python scripts/check_runtime_config.py production
+.venv/bin/python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/replay_manifest.json
+.venv/bin/python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+git diff --check
+# passed: compile; 264 tests; no broken requirements; both config checks;
+# 11-case replay; 7-case mixed batch; diff check
+```
+
+The mixed batch was FIFO, single-active-job, terminal 7/7, unstarved, and
+ended with zero active reservations. No live Supabase, Gemini, provider,
+Sentry, Render, deployment, database, frontend, secret, or dependency action
+occurred.
+
 ## M23.W8A-W8D Instagram Unified v1 adapter
 
 ```bash

@@ -21,6 +21,13 @@ from app.runtime_config import (
 )
 from scripts.validate_env import ENV_ONLY_EXPORT_KEYS
 
+QUEUE_LIVENESS_DEFAULTS = {
+    "QUEUE_EMPTY_SLEEP_SECONDS": 5,
+    "QUEUE_STALE_AFTER_SECONDS": 600,
+    "QUEUE_STALE_MAX_RECOVERY_ATTEMPTS": 2,
+    "QUEUE_STALE_SCAN_INTERVAL_SECONDS": 60,
+}
+
 
 def build_settings() -> Settings:
     return Settings(
@@ -136,6 +143,81 @@ class FileRuntimeConfigTests(unittest.TestCase):
         self.assertFalse(settings.cookie_media_fallback_enabled)
         self.assertIsNone(settings.instagram_rapidapi_key)
         self.assertIsNone(settings.tiktok_akng_access_token)
+
+    def test_queue_liveness_defaults_are_inherited_by_both_environments(self) -> None:
+        for environment in ("development", "production"):
+            with self.subTest(environment=environment), self.isolated_environment(
+                APP_ENV=environment
+            ):
+                config = load_worker_config()
+                settings = build_settings()
+
+            environment_values = json.loads(
+                (
+                    PROJECT_ROOT
+                    / "config"
+                    / f"worker.{environment}.json"
+                ).read_text(encoding="utf-8")
+            )
+            for key, expected in QUEUE_LIVENESS_DEFAULTS.items():
+                self.assertEqual(config[key], expected)
+                self.assertNotIn(key, environment_values)
+                self.assertEqual(
+                    getattr(settings, key.lower()),
+                    expected,
+                )
+
+    def test_queue_liveness_environment_overrides_use_settings_layer(self) -> None:
+        overrides = {
+            "QUEUE_EMPTY_SLEEP_SECONDS": "9",
+            "QUEUE_STALE_AFTER_SECONDS": "900",
+            "QUEUE_STALE_MAX_RECOVERY_ATTEMPTS": "3",
+            "QUEUE_STALE_SCAN_INTERVAL_SECONDS": "120",
+        }
+        with self.isolated_environment(APP_ENV="development", **overrides):
+            settings = build_settings()
+            report = worker_config_report()
+
+        self.assertEqual(settings.queue_empty_sleep_seconds, 9)
+        self.assertEqual(settings.queue_stale_after_seconds, 900)
+        self.assertEqual(settings.queue_stale_max_recovery_attempts, 3)
+        self.assertEqual(settings.queue_stale_scan_interval_seconds, 120)
+        for key in overrides:
+            self.assertEqual(report["field_sources"][key], "environment_override")
+
+        safe = safe_config_summary(settings)
+        self.assertEqual(
+            {
+                key: safe[key]
+                for key in (
+                    "queue_idle_poll_seconds",
+                    "queue_stale_after_seconds",
+                    "queue_stale_max_recovery_attempts",
+                    "queue_stale_scan_interval_seconds",
+                )
+            },
+            {
+                "queue_idle_poll_seconds": 9,
+                "queue_stale_after_seconds": 900,
+                "queue_stale_max_recovery_attempts": 3,
+                "queue_stale_scan_interval_seconds": 120,
+            },
+        )
+
+    def test_invalid_queue_liveness_values_fail_settings_validation(self) -> None:
+        invalid_values = {
+            "QUEUE_EMPTY_SLEEP_SECONDS": "0",
+            "QUEUE_STALE_AFTER_SECONDS": "59",
+            "QUEUE_STALE_MAX_RECOVERY_ATTEMPTS": "11",
+            "QUEUE_STALE_SCAN_INTERVAL_SECONDS": "4",
+        }
+        for key, value in invalid_values.items():
+            with self.subTest(key=key), self.isolated_environment(
+                APP_ENV="development",
+                **{key: value},
+            ):
+                with self.assertRaises(ValidationError):
+                    build_settings()
 
     def test_missing_environment_file_fails_safely(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

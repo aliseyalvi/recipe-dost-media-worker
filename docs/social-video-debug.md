@@ -2,6 +2,12 @@
 
 ## Current Status
 
+- M23.W10A-CFG moves the queue-liveness operational defaults into the canonical
+  worker JSON configuration. Development and production inherit the shared
+  5/600/2/60 values, optional nonblank environment overrides still pass through
+  Pydantic validation, and health reports the resolved safe values. No resolver,
+  media, Gemini, quota, or queue algorithm changed. Offline validation passed
+  264 tests plus the 11-case replay and seven-case mixed sequential batch.
 - M23.W8A-W8D replaces the broken active Instagram Reels13 route with
   `rapidapi_instagram_unified_v1` in development. Reels13 remains present but
   false-gated and absent from the chain. Unified v1 strictly validates

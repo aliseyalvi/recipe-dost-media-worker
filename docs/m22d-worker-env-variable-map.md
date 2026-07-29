@@ -74,8 +74,11 @@ These moved to committed JSON config. Existing Render env values with the same n
 | `MOCK_ANALYSIS_DELAY_MS` | config/default/env override | `app/config.py`, `app/job_runner.py` | no | no | mock/dev | moved | Default 500. |
 | `MOCK_RECIPE_FIXTURE_PATH` | config/default/env override | `app/config.py`, `app/job_runner.py` | no | no | mock/dev | moved | Default `app/fixtures/mock_recipe_card.json`. |
 | `MOCK_VIDEO_PROCESSING_MODE` | config/default/env override | `app/config.py`, `app/job_runner.py`, `app/main.py` | no | no | mock/dev | moved | Default `skip_video_download`. |
-| `QUEUE_EMPTY_SLEEP_SECONDS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default 5. |
+| `QUEUE_EMPTY_SLEEP_SECONDS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Shared JSON default 5; validated 1-60. Render override is optional. |
 | `QUEUE_POLL_INTERVAL_SECONDS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default 5. |
+| `QUEUE_STALE_AFTER_SECONDS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Shared JSON default 600; validated 60-86400. Render override is optional. |
+| `QUEUE_STALE_MAX_RECOVERY_ATTEMPTS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Shared JSON default 2; validated 1-10. Render override is optional. |
+| `QUEUE_STALE_SCAN_INTERVAL_SECONDS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Shared JSON default 60; validated 5-3600. Render override is optional. |
 | `PREFERRED_VIDEO_SIZE_MB` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | yes | moved | Soft default 36 MiB; historical name says MB but conversion is binary MiB. |
 | `REAL_AI_FALLBACK_TO_MOCK` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | fallback | moved | Default false; production config must keep false. |
 | `RECIPE_BILINGUAL_OUTPUT_ENABLED` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default true. |

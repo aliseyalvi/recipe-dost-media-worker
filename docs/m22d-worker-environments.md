@@ -134,6 +134,21 @@ Current branch mapping:
 
 Render env groups should contain secrets and environment identity only. Non-secret runtime behavior belongs in `config/worker.defaults.json`, `config/worker.development.json`, and `config/worker.production.json`.
 
+Effective runtime values use this precedence: explicit `Settings` constructor
+input, nonblank process environment, nonblank `.env`, merged worker JSON
+(`worker.defaults.json` followed by the selected environment overlay), file
+secrets, then model fallbacks. Environment JSON files are sparse overlays and
+must not repeat shared defaults.
+
+The W10A queue-liveness defaults are version-controlled in
+`config/worker.defaults.json`: empty-queue polling is 5 seconds, stale work is
+eligible after 600 seconds, the recovery limit is 2, and stale scanning runs
+every 60 seconds. Development and production inherit these values. Matching
+Render variables remain supported as deliberate nonblank overrides, but are
+not required and should not be added merely to duplicate the JSON defaults.
+Pydantic `Settings` validates the effective values, and `/health.safe_config`
+reports only the four resolved safe numeric values.
+
 Use the safe environment doctor before deploys:
 
 ```bash

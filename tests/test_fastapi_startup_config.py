@@ -245,6 +245,10 @@ class FastApiStartupConfigTests(unittest.TestCase):
                 supabase_service_role_key="test-only",
             )
             self.run_startup(settings)
+        self.assertEqual(settings.queue_empty_sleep_seconds, 5)
+        self.assertEqual(settings.queue_stale_after_seconds, 600)
+        self.assertEqual(settings.queue_stale_max_recovery_attempts, 2)
+        self.assertEqual(settings.queue_stale_scan_interval_seconds, 60)
 
     def test_development_missing_chains_has_actionable_failure(self) -> None:
         settings = settings_for(

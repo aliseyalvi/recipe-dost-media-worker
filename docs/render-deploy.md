@@ -58,6 +58,22 @@ STORE_RAW_MEDIA=false
 
 Set `WORKER_API_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `GEMINI_API_KEY` as Render secrets.
 
+## W10A Queue-Liveness Configuration
+
+Do not add `QUEUE_EMPTY_SLEEP_SECONDS`, `QUEUE_STALE_AFTER_SECONDS`,
+`QUEUE_STALE_MAX_RECOVERY_ATTEMPTS`, or
+`QUEUE_STALE_SCAN_INTERVAL_SECONDS` to a Render environment group for the
+standard deployment. Their non-secret defaults live in
+`config/worker.defaults.json`; the selected development or production JSON may
+override them only when an environment truly needs different behavior.
+Nonblank Render values remain optional explicit overrides.
+
+After deployment, verify `/health.safe_config` reports
+`queue_idle_poll_seconds=5`, `queue_stale_after_seconds=600`,
+`queue_stale_max_recovery_attempts=2`, and
+`queue_stale_scan_interval_seconds=60`. The response does not expose config
+paths, environment contents, or secrets.
+
 ## Safety Rules
 
 - Do not store raw videos.

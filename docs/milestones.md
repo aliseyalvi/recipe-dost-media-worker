@@ -64,9 +64,10 @@
 | 60 | M23.W6A-W6C Deterministic replay, Gemini reliability, queue finalization audit | Done locally | Offline replay/batch harness, model-specific structured extraction, closed failures, implicit quota-finalization proof, and private metadata fix |
 | 61 | M23.W7A-W7C Staged combined worker architecture | Done locally; durable lease migration blocked | Typed stages, bounded in-process transport, resource admission, combined/fail-closed standalone entry points, ACTIVE-point cleanup, deterministic staged/concurrency-two QA; cross-process lease recovery needs approval |
 | 62 | M23.W8A-W8D Instagram Unified v1 adapter | Done locally | Replace active broken Reels13 routing with the validated Unified v1 contract while preserving secure shared media preparation |
-| 63 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 64 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 65 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 63 | M23.W10A-CFG Queue-liveness configuration alignment | Done locally | Canonical JSON defaults, sparse overlay inheritance, optional env overrides, Pydantic bounds, and safe health reporting for W10A settings |
+| 64 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 65 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 66 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 

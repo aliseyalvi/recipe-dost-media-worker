@@ -261,14 +261,20 @@ class WakeAndSettingsTests(unittest.TestCase):
         self.assertIsNotNone(queue_worker._queue_wake_event)
         self.assertTrue(queue_worker._queue_wake_event.is_set())
 
-    def test_queue_settings_defaults_and_bounds(self) -> None:
-        settings = MagicMock(queue_empty_sleep_seconds=5)
+    def test_queue_settings_are_read_only_from_resolved_settings(self) -> None:
+        settings = MagicMock(
+            queue_empty_sleep_seconds=5,
+            queue_stale_after_seconds=600,
+            queue_stale_max_recovery_attempts=2,
+            queue_stale_scan_interval_seconds=60,
+        )
         with patch.dict(
             os.environ,
             {
-                "QUEUE_STALE_AFTER_SECONDS": "600",
-                "QUEUE_STALE_MAX_RECOVERY_ATTEMPTS": "2",
-                "QUEUE_STALE_SCAN_INTERVAL_SECONDS": "60",
+                "QUEUE_EMPTY_SLEEP_SECONDS": "59",
+                "QUEUE_STALE_AFTER_SECONDS": "5999",
+                "QUEUE_STALE_MAX_RECOVERY_ATTEMPTS": "9",
+                "QUEUE_STALE_SCAN_INTERVAL_SECONDS": "3599",
             },
             clear=False,
         ):
@@ -282,9 +288,6 @@ class WakeAndSettingsTests(unittest.TestCase):
                 "queue_stale_scan_interval_seconds": 60,
             },
         )
-        with patch.dict(os.environ, {"QUEUE_EMPTY_SLEEP_SECONDS": "0"}):
-            with self.assertRaisesRegex(ValueError, "between 1 and 60"):
-                queue_liveness_config(settings)
 
 
 class StaleRecoveryTests(unittest.TestCase):

@@ -4,7 +4,6 @@ import asyncio
 import io
 import json
 import logging
-import os
 import re
 import shutil
 import time
@@ -425,50 +424,11 @@ class QueueLivenessConfig:
 
 def queue_liveness_config(settings: Settings) -> QueueLivenessConfig:
     return QueueLivenessConfig(
-        idle_poll_seconds=_bounded_queue_setting(
-            "QUEUE_EMPTY_SLEEP_SECONDS",
-            settings.queue_empty_sleep_seconds,
-            minimum=1,
-            maximum=60,
-        ),
-        stale_after_seconds=_bounded_queue_setting(
-            "QUEUE_STALE_AFTER_SECONDS",
-            600,
-            minimum=60,
-            maximum=86_400,
-        ),
-        stale_max_recovery_attempts=_bounded_queue_setting(
-            "QUEUE_STALE_MAX_RECOVERY_ATTEMPTS",
-            2,
-            minimum=1,
-            maximum=10,
-        ),
-        stale_scan_interval_seconds=_bounded_queue_setting(
-            "QUEUE_STALE_SCAN_INTERVAL_SECONDS",
-            60,
-            minimum=1,
-            maximum=3_600,
-        ),
+        idle_poll_seconds=settings.queue_empty_sleep_seconds,
+        stale_after_seconds=settings.queue_stale_after_seconds,
+        stale_max_recovery_attempts=settings.queue_stale_max_recovery_attempts,
+        stale_scan_interval_seconds=settings.queue_stale_scan_interval_seconds,
     )
-
-
-def _bounded_queue_setting(
-    name: str,
-    default: int,
-    *,
-    minimum: int,
-    maximum: int,
-) -> int:
-    raw_value = os.getenv(name)
-    if raw_value is not None and not raw_value.strip():
-        raw_value = None
-    try:
-        value = int(raw_value) if raw_value is not None else int(default)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{name} must be an integer") from exc
-    if not minimum <= value <= maximum:
-        raise ValueError(f"{name} must be between {minimum} and {maximum}")
-    return value
 
 
 def signal_queue_wake() -> None:

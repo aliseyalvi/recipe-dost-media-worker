@@ -1,5 +1,22 @@
 # Decision Log
 
+## 2026-07-29 — M23.W10A-CFG queue-liveness configuration alignment
+
+- The four W10A queue-liveness values now use the established worker config
+  architecture: shared defaults in `config/worker.defaults.json`, sparse
+  development/production overlays, optional nonblank environment overrides,
+  and bounds enforced by Pydantic `Settings`.
+- `queue_worker.py` receives the resolved values from `Settings`; it no longer
+  independently reads process environment variables. `/health.safe_config`
+  continues to report the four effective safe numeric values.
+- Render does not require these variables when the committed defaults are
+  suitable. Secrets remain environment-only. Queue algorithms, the companion
+  Supabase migration, Gemini/provider/media paths, quota behavior, dependencies,
+  and frontend code are unchanged.
+- Offline validation passed 50 focused config/queue/startup tests, 63 unchanged
+  Gemini/provider/resolver tests, 264 full tests, both runtime-config checks,
+  the 11-case replay, and the seven-case FIFO mixed batch.
+
 ## 2026-07-29 — M23.W10A sequential queue liveness
 
 - The active FastAPI queue path retains `/wake` calls in one `asyncio.Event`,

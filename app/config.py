@@ -331,7 +331,26 @@ class Settings(BaseSettings):
     queue_poll_interval_seconds: int = worker_config_value(
         "queue_poll_interval_seconds", 5
     )
-    queue_empty_sleep_seconds: int = worker_config_value("queue_empty_sleep_seconds", 5)
+    queue_empty_sleep_seconds: int = Field(
+        default=worker_config_value("queue_empty_sleep_seconds", 5),
+        ge=1,
+        le=60,
+    )
+    queue_stale_after_seconds: int = Field(
+        default=worker_config_value("queue_stale_after_seconds", 600),
+        ge=60,
+        le=86_400,
+    )
+    queue_stale_max_recovery_attempts: int = Field(
+        default=worker_config_value("queue_stale_max_recovery_attempts", 2),
+        ge=1,
+        le=10,
+    )
+    queue_stale_scan_interval_seconds: int = Field(
+        default=worker_config_value("queue_stale_scan_interval_seconds", 60),
+        ge=5,
+        le=3_600,
+    )
     # Deprecated compatibility input. Sequential is the only supported value;
     # remove this field after the development soak confirms no stale override.
     worker_pipeline_mode: Literal["sequential"] = "sequential"
