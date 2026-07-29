@@ -1,3 +1,9 @@
+"""Deprecated provider retained temporarily for offline test migration.
+
+This adapter is not registered or callable from runtime configuration and is
+scheduled for deletion after the M23.W9C development soak.
+"""
+
 from __future__ import annotations
 
 import re

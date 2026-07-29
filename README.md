@@ -228,7 +228,7 @@ This endpoint does not call Gemini, does not create media jobs, does not downloa
 - With external routing enabled, TikTok and Instagram use registered provider
   adapters, guarded download/probe/optional A/V mux, then the unchanged Gemini
   Files API path. Development adapter IDs are `akng_tiktok` and
-  `rapidapi_instagram_reels13`.
+  `rapidapi_instagram_unified_v1`.
 - Social extraction chooses combined audio/video formats through a bounded
   720p -> 540p -> 480p -> 360p ladder, targets 36 MiB, and enforces a 50 MiB
   streaming/temp-file hard limit. The historical `*_MB` config names are binary

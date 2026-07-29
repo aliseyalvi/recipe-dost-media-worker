@@ -6,7 +6,6 @@
   "TIKTOK_RESOLVER_CHAIN": ["akng_tiktok"],
   "COOKIE_MEDIA_FALLBACK_ENABLED": false,
   "YOUTUBE_DIRECT_GEMINI_ENABLED": true,
-  "INSTAGRAM_REELS13_ENABLED": false,
   "INSTAGRAM_RAPIDAPI_HOST": "insta-reels-downloader-the-fastest-hd-reels-fetcher-api.p.rapidapi.com",
   "INSTAGRAM_RAPIDAPI_BASE_URL": "https://insta-reels-downloader-the-fastest-hd-reels-fetcher-api.p.rapidapi.com",
   "TIKTOK_AKNG_BASE_URL": "https://api.akng.io.vn",

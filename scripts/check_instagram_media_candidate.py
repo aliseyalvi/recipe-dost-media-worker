@@ -165,7 +165,6 @@ def _diagnostic_settings(credential: str) -> Settings:
     return Settings(
         _env_file=None,
         instagram_resolver_chain=["rapidapi_instagram_unified_v1"],
-        instagram_reels13_enabled=False,
         instagram_rapidapi_key=credential,
         tiktok_akng_access_token="diagnostic-unused",
         worker_api_secret="diagnostic-only",

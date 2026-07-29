@@ -17,7 +17,7 @@ def settings(**overrides: object) -> Settings:
         "supabase_service_role_key": "test",
         "media_resolver_mode": "external",
         "external_media_resolver_audience": "all_authorized_ai",
-        "instagram_resolver_chain": ["rapidapi_instagram_reels13"],
+        "instagram_resolver_chain": ["rapidapi_instagram_unified_v1"],
         "tiktok_resolver_chain": ["akng_tiktok"],
         "instagram_rapidapi_key": "secret",
         "instagram_rapidapi_host": "provider.invalid",
@@ -57,7 +57,7 @@ class ExternalQueueRoutingTests(unittest.TestCase):
             repository = self.repository(reason)
             prepared = {
                 "success": True,
-                "resolver": "rapidapi_instagram_reels13",
+                "resolver": "rapidapi_instagram_unified_v1",
                 "temp_file_path": "/tmp/fixture.mp4",
                 "video_bytes_verified": True,
             }
