@@ -25,7 +25,12 @@ from app.metadata_preview import (
 )
 from app.worker_runtime.cleanup import cleanup_stale_media
 from app.observability.sentry import flush_sentry, initialize_sentry, report_worker_error
-from app.queue_worker import run_queue_loop
+from app.queue_worker import (
+    queue_liveness_config,
+    reset_queue_runtime,
+    run_queue_loop,
+    signal_queue_wake,
+)
 from app.runtime_config import worker_config_report
 from app.schemas import (
     ErrorDetail,
@@ -400,6 +405,7 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
         "worker_execution_mode": settings.worker_execution_mode,
         "worker_processing_model": "sequential_queue",
         "queue_mode_active": queue_mode,
+        **queue_liveness_config(settings).safe_config(),
         "process_job_mode": (
             "queue_wake_compatibility" if queue_mode else "legacy_direct_background"
         ),
@@ -592,6 +598,7 @@ def ensure_queue_worker_started(settings: Settings) -> None:
     global queue_task
     if settings.worker_execution_mode != "queue":
         return
+    signal_queue_wake()
     if queue_task is not None and not queue_task.done():
         return
     try:
@@ -661,6 +668,7 @@ async def stop_queue_worker() -> None:
         except asyncio.CancelledError:
             pass
         queue_task = None
+    reset_queue_runtime()
     flush_sentry(timeout=2.0)
 
 

@@ -1,5 +1,33 @@
 # Decision Log
 
+## 2026-07-29 — M23.W10A sequential queue liveness
+
+- The active FastAPI queue path retains `/wake` calls in one `asyncio.Event`,
+  owns one queue task and drain lock, drains FIFO jobs until none remain, and
+  uses the existing five-second empty-queue interval as its bounded safety
+  poll. A wake never runs a job inline or creates a second processor.
+- `claim_oldest_media_job()` now atomically claims `queued` rows using
+  `created_at ASC, id ASC` plus `FOR UPDATE SKIP LOCKED`. Minimal
+  `worker_claimed_at`, `worker_heartbeat_at`, and
+  `processing_attempt_count` fields support a 600-second stale threshold,
+  60-second scan, and two recovery attempts. Recovery and its queue/quota
+  events are transactional; source URL and valid metadata are preserved. The
+  canonical companion migration is
+  `../recipe-dost/supabase/migrations/202607290001_m23_w10a_queue_liveness.sql`.
+- Periodic and stage-boundary heartbeats are best-effort and non-fatal.
+  Terminal lease cleanup is also best-effort. Existing recipe cards for the
+  same recipe/user are reused after recovery, preventing a crash between card
+  insert and job finalization from creating a duplicate.
+- Offline validation passed: 36 focused queue/startup tests, 113 focused
+  queue/finalization/Gemini/resolver tests, 263 full tests, the 11-case replay,
+  and the seven-case mixed sequential batch. Both batches were FIFO,
+  single-active-job, terminal, unstarved, fully cleaned, and ended with zero
+  active reservations. No live service was called.
+- The recovered direct Gemini invocation, `GeminiProviderCallBudget`, provider
+  attempt accounting, production prompt/schema/model/thinking configuration,
+  resolver/media behavior, dependencies, quota semantics, and mobile behavior
+  are unchanged.
+
 ## 2026-07-29 — M23.GD9 temporary Gemini diagnostic removed
 
 - The protected GD6/GD7 Gemini request-ladder route, its enable flag, endpoint

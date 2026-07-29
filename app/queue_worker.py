@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import time
@@ -84,6 +85,21 @@ STRUCTURED_EXTRACTION_USER_MESSAGE = (
     "Recipe extraction could not understand this video well enough."
 )
 STRUCTURED_FAILURE_UNKNOWN = "gemini_server_error"
+WORKER_NONTERMINAL_STATUSES = ("resolving", "downloading", "analyzing")
+QUEUE_HEARTBEAT_EVENT_TYPES = {
+    "queue_job_claimed",
+    "unified_extractor_started",
+    "unified_extractor_completed",
+    "external_resolver_started",
+    "external_resolver_completed",
+    "gemini_file_upload_started",
+    "gemini_file_processing_started",
+    "gemini_structured_extraction_started",
+    "recipe_card_saving_started",
+}
+
+_queue_wake_event: asyncio.Event | None = None
+_queue_drain_lock: asyncio.Lock | None = None
 
 CANONICAL_RECIPE_PROMPT = """Perform exhaustive line-by-line recipe extraction.
 Do not summarize. Explicitly list every ingredient, including minor spices.
@@ -385,18 +401,121 @@ class GeminiProviderCallBudget:
         return self.attempts
 
 
+@dataclass(frozen=True)
+class QueueLivenessConfig:
+    idle_poll_seconds: int
+    stale_after_seconds: int
+    stale_max_recovery_attempts: int
+    stale_scan_interval_seconds: int
+
+    @property
+    def heartbeat_interval_seconds(self) -> int:
+        return max(1, min(60, self.stale_after_seconds // 3))
+
+    def safe_config(self) -> dict[str, int]:
+        return {
+            "queue_idle_poll_seconds": self.idle_poll_seconds,
+            "queue_stale_after_seconds": self.stale_after_seconds,
+            "queue_stale_max_recovery_attempts": (
+                self.stale_max_recovery_attempts
+            ),
+            "queue_stale_scan_interval_seconds": self.stale_scan_interval_seconds,
+        }
+
+
+def queue_liveness_config(settings: Settings) -> QueueLivenessConfig:
+    return QueueLivenessConfig(
+        idle_poll_seconds=_bounded_queue_setting(
+            "QUEUE_EMPTY_SLEEP_SECONDS",
+            settings.queue_empty_sleep_seconds,
+            minimum=1,
+            maximum=60,
+        ),
+        stale_after_seconds=_bounded_queue_setting(
+            "QUEUE_STALE_AFTER_SECONDS",
+            600,
+            minimum=60,
+            maximum=86_400,
+        ),
+        stale_max_recovery_attempts=_bounded_queue_setting(
+            "QUEUE_STALE_MAX_RECOVERY_ATTEMPTS",
+            2,
+            minimum=1,
+            maximum=10,
+        ),
+        stale_scan_interval_seconds=_bounded_queue_setting(
+            "QUEUE_STALE_SCAN_INTERVAL_SECONDS",
+            60,
+            minimum=1,
+            maximum=3_600,
+        ),
+    )
+
+
+def _bounded_queue_setting(
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is not None and not raw_value.strip():
+        raw_value = None
+    try:
+        value = int(raw_value) if raw_value is not None else int(default)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+def signal_queue_wake() -> None:
+    global _queue_wake_event
+    if _queue_wake_event is None:
+        _queue_wake_event = asyncio.Event()
+    _queue_wake_event.set()
+
+
+def reset_queue_runtime() -> None:
+    global _queue_wake_event, _queue_drain_lock
+    _queue_wake_event = None
+    _queue_drain_lock = None
+
+
+def _queue_runtime_primitives() -> tuple[asyncio.Event, asyncio.Lock]:
+    global _queue_wake_event, _queue_drain_lock
+    if _queue_wake_event is None:
+        _queue_wake_event = asyncio.Event()
+    if _queue_drain_lock is None:
+        _queue_drain_lock = asyncio.Lock()
+    return _queue_wake_event, _queue_drain_lock
+
+
 async def run_queue_loop(_build_job_runner: Callable[[Settings], object]) -> None:
     settings = get_settings()
+    liveness = queue_liveness_config(settings)
+    wake_event, drain_lock = _queue_runtime_primitives()
+    wake_event.set()
+    next_stale_scan_at = 0.0
     logger.info("queue_loop_started")
     while True:
         try:
-            processed = await asyncio.to_thread(process_next_queued_job)
-            sleep_for = (
-                settings.queue_poll_interval_seconds
-                if processed
-                else settings.queue_empty_sleep_seconds
-            )
-            await asyncio.sleep(max(1, sleep_for))
+            try:
+                await asyncio.wait_for(
+                    wake_event.wait(),
+                    timeout=liveness.idle_poll_seconds,
+                )
+            except asyncio.TimeoutError:
+                pass
+            wake_event.clear()
+            async with drain_lock:
+                next_stale_scan_at = await drain_queued_jobs(
+                    settings,
+                    liveness,
+                    next_stale_scan_at=next_stale_scan_at,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -414,7 +533,193 @@ async def run_queue_loop(_build_job_runner: Callable[[Settings], object]) -> Non
                 recoverable=True,
                 terminal=False,
             )
-            await asyncio.sleep(max(1, settings.queue_empty_sleep_seconds))
+            try:
+                await asyncio.wait_for(
+                    wake_event.wait(),
+                    timeout=liveness.idle_poll_seconds,
+                )
+            except asyncio.TimeoutError:
+                pass
+
+
+async def drain_queued_jobs(
+    settings: Settings,
+    liveness: QueueLivenessConfig,
+    *,
+    next_stale_scan_at: float = 0.0,
+) -> float:
+    repository = create_repository(settings)
+    while True:
+        now = time.monotonic()
+        if now >= next_stale_scan_at:
+            await asyncio.to_thread(
+                recover_stale_queue_jobs,
+                repository,
+                liveness,
+            )
+            next_stale_scan_at = now + liveness.stale_scan_interval_seconds
+        job = await asyncio.to_thread(repository.claim_oldest_queued_job)
+        if job is None:
+            return next_stale_scan_at
+        await _process_claimed_job(
+            repository,
+            settings,
+            job,
+            heartbeat_interval_seconds=liveness.heartbeat_interval_seconds,
+        )
+
+
+async def _process_claimed_job(
+    repository: MediaJobRepository,
+    settings: Settings,
+    job: MediaJobRecord,
+    *,
+    heartbeat_interval_seconds: int,
+) -> None:
+    heartbeat_stop = asyncio.Event()
+    heartbeat_task = asyncio.create_task(
+        _heartbeat_claimed_job(
+            settings,
+            job.id,
+            heartbeat_stop,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+        )
+    )
+    try:
+        await asyncio.to_thread(
+            process_queue_job,
+            repository,
+            settings,
+            job,
+            already_claimed=True,
+        )
+    finally:
+        heartbeat_stop.set()
+        await heartbeat_task
+        try:
+            await asyncio.to_thread(repository.release_job_lease, job.id)
+        except Exception:
+            logger.warning(
+                "queue_job_lease_release_failed",
+                extra={"media_job_id": str(job.id)},
+            )
+
+
+async def _heartbeat_claimed_job(
+    settings: Settings,
+    media_job_id: UUID,
+    stop_event: asyncio.Event,
+    *,
+    heartbeat_interval_seconds: int,
+) -> None:
+    while True:
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=heartbeat_interval_seconds,
+            )
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            repository = create_repository(settings)
+            await asyncio.to_thread(repository.heartbeat_job, media_job_id)
+        except Exception:
+            logger.warning(
+                "queue_job_heartbeat_failed",
+                extra={"media_job_id": str(media_job_id)},
+            )
+
+
+def recover_stale_queue_jobs(
+    repository: MediaJobRepository,
+    liveness: QueueLivenessConfig,
+) -> int:
+    recovered = repository.recover_stale_jobs(
+        stale_after_seconds=liveness.stale_after_seconds,
+        max_recovery_attempts=liveness.stale_max_recovery_attempts,
+    )
+    for recovery in recovered:
+        payload = recovery.get("job")
+        action = str(recovery.get("recovery_action") or "")
+        if not isinstance(payload, dict):
+            continue
+        job = MediaJobRecord.model_validate(payload)
+        attempts = safe_int_or_none(recovery.get("processing_attempt_count")) or 0
+        if action == "requeued":
+            release_stale_quota_reservation_safely(repository, job, attempts)
+            ensure_stale_recovery_event_safely(
+                repository,
+                job.id,
+                "queue_job_stale_requeued",
+                "Stale queue job was safely requeued.",
+                {
+                    "status": "queued",
+                    "processing_attempt_count": attempts,
+                },
+            )
+        elif action == "failed":
+            finalize_quota_transition_safely(repository, job)
+            ensure_stale_recovery_event_safely(
+                repository,
+                job.id,
+                "queue_job_stale_failed",
+                "Stale queue job reached its recovery limit.",
+                {
+                    "status": "failed",
+                    "error_code": "stale_job_timeout",
+                    "processing_attempt_count": attempts,
+                },
+            )
+    return len(recovered)
+
+
+def ensure_stale_recovery_event_safely(
+    repository: MediaJobRepository,
+    media_job_id: UUID,
+    event_type: str,
+    message: str,
+    metadata: dict[str, object],
+) -> None:
+    try:
+        if repository.has_event(media_job_id, event_type):
+            return
+    except Exception:
+        pass
+    add_event_safely(
+        repository,
+        media_job_id,
+        event_type,
+        message,
+        metadata,
+    )
+
+
+def release_stale_quota_reservation_safely(
+    repository: MediaJobRepository,
+    job: MediaJobRecord,
+    processing_attempt_count: int,
+) -> None:
+    try:
+        if not repository.has_event(job.id, "ai_quota_reservation_created"):
+            return
+        if repository.has_event(job.id, "ai_quota_reservation_released"):
+            return
+        repository.insert_event(
+            job.id,
+            event_type="ai_quota_reservation_released",
+            message="AI quota reservation released for stale recovery.",
+            metadata={
+                "reason": "stale_job_requeued",
+                "processing_attempt_count": processing_attempt_count,
+                "idempotent_replay": False,
+            },
+        )
+    except Exception:
+        logger.warning(
+            "quota_finalization_audit_event_failed",
+            extra={"exception_type": "QuotaAuditError"},
+        )
 
 
 def process_next_queued_job() -> bool:
@@ -5392,6 +5697,14 @@ def add_event(
     message: str,
     metadata: dict[str, object],
 ) -> None:
+    if event_type in QUEUE_HEARTBEAT_EVENT_TYPES:
+        try:
+            repository.heartbeat_job(media_job_id)
+        except Exception:
+            logger.warning(
+                "queue_job_heartbeat_failed",
+                extra={"media_job_id": str(media_job_id)},
+            )
     repository.add_event(
         media_job_id,
         event_type=event_type,

@@ -43,28 +43,51 @@ class MediaJobRepository:
         return MediaJobRecord.model_validate(response.data[0])
 
     def claim_oldest_queued_job(self) -> MediaJobRecord | None:
-        candidate = self.get_oldest_queued_job()
-        if candidate is None:
+        response = self._client.rpc("claim_oldest_media_job").execute()
+        if not response.data:
             return None
-        response = (
+        row = response.data[0] if isinstance(response.data, list) else response.data
+        return MediaJobRecord.model_validate(row)
+
+    def heartbeat_job(self, media_job_id: UUID) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        (
+            self._client.table("media_jobs")
+            .update({"worker_heartbeat_at": now})
+            .eq("id", str(media_job_id))
+            .in_("status", ["resolving", "downloading", "analyzing"])
+            .execute()
+        )
+
+    def release_job_lease(self, media_job_id: UUID) -> None:
+        (
             self._client.table("media_jobs")
             .update(
                 {
-                    "status": "resolving",
-                    "progress": 20,
-                    "error_code": None,
-                    "error_message": None,
-                    "started_at": candidate.started_at or datetime.utcnow().isoformat() + "Z",
+                    "worker_claimed_at": None,
+                    "worker_heartbeat_at": None,
                 }
             )
-            .eq("id", str(candidate.id))
-            .eq("status", "queued")
-            .select(MEDIA_JOB_SELECT)
+            .eq("id", str(media_job_id))
             .execute()
         )
-        if not response.data:
-            return None
-        return MediaJobRecord.model_validate(response.data[0])
+
+    def recover_stale_jobs(
+        self,
+        *,
+        stale_after_seconds: int,
+        max_recovery_attempts: int,
+    ) -> list[dict[str, Any]]:
+        response = self._client.rpc(
+            "recover_stale_media_jobs",
+            {
+                "p_stale_after_seconds": stale_after_seconds,
+                "p_max_recovery_attempts": max_recovery_attempts,
+            },
+        ).execute()
+        if not isinstance(response.data, list):
+            return []
+        return [row for row in response.data if isinstance(row, dict)]
 
     def get_ai_access_context(self, media_job_id: UUID) -> dict[str, Any] | None:
         response = (
@@ -418,6 +441,19 @@ class MediaJobRepository:
     ) -> UUID:
         if job.recipe_item_id is None:
             raise ValueError("Media job has no recipe item.")
+
+        existing = (
+            self._client.table("recipe_cards")
+            .select("id")
+            .eq("recipe_id", str(job.recipe_item_id))
+            .eq("user_id", str(job.user_id))
+            .order("created_at", desc=False)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
+            row = existing.data[0] if isinstance(existing.data, list) else existing.data
+            return UUID(str(row["id"]))
 
         ingredients = [
             {
