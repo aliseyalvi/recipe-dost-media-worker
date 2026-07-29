@@ -41,8 +41,6 @@ YouTubeResolver = Literal["ytdlp"]
 InstagramResolver = Literal["snapinsta"]
 FacebookResolver = Literal["snapsave"]
 WorkerExecutionMode = Literal["webhook", "queue"]
-WorkerPipelineMode = Literal["sequential", "staged"]
-WorkerStageTransport = Literal["in_process", "supabase"]
 MediaExtractOutputMode = Literal["temp_file", "memory_buffer"]
 YouTubeAIInputMode = Literal["gemini_url", "ytdlp"]
 YouTubeMetadataMode = Literal["oembed"]
@@ -339,49 +337,9 @@ class Settings(BaseSettings):
         "queue_poll_interval_seconds", 5
     )
     queue_empty_sleep_seconds: int = worker_config_value("queue_empty_sleep_seconds", 5)
-    worker_pipeline_mode: WorkerPipelineMode = worker_config_value(
-        "worker_pipeline_mode", "sequential"
-    )
-    worker_stage_transport: WorkerStageTransport = worker_config_value(
-        "worker_stage_transport", "in_process"
-    )
-    worker_dispatch_concurrency: int = worker_config_value(
-        "worker_dispatch_concurrency", 1
-    )
-    worker_ingest_concurrency: int = worker_config_value(
-        "worker_ingest_concurrency", 1
-    )
-    worker_gemini_analysis_concurrency: int = worker_config_value(
-        "worker_gemini_analysis_concurrency", 1
-    )
-    worker_finalize_concurrency: int = worker_config_value(
-        "worker_finalize_concurrency", 1
-    )
-    worker_ffmpeg_concurrency: int = worker_config_value(
-        "worker_ffmpeg_concurrency", 1
-    )
-    worker_gemini_upload_concurrency: int = worker_config_value(
-        "worker_gemini_upload_concurrency", 1
-    )
-    worker_ingest_queue_size: int = worker_config_value(
-        "worker_ingest_queue_size", 1
-    )
-    worker_analysis_queue_size: int = worker_config_value(
-        "worker_analysis_queue_size", 2
-    )
-    worker_finalize_queue_size: int = worker_config_value(
-        "worker_finalize_queue_size", 2
-    )
-    worker_max_rss_mb: int = worker_config_value("worker_max_rss_mb", 448)
-    worker_max_active_temp_mb: int = worker_config_value(
-        "worker_max_active_temp_mb", 256
-    )
-    worker_min_free_temp_mb: int = worker_config_value(
-        "worker_min_free_temp_mb", 256
-    )
-    worker_admission_retry_seconds: float = worker_config_value(
-        "worker_admission_retry_seconds", 5.0
-    )
+    # Deprecated compatibility input. Sequential is the only supported value;
+    # remove this field after the development soak confirms no stale override.
+    worker_pipeline_mode: Literal["sequential"] = "sequential"
     enable_unified_ytdlp_stream_extractor: bool = worker_config_value(
         "enable_unified_ytdlp_stream_extractor", False
     )
@@ -610,39 +568,6 @@ class Settings(BaseSettings):
             raise ValueError("Instagram resolver chain contains an incompatible adapter")
         if any(adapter != "akng_tiktok" for adapter in self.tiktok_resolver_chain):
             raise ValueError("TikTok resolver chain contains an incompatible adapter")
-        concurrency_values = (
-            self.worker_dispatch_concurrency,
-            self.worker_ingest_concurrency,
-            self.worker_gemini_analysis_concurrency,
-            self.worker_finalize_concurrency,
-            self.worker_ffmpeg_concurrency,
-            self.worker_gemini_upload_concurrency,
-        )
-        if any(value < 1 or value > 8 for value in concurrency_values):
-            raise ValueError("worker concurrency values must be between 1 and 8")
-        if self.worker_dispatch_concurrency != 1:
-            raise ValueError(
-                "worker_dispatch_concurrency must remain 1 to preserve FIFO claims"
-            )
-        queue_sizes = (
-            self.worker_ingest_queue_size,
-            self.worker_analysis_queue_size,
-            self.worker_finalize_queue_size,
-        )
-        if any(value < 1 or value > 32 for value in queue_sizes):
-            raise ValueError("worker pipeline queue sizes must be between 1 and 32")
-        if self.worker_max_rss_mb < 128:
-            raise ValueError("worker_max_rss_mb must be at least 128")
-        if self.worker_max_active_temp_mb < self.max_video_size_mb:
-            raise ValueError(
-                "worker_max_active_temp_mb must cover one maximum-size media file"
-            )
-        if self.worker_min_free_temp_mb < self.max_video_size_mb:
-            raise ValueError(
-                "worker_min_free_temp_mb must cover one maximum-size media file"
-            )
-        if not 0.25 <= self.worker_admission_retry_seconds <= 60:
-            raise ValueError("worker_admission_retry_seconds is outside safe bounds")
         return self
 
     @field_validator("media_resolver_mode", mode="before")
@@ -657,16 +582,10 @@ class Settings(BaseSettings):
     @classmethod
     def validate_worker_pipeline_mode(cls, value: object) -> object:
         normalized = str(value).strip().lower()
-        if normalized not in {"sequential", "staged"}:
-            raise ValueError("unknown worker pipeline mode")
-        return normalized
-
-    @field_validator("worker_stage_transport", mode="before")
-    @classmethod
-    def validate_worker_stage_transport(cls, value: object) -> object:
-        normalized = str(value).strip().lower()
-        if normalized not in {"in_process", "supabase"}:
-            raise ValueError("unknown worker stage transport")
+        if normalized != "sequential":
+            raise ValueError(
+                "WORKER_PIPELINE_MODE is retired; only sequential is supported"
+            )
         return normalized
 
     @field_validator("external_media_resolver_audience", mode="before")

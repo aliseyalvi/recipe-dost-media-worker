@@ -4,9 +4,10 @@ FastAPI worker for Recipe Dost media jobs. The production cutover path is the se
 
 ## Scope
 
-- Queue mode is the primary production flow. Render starts one combined service
-  with `python -m app.workers.combined_worker`; `WORKER_PIPELINE_MODE=sequential`
-  preserves the serialized loop and `staged` enables bounded in-process stages.
+- Queue mode is the only active worker architecture. Render starts
+  `app.main:app`; Docker's historical
+  `python -m app.workers.combined_worker` name is a thin façade for the same
+  sequential durable queue loop.
 - `/process-job` remains available only for legacy/manual/debug job kicks.
 - YouTube uses Gemini native URL input when `YOUTUBE_AI_INPUT_MODE=gemini_url`; it does not use yt-dlp in that mode.
 - TikTok and Instagram can use the provider-neutral external resolver pipeline;
@@ -136,16 +137,13 @@ PORT=8080 python -m app.workers.combined_worker
 curl http://localhost:8080/health
 ```
 
-Staged development mode keeps all resource defaults at one:
-
-```bash
-WORKER_PIPELINE_MODE=staged PORT=8080 python -m app.workers.combined_worker
-```
-
-The ingest, analyzer, and finalizer module entry points are placeholders for a
-future durable transport and fail closed today. See
-[docs/m23-w7-staged-worker.md](docs/m23-w7-staged-worker.md) for stage
-contracts, admission, recovery limits, deployment, soak, and rollback.
+The retired `WORKER_PIPELINE_MODE` compatibility input may be absent or set to
+`sequential`; `staged` and unsupported values fail startup before a queue task
+is created. W7 staged execution was reverted. Its design remains in Git
+history, while dormant source files are retained temporarily for a later
+deletion patch and are not imported by the active runtime. Any future
+concurrency design requires durable leases, fencing, and idempotent stage
+transitions.
 
 Wake the queue worker:
 

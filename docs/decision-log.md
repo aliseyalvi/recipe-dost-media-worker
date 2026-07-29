@@ -1,5 +1,20 @@
 # Decision Log
 
+## 2026-07-29 — M23.W9B sequential execution exclusivity
+
+- FastAPI startup and `/wake` now have one queue architecture:
+  `run_queue_loop()` only. The active app no longer imports or selects the W7
+  runtime.
+- `WORKER_PIPELINE_MODE` is a temporary deprecated compatibility input.
+  Absence or `sequential` is accepted; `staged` and unsupported values fail
+  settings validation before queue-task creation.
+- W7 transport, stage concurrency, queue-size, and admission settings were
+  removed from active settings, committed defaults, health, and safe config.
+  Shared sequential semaphores and stale-media cleanup remain unchanged.
+- Docker retains `app.workers.combined_worker` as a compatibility-named uvicorn
+  façade. Dormant W7 files remain for a later deletion patch; future
+  concurrency requires durable leases, fencing, and idempotency.
+
 ## 2026-07-28 — M23.W8A-W8D Instagram Unified v1 adapter
 
 - Development Instagram routing now contains only

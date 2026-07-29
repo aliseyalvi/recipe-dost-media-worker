@@ -6,9 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from app.config import Settings
-from app.pipeline.contracts import DispatchEnvelope
 from app.qa.replay import OfflineRepository, canonical_recipe, make_job
-from app.qa.staged import run_staged_batch
 from app.queue_worker import (
     DeferredGeminiRecipe,
     delete_temp_media,
@@ -16,74 +14,9 @@ from app.queue_worker import (
     run_gemini_video_poc_analysis,
     validate_and_normalize_canonical_recipe,
 )
-from app.workers._standalone import standalone_main
 
 
-CASES = [
-    "tiktok_success_1",
-    "tiktok_success_2",
-    "instagram_progressive_success",
-    "instagram_split_av_success",
-    "deliberate_gemini_parse_failure",
-    "provider_failure",
-    "private_metadata_failure",
-]
-
-
-class StagedPipelineTests(unittest.TestCase):
-    def test_safe_pipeline_defaults_and_standalone_refusal(self) -> None:
-        settings = Settings(
-            _env_file=None,
-            WORKER_API_SECRET="fixture",
-            supabase_url="https://example.invalid",
-            supabase_service_role_key="fixture",
-        )
-        self.assertEqual(settings.worker_pipeline_mode, "sequential")
-        self.assertEqual(settings.worker_dispatch_concurrency, 1)
-        self.assertEqual(settings.worker_ingest_concurrency, 1)
-        self.assertEqual(settings.worker_gemini_analysis_concurrency, 1)
-        self.assertEqual(settings.worker_finalize_concurrency, 1)
-        self.assertEqual(settings.worker_ffmpeg_concurrency, 1)
-        self.assertEqual(settings.worker_gemini_upload_concurrency, 1)
-        with patch.dict("os.environ", {}, clear=True):
-            with self.assertRaises(SystemExit):
-                standalone_main("ingest")
-
-    def test_runtime_job_snapshot_is_not_serialized(self) -> None:
-        job = make_job(1, "tiktok")
-        envelope = DispatchEnvelope(
-            job_id=job.id,
-            platform=job.platform,
-            runtime_job=job,
-        )
-        serialized = envelope.model_dump(mode="json")
-        self.assertNotIn("runtime_job", serialized)
-        self.assertNotIn("source_url", str(serialized))
-
-    def test_staged_pipeline_and_concurrency_two_are_deterministic(self) -> None:
-        report = run_staged_batch(CASES)
-        self.assertEqual(report["fifo_claim_order"], CASES)
-        self.assertEqual(report["fifo_enqueue_order"], CASES)
-        self.assertEqual(report["maximum_active_stages"]["ingest"], 1)
-        self.assertEqual(report["maximum_active_stages"]["analysis"], 1)
-        self.assertEqual(report["maximum_active_stages"]["finalize"], 1)
-        self.assertTrue(report["stage_overlap_observed"])
-        self.assertEqual(report["terminal_count"], len(CASES))
-        self.assertEqual(report["active_reservation_count"], 0)
-        self.assertTrue(report["cleanup_success"])
-        self.assertTrue(report["graceful_shutdown"])
-        self.assertTrue(report["restart_rematerialization_proved"])
-        self.assertFalse(report["durable_lease_recovery_supported"])
-        self.assertTrue(report["exactly_one_terminal_state"])
-        self.assertTrue(all(report["stage_failure_probes"].values()))
-        probe = report["concurrency_two_probe"]
-        self.assertEqual(probe["maximum_active_stages"]["analysis"], 2)
-        self.assertEqual(probe["maximum_active_stages"]["ingest"], 1)
-        self.assertEqual(probe["terminal_count"], len(CASES))
-        self.assertEqual(probe["active_reservation_count"], 0)
-        self.assertTrue(probe["provider_budget_isolated_per_job"])
-        self.assertTrue(probe["failure_isolation"])
-
+class SequentialMediaRegressionTests(unittest.TestCase):
     def test_cleanup_does_not_remove_unrecognized_parent_or_siblings(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory) / "ordinary"

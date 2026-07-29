@@ -119,17 +119,7 @@ class HealthResponse(BaseModel):
     cobalt_configured: bool
     cobalt_enabled_platforms: list[str]
     worker_execution_mode: str
-    worker_pipeline_mode: str
-    worker_stage_transport: str
-    worker_dispatch_concurrency: int
-    worker_ingest_concurrency: int
-    worker_gemini_analysis_concurrency: int
-    worker_finalize_concurrency: int
-    worker_ffmpeg_concurrency: int
-    worker_gemini_upload_concurrency: int
-    worker_ingest_queue_size: int
-    worker_analysis_queue_size: int
-    worker_finalize_queue_size: int
+    worker_processing_model: Literal["sequential_queue"]
     queue_loop_enabled: bool
     queue_poll_interval_seconds: int
     enable_unified_ytdlp_stream_extractor: bool
