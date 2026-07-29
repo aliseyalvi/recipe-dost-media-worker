@@ -1,5 +1,14 @@
 # Decision Log
 
+## 2026-07-29 — M23.GD9 temporary Gemini diagnostic removed
+
+- The protected GD6/GD7 Gemini request-ladder route, its enable flag, endpoint
+  models, implementation, and endpoint-only tests were removed after GD8Q2
+  passed live YouTube, Instagram, and TikTok acceptance.
+- The recovered direct queued Gemini invocation, local call budget,
+  non-blocking telemetry, provider-attempt accounting, request construction,
+  fallback behavior, and safe provider-error classification remain unchanged.
+
 ## 2026-07-29 — M23.GD8Q2 direct queued Gemini invocation
 
 - Structured extraction now enforces its existing per-job call maximum with

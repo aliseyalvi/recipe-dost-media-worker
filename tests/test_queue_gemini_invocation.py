@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
+import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
+from fastapi.testclient import TestClient
 from google.genai import types
 
-from app.ai import gemini_diagnostic
-from app.ai.gemini_diagnostic import GeminiRequestLadderRequest
+from app import main
+from app.config import Settings
 from app.qa.replay import (
     OfflineRepository,
     canonical_recipe,
@@ -211,7 +214,30 @@ class QueueGeminiInvocationTests(unittest.TestCase):
         self.assertEqual(captured.exception.metadata["provider_attempt"], 2)
         self.assertNotEqual(captured.exception.metadata["provider_attempt"], 0)
 
-    def test_queue_and_diagnostic_l4_request_fingerprints_match(self) -> None:
+    def test_temporary_diagnostic_surface_is_removed(self) -> None:
+        self.assertNotIn("allow_gemini_diagnostic", Settings.model_fields)
+        self.assertNotIn("app.ai.gemini_diagnostic", sys.modules)
+        self.assertIsNone(importlib.util.find_spec("app.ai.gemini_diagnostic"))
+        self.assertFalse(
+            any(
+                getattr(route, "path", None) == "/debug/gemini-request-ladder"
+                for route in main.app.routes
+            )
+        )
+
+        settings = settings_for_case()
+        main.app.dependency_overrides[main.get_settings] = lambda: settings
+        try:
+            client = TestClient(main.app)
+            self.assertEqual(
+                client.post("/debug/gemini-request-ladder", json={}).status_code,
+                404,
+            )
+            self.assertEqual(client.get("/health").status_code, 200)
+        finally:
+            main.app.dependency_overrides.clear()
+
+    def test_queue_request_fingerprint_matches_gd8q2_snapshot(self) -> None:
         settings = settings_for_case(recipe_repair_enabled=False)
         sdk_client = create_gemini_client(
             "offline-fixture-key",
@@ -231,43 +257,30 @@ class QueueGeminiInvocationTests(unittest.TestCase):
             settings=settings,
             input_part=input_part,
         )
-
-        diagnostic_client = self.successful_client()
-        diagnostic_repository = FailingEventRepository(
-            {"gemini_api_call_started", "gemini_api_call_completed"}
-        )
-        diagnostic_job = make_job(902, "youtube")
-        context_token = _GEMINI_CALL_CONTEXT.set(
-            (diagnostic_repository, diagnostic_job, settings)  # type: ignore[arg-type]
-        )
-        try:
-            with patch.object(
-                gemini_diagnostic,
-                "create_gemini_client",
-                return_value=diagnostic_client,
-            ), patch.object(
-                gemini_diagnostic,
-                "build_youtube_gemini_input_part",
-                return_value=input_part,
-            ):
-                response = gemini_diagnostic.run_gemini_request_ladder(
-                    GeminiRequestLadderRequest(
-                        model=settings.gemini_primary_model,
-                        level="youtube_production_shape",
-                        youtube_url="https://www.youtube.com/watch?v=abcdefghijk",
-                    ),
-                    settings,
-                )
-        finally:
-            _GEMINI_CALL_CONTEXT.reset(context_token)
-
-        self.assertTrue(response.success)
-        self.assertIs(gemini_diagnostic.create_gemini_client, create_gemini_client)
         queue_call = queue_client.models.generate_content.call_args.kwargs
-        diagnostic_call = diagnostic_client.models.generate_content.call_args.kwargs
         self.assertEqual(
             request_fingerprint(queue_call, api_version=api_version),
-            request_fingerprint(diagnostic_call, api_version=api_version),
+            {
+                "model": "gemini-3.1-flash-lite",
+                "content_count": 2,
+                "content_types": ("Part", "str"),
+                "youtube_part_type": "Part",
+                "youtube_mime_type": "video/mp4",
+                "schema_field": "response_json_schema",
+                "schema_is_canonical": True,
+                "response_mime_type": "application/json",
+                "system_instruction_present": False,
+                "prompt_template_identity": (
+                    "5d8d998a6bfbd9a8d76819e316d735bdf3c7509c216bac3e761f798e534f55d8"
+                ),
+                "actual_prompt_identity": (
+                    "5d8d998a6bfbd9a8d76819e316d735bdf3c7509c216bac3e761f798e534f55d8"
+                ),
+                "thinking_config": {"thinking_level": "high"},
+                "max_output_tokens": 12000,
+                "temperature": 0.1,
+                "api_version": "v1beta",
+            },
         )
 
 
