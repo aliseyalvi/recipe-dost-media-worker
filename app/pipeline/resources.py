@@ -4,68 +4,31 @@ import os
 import resource
 import shutil
 import subprocess
-import threading
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
 from app.config import Settings
+from app.worker_runtime import resources as active_resources
+from app.worker_runtime.resources import ffmpeg_process_slot, gemini_upload_slot
 
-_ffmpeg_slots = threading.BoundedSemaphore(1)
-_gemini_upload_slots = threading.BoundedSemaphore(1)
-_ffmpeg_active = 0
-_gemini_upload_active = 0
-_ffmpeg_lock = threading.Lock()
-_gemini_upload_lock = threading.Lock()
+# Active sequential controls moved to app.worker_runtime.resources. This
+# module now retains retired W7 compatibility pending the cleanup soak.
 
 
 def configure_ffmpeg_slots(limit: int) -> None:
-    global _ffmpeg_slots
-    _ffmpeg_slots = threading.BoundedSemaphore(max(1, limit))
+    active_resources._configure_ffmpeg_slots(limit)
 
 
 def configure_gemini_upload_slots(limit: int) -> None:
-    global _gemini_upload_slots
-    _gemini_upload_slots = threading.BoundedSemaphore(max(1, limit))
-
-
-@contextmanager
-def ffmpeg_process_slot() -> Iterator[None]:
-    global _ffmpeg_active
-    _ffmpeg_slots.acquire()
-    with _ffmpeg_lock:
-        _ffmpeg_active += 1
-    try:
-        yield
-    finally:
-        with _ffmpeg_lock:
-            _ffmpeg_active = max(0, _ffmpeg_active - 1)
-        _ffmpeg_slots.release()
+    active_resources._configure_gemini_upload_slots(limit)
 
 
 def active_ffmpeg_processes() -> int:
-    with _ffmpeg_lock:
-        return _ffmpeg_active
-
-
-@contextmanager
-def gemini_upload_slot() -> Iterator[None]:
-    global _gemini_upload_active
-    _gemini_upload_slots.acquire()
-    with _gemini_upload_lock:
-        _gemini_upload_active += 1
-    try:
-        yield
-    finally:
-        with _gemini_upload_lock:
-            _gemini_upload_active = max(0, _gemini_upload_active - 1)
-        _gemini_upload_slots.release()
+    return active_resources._active_ffmpeg_processes()
 
 
 def active_gemini_uploads() -> int:
-    with _gemini_upload_lock:
-        return _gemini_upload_active
+    return active_resources._active_gemini_uploads()
 
 
 @dataclass(frozen=True)

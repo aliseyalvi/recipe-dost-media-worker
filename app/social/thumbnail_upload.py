@@ -6,7 +6,7 @@ from uuid import UUID
 
 import requests
 
-from app.pipeline.resources import ffmpeg_process_slot
+from app.worker_runtime.resources import ffmpeg_process_slot
 
 from app.config import Settings
 from app.supabase_client import MediaJobRepository

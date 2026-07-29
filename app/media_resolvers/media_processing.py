@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.media_resolvers.contracts import ResolverError
-from app.pipeline.resources import ffmpeg_process_slot
+from app.worker_runtime.resources import ffmpeg_process_slot
 
 
 @dataclass(frozen=True)

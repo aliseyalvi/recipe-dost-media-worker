@@ -16,7 +16,7 @@ from typing import Any, Literal
 import requests
 
 from app.config import Settings
-from app.pipeline.resources import ffmpeg_process_slot
+from app.worker_runtime.resources import ffmpeg_process_slot
 from app.social.models import SocialResolverError, SocialVideoInfo
 from app.social.thumbnail_selection import platform_thumbnail, select_ytdlp_thumbnail
 from app.social.yt_dlp_resolver import (

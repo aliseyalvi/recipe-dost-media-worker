@@ -45,7 +45,7 @@ from app.observability.sentry import (
 )
 from app.media_resolvers.contracts import ResolverError
 from app.media_resolvers.pipeline import resolve_external_media
-from app.pipeline.resources import gemini_upload_slot
+from app.worker_runtime.resources import gemini_upload_slot
 from app.recipe_tags import has_required_recipe_tags, normalize_recipe_tags
 from app.quota_finalization import (
     ensure_quota_reservation_event,

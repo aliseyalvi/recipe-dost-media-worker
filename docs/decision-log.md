@@ -1,5 +1,15 @@
 # Decision Log
 
+## 2026-07-29 — M23.W9D2 neutral sequential resource controls
+
+- Active FFmpeg and Gemini-upload guards now have one authoritative
+  `threading.BoundedSemaphore(1)` state in `app.worker_runtime.resources`.
+  Queue, media processing, stream download, and thumbnail code import the
+  neutral module directly with unchanged context-manager semantics.
+- `app.pipeline.resources` retains W7 admission, capacity, telemetry-bucket,
+  and system-resource logic. It re-exports the active guards by identity and
+  delegates retired W7 compatibility hooks to the same underlying state.
+
 ## 2026-07-29 — M23.W9D1 neutral startup cleanup
 
 - Sequential FastAPI startup now imports stale-media cleanup from
