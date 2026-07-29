@@ -4,6 +4,8 @@ import hmac
 import asyncio
 import json
 import logging
+import platform
+from importlib.metadata import PackageNotFoundError, version
 from pydantic import BaseModel
 from pathlib import Path
 from typing import Annotated, Any, Optional, Union
@@ -143,6 +145,12 @@ class JsonFormatter(logging.Formatter):
             "eligible_audio_count",
             "rejection_counts",
             "stale_directories_removed",
+            "google_genai",
+            "pydantic",
+            "pydantic_core",
+            "pydantic_settings",
+            "python",
+            "worker_processing_model",
             "pipeline_mode",
             "configured_concurrency",
             "queue_depth_bucket",
@@ -387,6 +395,7 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
     )
     queue_mode = settings.worker_execution_mode == "queue"
     return {
+        "runtime_dependencies": runtime_dependency_versions(),
         "app_env": settings.app_env,
         "worker_execution_mode": settings.worker_execution_mode,
         "worker_processing_model": "sequential_queue",
@@ -475,6 +484,37 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
             ),
         },
     }
+
+
+def runtime_dependency_versions() -> dict[str, str]:
+    packages = {
+        "google_genai": "google-genai",
+        "pydantic": "pydantic",
+        "pydantic_core": "pydantic-core",
+        "pydantic_settings": "pydantic-settings",
+    }
+    versions: dict[str, str] = {}
+    for field, distribution in packages.items():
+        try:
+            versions[field] = version(distribution)
+        except PackageNotFoundError:
+            versions[field] = "not_installed"
+    versions["python"] = platform.python_version()
+    return versions
+
+
+def log_runtime_dependency_versions() -> None:
+    try:
+        logger.info(
+            "runtime_dependency_versions",
+            extra={
+                **runtime_dependency_versions(),
+                "worker_processing_model": "sequential_queue",
+            },
+        )
+    except Exception:
+        # Startup diagnostics are best-effort and must not block the worker.
+        return
 
 
 def _instagram_host_categories(suffixes: list[str]) -> list[str]:
@@ -588,6 +628,7 @@ async def start_queue_worker() -> None:
         settings = get_settings()
         validate_external_resolver_runtime_config(settings)
         stale_directories_removed = cleanup_stale_media(settings)
+        log_runtime_dependency_versions()
         logger.info(
             "worker_safe_config_summary",
             extra={

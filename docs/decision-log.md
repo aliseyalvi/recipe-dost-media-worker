@@ -1,5 +1,13 @@
 # Decision Log
 
+## 2026-07-29 — M23.GD3A verified Gemini runtime pins
+
+- Render and Docker now install the owner-verified `google-genai`, Pydantic,
+  and pydantic-core versions exactly from the shared root requirements file.
+- Safe health/startup diagnostics report only those package versions,
+  pydantic-settings, Python, and the sequential worker processing category.
+  Gemini requests, schemas, models, queue behavior, and secrets are unchanged.
+
 ## 2026-07-29 — M23.W9D2 neutral sequential resource controls
 
 - Active FFmpeg and Gemini-upload guards now have one authoritative
