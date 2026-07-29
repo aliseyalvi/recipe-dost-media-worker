@@ -42,6 +42,7 @@ ENABLE_SOCIAL_VIDEO=true
 ENABLE_TIKWM_RESOLVER=true
 ENABLE_RENDER_INSTAGRAM_RESOLVER=false
 ENABLE_RENDER_FACEBOOK_RESOLVER=false
+ENABLE_COBALT_RESOLVER=false
 
 SOCIAL_ANALYSIS_MODE=text_first
 ENABLE_TIKTOK_TEXT_FALLBACK=true
@@ -60,7 +61,7 @@ Set `WORKER_API_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `GEMIN
 ## Safety Rules
 
 - Do not store raw videos.
-- Do not store TikWM, Snapinsta, Snapsave, or CDN download URLs.
+- Do not store TikWM, Cobalt, Snapinsta, Snapsave, or CDN download URLs.
 - Do not expose user-facing downloads.
 - Do not log full source URLs, stream URLs, cookies, Gemini prompts, raw Gemini responses, ingredients, or steps.
 - TikTok uses TikWM metadata plus Gemini text-first analysis only in W-M14R1.
@@ -78,7 +79,7 @@ TIKTOK_AKNG_ACCESS_TOKEN
 ```
 
 Development config currently selects `external`, `all_authorized_ai`,
-`rapidapi_instagram_unified_v1`, and `akng_tiktok`, with cookie fallback false and
+`rapidapi_instagram_reels13`, and `akng_tiktok`, with cookie fallback false and
 YouTube direct Gemini true. Rotate the token that appeared in user-provided
 input before installing it. Use separate development and production provider
 applications/keys.
@@ -122,7 +123,7 @@ metadata; the production check supplies no provider credentials. Expected safe
 development startup event is `worker_safe_config_summary` with config path
 `config/worker.development.json`, selection source `RENDER_GIT_BRANCH`, mode
 `external`, audience `all_authorized_ai`, adapters
-`rapidapi_instagram_unified_v1`/`akng_tiktok`, cookie fallback false, YouTube direct
+`rapidapi_instagram_reels13`/`akng_tiktok`, cookie fallback false, YouTube direct
 true, and both credential-presence booleans true.
 
 Owner recovery checklist:

@@ -1,0 +1,22 @@
+{
+  "status": true,
+  "medias": [
+    {
+      "id": "incident-video",
+      "type": "video",
+      "quality": "1080x1920p",
+      "resolution": "1080x1920",
+      "extension": "mp4",
+      "url": "https://provider.invalid/media/incident-video"
+    },
+    {
+      "id": "incident-audio",
+      "type": "audio",
+      "quality": "84kbps",
+      "resolution": null,
+      "extension": "m4a",
+      "url": "https://provider.invalid/media/incident-audio"
+    }
+  ],
+  "error": null
+}

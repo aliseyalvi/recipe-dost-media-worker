@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 from app.media_resolvers.contracts import MediaResolutionRequest, ResolverError
+from app.media_resolvers.instagram_reels13 import InstagramReels13Resolver
 from app.media_resolvers.instagram_unified_v1 import InstagramUnifiedV1Resolver
 from app.media_resolvers.pipeline import _emit_instagram_contract_diagnostic
 from app.media_resolvers.selection import (
@@ -68,6 +69,47 @@ def request(platform: str) -> MediaResolutionRequest:
         preferred_byte_target=36 * 1024 * 1024,
         timeout_seconds=15,
     )
+
+
+class InstagramAdapterTests(unittest.TestCase):
+    def resolver(self, name: str) -> InstagramReels13Resolver:
+        return InstagramReels13Resolver(
+            client=FakeClient(fixture("rapidapi_instagram_reels13", name)),  # type: ignore[arg-type]
+            base_url="https://provider.invalid",
+            rapidapi_host="provider.invalid",
+            rapidapi_key="fixture-secret",
+        )
+
+    def test_split_video_audio_and_safe_serialization(self) -> None:
+        result = self.resolver("success.json").resolve(request("instagram"))
+        self.assertEqual(result.media_mode, "split_av")
+        self.assertEqual(len([c for c in result.candidates if c.media_type == "video"]), 1)
+        selected = select_video_candidate(
+            result.candidates,
+            preferred_bytes=36 * 1024 * 1024,
+            hard_limit_bytes=50 * 1024 * 1024,
+            allowed_host_suffixes=("provider.invalid",),
+        )
+        self.assertEqual(selected.candidate_id, "video-720")
+        self.assertIsNone(selected.size_bytes)
+        serialized = json.dumps(result.safe_to_dict())
+        self.assertNotIn("provider.invalid", serialized)
+        self.assertNotIn("fixture-secret", serialized)
+        self.assertNotIn("fixture-title", serialized)
+        self.assertNotIn("provider.invalid", repr(result))
+
+    def test_no_video_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ResolverError, "unsupported_media"):
+            self.resolver("no_video.json").resolve(request("instagram"))
+
+    def test_private_and_invalid_are_terminal(self) -> None:
+        with self.assertRaises(ResolverError) as private:
+            self.resolver("private_or_deleted.json").resolve(request("instagram"))
+        self.assertEqual(private.exception.code, "media_private_or_deleted")
+        self.assertFalse(private.exception.fallback_allowed)
+        with self.assertRaises(ResolverError) as invalid:
+            self.resolver("invalid_url.json").resolve(request("instagram"))
+        self.assertEqual(invalid.exception.code, "media_unavailable")
 
 
 class InstagramUnifiedV1AdapterTests(unittest.TestCase):

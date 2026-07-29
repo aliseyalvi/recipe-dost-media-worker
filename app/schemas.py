@@ -115,6 +115,9 @@ class HealthResponse(BaseModel):
     tikwm_enabled_platforms: list[str]
     tikwm_hd: bool
     tikwm_probe_bytes: int
+    enable_cobalt_resolver: bool
+    cobalt_configured: bool
+    cobalt_enabled_platforms: list[str]
     worker_execution_mode: str
     worker_processing_model: Literal["sequential_queue"]
     queue_loop_enabled: bool

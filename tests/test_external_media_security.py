@@ -350,5 +350,11 @@ class ExternalMediaSecurityTests(unittest.TestCase):
             self.assertTrue(link.is_symlink())
             self.assertTrue(target.is_dir())
 
+    def test_legacy_cleanup_import_reexports_active_implementation(self) -> None:
+        from app.pipeline import recovery
+
+        self.assertIs(recovery.cleanup_stale_media, cleanup_stale_media)
+
+
 if __name__ == "__main__":
     unittest.main()

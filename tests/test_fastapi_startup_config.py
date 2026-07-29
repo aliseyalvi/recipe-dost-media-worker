@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from pydantic import ValidationError
 from app import main
 from app.config import Settings
 from app.runtime_config import clear_worker_config_cache
@@ -24,6 +25,21 @@ def settings_for(environment: str, **overrides: object) -> Settings:
     with patch.dict(os.environ, {"APP_ENV": environment}, clear=True):
         clear_worker_config_cache()
         return Settings(_env_file=None, **values)
+
+
+def settings_for_pipeline_env(environment: str, value: str) -> Settings:
+    with patch.dict(
+        os.environ,
+        {"APP_ENV": environment, "WORKER_PIPELINE_MODE": value},
+        clear=True,
+    ):
+        clear_worker_config_cache()
+        return Settings(
+            _env_file=None,
+            worker_api_secret="test-only",
+            supabase_url="https://example.invalid",
+            supabase_service_role_key="test-only",
+        )
 
 
 class FastApiStartupConfigTests(unittest.TestCase):
@@ -54,18 +70,40 @@ class FastApiStartupConfigTests(unittest.TestCase):
             return_value=task,
         ) as create:
             main.ensure_queue_worker_started(settings)
-        run.assert_called_once_with()
+        run.assert_called_once_with(main.build_job_runner)
         create.assert_called_once_with("sequential-loop")
         self.assertIs(main.queue_task, task)
 
     def test_default_configuration_starts_sequential_queue_loop(self) -> None:
         self.assert_sequential_loop_started(settings_for("production"))
 
+    def test_explicit_sequential_configuration_starts_same_queue_loop(self) -> None:
+        self.assert_sequential_loop_started(
+            settings_for_pipeline_env("production", "sequential")
+        )
+
+    def test_retired_pipeline_values_fail_before_task_creation(self) -> None:
+        for value in ("staged", "unsupported"):
+            with self.subTest(value=value), patch.object(
+                main.asyncio, "create_task"
+            ) as create:
+                with self.assertRaisesRegex(
+                    ValidationError,
+                    "WORKER_PIPELINE_MODE is retired; only sequential is supported",
+                ):
+                    settings_for_pipeline_env("production", value)
+                create.assert_not_called()
+                self.assertIsNone(main.queue_task)
+
     def test_app_main_import_does_not_load_w7_runtime_modules(self) -> None:
         code = (
             "import sys; import app.main; "
-            "assert not any(name == 'app.pipeline' or "
-            "name.startswith('app.pipeline.') for name in sys.modules)"
+            "forbidden={'app.pipeline.recovery','app.pipeline.runtime',"
+            "'app.pipeline.services',"
+            "'app.pipeline.contracts','app.pipeline.transport',"
+            "'app.pipeline.telemetry','app.pipeline.dispatch',"
+            "'app.pipeline.ingest','app.pipeline.analyzer','app.pipeline.finalizer'}; "
+            "assert forbidden.isdisjoint(sys.modules)"
         )
         completed = subprocess.run(
             [sys.executable, "-c", code],
@@ -125,7 +163,8 @@ class FastApiStartupConfigTests(unittest.TestCase):
     def test_neutral_cleanup_import_has_no_runtime_or_provider_side_effects(self) -> None:
         code = (
             "import sys; import app.worker_runtime.cleanup; "
-            "forbidden={'app.queue_worker','app.supabase_client',"
+            "forbidden={'app.pipeline.recovery','app.pipeline.runtime',"
+            "'app.pipeline.services','app.queue_worker','app.supabase_client',"
             "'app.ai.gemini_recipe','app.media_resolvers.registry',"
             "'app.media_resolvers.instagram_unified_v1',"
             "'app.media_resolvers.tiktok_akng'}; "
@@ -165,13 +204,14 @@ class FastApiStartupConfigTests(unittest.TestCase):
         ) as create:
             main.ensure_queue_worker_started(settings)
             main.ensure_queue_worker_started(settings)
-        run.assert_called_once_with()
+        run.assert_called_once_with(main.build_job_runner)
         create.assert_called_once_with("sequential-loop")
 
     def test_health_omits_w7_runtime_fields(self) -> None:
         payload = main.health(settings_for("production")).model_dump()
         self.assertEqual(payload["worker_processing_model"], "sequential_queue")
         forbidden = {
+            "worker_pipeline_mode",
             "worker_stage_transport",
             "worker_dispatch_concurrency",
             "worker_ingest_concurrency",

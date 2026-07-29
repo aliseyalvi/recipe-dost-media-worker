@@ -58,7 +58,7 @@ The worker may extract safe metadata, create temporary server-side media files f
 - `STORE_RAW_MEDIA=false`
 
 Development uses `MEDIA_RESOLVER_MODE=external`, audience
-`all_authorized_ai`, Instagram adapter `rapidapi_instagram_unified_v1`, and TikTok
+`all_authorized_ai`, Instagram adapter `rapidapi_instagram_reels13`, and TikTok
 adapter `akng_tiktok`. Provider credentials stay only in Render secrets. A
 production canary must first switch to a selected-test-user audience; do not
 copy development credentials to production.

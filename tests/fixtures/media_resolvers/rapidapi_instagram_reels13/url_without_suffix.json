@@ -1,0 +1,12 @@
+{
+  "status": true,
+  "medias": [
+    {
+      "id": "suffixless",
+      "type": "video",
+      "resolution": "720x1280",
+      "url": "https://provider.invalid/media/opaque-resource"
+    }
+  ],
+  "error": null
+}

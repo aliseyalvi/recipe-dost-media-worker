@@ -72,6 +72,7 @@ class FileRuntimeConfigTests(unittest.TestCase):
             settings.instagram_resolver_chain,
             ["rapidapi_instagram_unified_v1"],
         )
+        self.assertNotIn("instagram_reels13_enabled", Settings.model_fields)
         self.assertEqual(settings.tiktok_resolver_chain, ["akng_tiktok"])
         self.assertFalse(settings.cookie_media_fallback_enabled)
         self.assertTrue(settings.youtube_direct_gemini_enabled)
@@ -292,10 +293,13 @@ class FileRuntimeConfigTests(unittest.TestCase):
         )
         self.assertEqual(production.external_media_resolver_audience, "disabled")
 
-    def test_retired_reels13_configuration_is_rejected(self) -> None:
+    def test_retired_reels13_configuration_is_rejected_and_flag_is_ignored(
+        self,
+    ) -> None:
         with self.isolated_environment(
             APP_ENV="development",
             INSTAGRAM_RESOLVER_CHAIN="rapidapi_instagram_reels13",
+            INSTAGRAM_REELS13_ENABLED="true",
             INSTAGRAM_RAPIDAPI_KEY="dummy-instagram",
         ):
             with self.assertRaisesRegex(
@@ -303,6 +307,36 @@ class FileRuntimeConfigTests(unittest.TestCase):
                 "rapidapi_instagram_reels13 is retired and cannot be enabled",
             ):
                 build_settings()
+
+        with self.isolated_environment(
+            APP_ENV="development",
+            INSTAGRAM_REELS13_ENABLED="true",
+            INSTAGRAM_RAPIDAPI_KEY="dummy-instagram",
+        ):
+            settings = build_settings()
+
+        self.assertEqual(
+            settings.instagram_resolver_chain,
+            ["rapidapi_instagram_unified_v1"],
+        )
+        self.assertNotIn("instagram_reels13_enabled", Settings.model_fields)
+        defaults = json.loads(
+            (PROJECT_ROOT / "config" / "worker.defaults.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        development = json.loads(
+            (PROJECT_ROOT / "config" / "worker.development.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertNotIn("INSTAGRAM_REELS13_ENABLED", defaults)
+        self.assertNotIn("INSTAGRAM_REELS13_ENABLED", development)
+        self.assertNotIn(
+            "rapidapi_instagram_reels13",
+            defaults["INSTAGRAM_RESOLVER_CHAIN"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

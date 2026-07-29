@@ -10,6 +10,7 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Callable
 
+from app.pipeline import resources as legacy_resources
 from app.worker_runtime import resources
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,16 @@ class WorkerRuntimeResourceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(resources._ffmpeg_slots._initial_value, 1)
         self.assertEqual(resources._gemini_upload_slots._initial_value, 1)
+
+    def test_legacy_active_symbols_are_identical_reexports(self) -> None:
+        self.assertIs(
+            legacy_resources.ffmpeg_process_slot,
+            resources.ffmpeg_process_slot,
+        )
+        self.assertIs(
+            legacy_resources.gemini_upload_slot,
+            resources.gemini_upload_slot,
+        )
 
     async def test_ffmpeg_operations_are_serialized_and_release_after_success(
         self,
@@ -114,8 +125,14 @@ class WorkerRuntimeResourceTests(unittest.IsolatedAsyncioTestCase):
             "'app.media_resolvers.media_processing',"
             "'app.social.stream_download','app.social.thumbnail_upload');"
             "[importlib.import_module(name) for name in modules];"
-            "assert not any(name == 'app.pipeline' or "
-            "name.startswith('app.pipeline.') for name in sys.modules)"
+            "forbidden={'app.pipeline.resources','app.pipeline.runtime',"
+            "'app.pipeline.transport','app.pipeline.services',"
+            "'app.pipeline.contracts','app.pipeline.dispatch',"
+            "'app.pipeline.ingest','app.pipeline.analyzer',"
+            "'app.pipeline.finalizer','app.qa.staged',"
+            "'app.workers.ingest_worker','app.workers.analyzer_worker',"
+            "'app.workers.finalizer_worker'};"
+            "assert forbidden.isdisjoint(sys.modules)"
         )
         completed = subprocess.run(
             [sys.executable, "-c", code],
@@ -133,9 +150,11 @@ class WorkerRuntimeResourceTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         code = (
             "import sys;import app.worker_runtime.resources;"
-            "forbidden={'app.queue_worker','app.supabase_client','app.ai.gemini_recipe',"
+            "forbidden={'app.pipeline.resources','app.pipeline.runtime',"
+            "'app.queue_worker','app.supabase_client','app.ai.gemini_recipe',"
             "'app.media_resolvers.registry',"
             "'app.media_resolvers.instagram_unified_v1',"
+            "'app.media_resolvers.instagram_reels13',"
             "'app.media_resolvers.tiktok_akng'};"
             "assert forbidden.isdisjoint(sys.modules)"
         )
