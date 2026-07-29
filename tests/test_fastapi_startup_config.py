@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from app import main
 from app.config import Settings
 from app.runtime_config import clear_worker_config_cache
+from app.worker_runtime.cleanup import cleanup_stale_media as active_cleanup_stale_media
 
 
 def settings_for(environment: str, **overrides: object) -> Settings:
@@ -97,10 +98,76 @@ class FastApiStartupConfigTests(unittest.TestCase):
     def test_app_main_import_does_not_load_w7_runtime_modules(self) -> None:
         code = (
             "import sys; import app.main; "
-            "forbidden={'app.pipeline.runtime','app.pipeline.services',"
+            "forbidden={'app.pipeline.recovery','app.pipeline.runtime',"
+            "'app.pipeline.services',"
             "'app.pipeline.contracts','app.pipeline.transport',"
             "'app.pipeline.telemetry','app.pipeline.dispatch',"
             "'app.pipeline.ingest','app.pipeline.analyzer','app.pipeline.finalizer'}; "
+            "assert forbidden.isdisjoint(sys.modules)"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=Path(__file__).resolve().parents[1],
+            env={"APP_ENV": "production", "PATH": os.environ.get("PATH", "")},
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_app_main_uses_neutral_cleanup_implementation(self) -> None:
+        self.assertIs(main.cleanup_stale_media, active_cleanup_stale_media)
+
+    def test_startup_cleans_once_before_queue_start(self) -> None:
+        settings = settings_for("production")
+        order: list[str] = []
+
+        def cleanup(active: Settings) -> int:
+            self.assertIs(active, settings)
+            order.append("cleanup")
+            return 2
+
+        def start(active: Settings) -> None:
+            self.assertIs(active, settings)
+            order.append("queue")
+
+        with patch.object(main, "get_settings", return_value=settings), patch.object(
+            main, "cleanup_stale_media", side_effect=cleanup
+        ) as stale_cleanup, patch.object(
+            main, "ensure_queue_worker_started", side_effect=start
+        ) as queue_start, patch.object(main, "report_worker_error"):
+            asyncio.run(main.start_queue_worker())
+
+        stale_cleanup.assert_called_once_with(settings)
+        queue_start.assert_called_once_with(settings)
+        self.assertEqual(order, ["cleanup", "queue"])
+
+    def test_cleanup_failure_is_reported_before_queue_start(self) -> None:
+        settings = settings_for("production")
+        failure = OSError("safe test cleanup failure")
+        with patch.object(main, "get_settings", return_value=settings), patch.object(
+            main, "cleanup_stale_media", side_effect=failure
+        ) as stale_cleanup, patch.object(
+            main, "ensure_queue_worker_started"
+        ) as queue_start, patch.object(
+            main, "report_worker_error"
+        ) as report:
+            with self.assertRaises(OSError):
+                asyncio.run(main.start_queue_worker())
+
+        stale_cleanup.assert_called_once_with(settings)
+        queue_start.assert_not_called()
+        report.assert_called_once()
+
+    def test_neutral_cleanup_import_has_no_runtime_or_provider_side_effects(self) -> None:
+        code = (
+            "import sys; import app.worker_runtime.cleanup; "
+            "forbidden={'app.pipeline.recovery','app.pipeline.runtime',"
+            "'app.pipeline.services','app.queue_worker','app.supabase_client',"
+            "'app.ai.gemini_recipe','app.media_resolvers.registry',"
+            "'app.media_resolvers.instagram_unified_v1',"
+            "'app.media_resolvers.tiktok_akng'}; "
             "assert forbidden.isdisjoint(sys.modules)"
         )
         completed = subprocess.run(

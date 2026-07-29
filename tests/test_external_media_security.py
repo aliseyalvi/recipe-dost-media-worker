@@ -5,6 +5,7 @@ import os
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import requests
@@ -16,10 +17,10 @@ from app.media_resolvers.media_fetch import (
     host_allowed,
     is_public_ip,
     supported_media_signature,
-    sweep_stale_job_directories,
     validate_media_url,
     connected_peer_ip,
 )
+from app.worker_runtime.cleanup import cleanup_stale_media
 
 
 class ExternalMediaSecurityTests(unittest.TestCase):
@@ -318,15 +319,41 @@ class ExternalMediaSecurityTests(unittest.TestCase):
                 path.mkdir()
             old = time.time() - 1000
             os.utime(stale, (old, old))
-            removed = sweep_stale_job_directories(
-                directory,
-                older_than_seconds=300,
-                now=time.time(),
+            removed = cleanup_stale_media(
+                SimpleNamespace(
+                    temp_media_dir=directory,
+                    max_job_runtime_seconds=180,
+                )
             )
             self.assertEqual(removed, 1)
             self.assertFalse(stale.exists())
             self.assertTrue(fresh.exists())
             self.assertTrue(unrelated.exists())
+
+    def test_startup_cleanup_is_safe_for_missing_root_and_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            missing = root / "missing"
+            settings = SimpleNamespace(
+                temp_media_dir=str(missing),
+                max_job_runtime_seconds=180,
+            )
+            self.assertEqual(cleanup_stale_media(settings), 0)
+
+            target = Path(outside) / "preserved"
+            target.mkdir()
+            link = root / "external-link"
+            link.symlink_to(target, target_is_directory=True)
+            settings.temp_media_dir = directory
+
+            self.assertEqual(cleanup_stale_media(settings), 0)
+            self.assertTrue(link.is_symlink())
+            self.assertTrue(target.is_dir())
+
+    def test_legacy_cleanup_import_reexports_active_implementation(self) -> None:
+        from app.pipeline import recovery
+
+        self.assertIs(recovery.cleanup_stale_media, cleanup_stale_media)
 
 
 if __name__ == "__main__":

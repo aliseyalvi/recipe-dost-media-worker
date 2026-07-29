@@ -21,7 +21,7 @@ from app.metadata_preview import (
     SUPPORTED_METADATA_PLATFORMS,
     fetch_metadata_preview,
 )
-from app.pipeline.recovery import cleanup_stale_media
+from app.worker_runtime.cleanup import cleanup_stale_media
 from app.observability.sentry import flush_sentry, initialize_sentry, report_worker_error
 from app.queue_worker import run_queue_loop
 from app.runtime_config import worker_config_report

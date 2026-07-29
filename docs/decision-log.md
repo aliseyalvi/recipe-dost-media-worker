@@ -1,5 +1,15 @@
 # Decision Log
 
+## 2026-07-29 — M23.W9D1 neutral startup cleanup
+
+- Sequential FastAPI startup now imports stale-media cleanup from
+  `app.worker_runtime.cleanup`; its root, age threshold, directory matching,
+  symlink safety, exception behavior, logging context, return value, and startup
+  ordering are unchanged.
+- `app.pipeline.recovery` keeps its W7-oriented capability symbols and
+  temporarily re-exports the same cleanup function for compatibility. The
+  active neutral module has no reverse dependency on the mixed pipeline module.
+
 ## 2026-07-29 — M23.W9B sequential execution exclusivity
 
 - FastAPI startup and `/wake` now have one queue architecture:

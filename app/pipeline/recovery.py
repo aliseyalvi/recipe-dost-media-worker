@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.config import Settings
-from app.media_resolvers.media_fetch import sweep_stale_job_directories
+# Temporary compatibility import; active startup uses app.worker_runtime.cleanup.
+from app.worker_runtime.cleanup import cleanup_stale_media
 
 
 @dataclass(frozen=True)
@@ -14,13 +14,5 @@ class RecoveryCapabilities:
     blocker: str = "lease_owner_expiry_and_attempt_fields_missing"
 
 
-def cleanup_stale_media(settings: Settings) -> int:
-    return sweep_stale_job_directories(
-        settings.temp_media_dir,
-        older_than_seconds=settings.max_job_runtime_seconds + 120,
-    )
-
-
 def recovery_capabilities() -> RecoveryCapabilities:
     return RecoveryCapabilities()
-
