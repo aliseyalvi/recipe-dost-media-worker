@@ -1,5 +1,22 @@
 # Decision Log
 
+## 2026-07-29 — M23.W10B retry queue compatibility
+
+- The authenticated retry transition lives only in the canonical app/Supabase
+  repository as `public.retry_media_job(p_job_id uuid)`. It reuses the same
+  job ID and canonical `queued` state, so the existing W10A periodic FIFO claim
+  discovers it without `/wake`.
+- Worker production code is unchanged. Atomic claim, sequential drain, stale
+  recovery, direct Gemini invocation, `GeminiProviderCallBudget`, provider
+  accounting, resolver/media behavior, recipe-card reuse, and terminal quota
+  finalization retain their W10A behavior.
+- Focused worker coverage proves a retried queued row is drained without wake,
+  FIFO remains serial, an existing recipe card is reused, and terminal success
+  is committed once. Full validation passed compileall, 268 tests, pip check,
+  the 11-case offline replay, the seven-case mixed FIFO batch, secret-pattern
+  review, and diff checks. No live Supabase, Gemini, provider, Sentry, Render,
+  deployment, frontend, schema application, or media operation was performed.
+
 ## 2026-07-29 — M23.W10A-CFG queue-liveness configuration alignment
 
 - The four W10A queue-liveness values now use the established worker config
