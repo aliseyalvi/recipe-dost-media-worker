@@ -822,7 +822,7 @@ COOKIE_MEDIA_FALLBACK_ENABLED=false
 YOUTUBE_DIRECT_GEMINI_ENABLED=true
 PREFERRED_VIDEO_SIZE_MB=36
 MAX_VIDEO_SIZE_MB=50
-MAX_VIDEO_DURATION_SECONDS=120
+MAX_SOURCE_VIDEO_DURATION_SECONDS=180
 EXTERNAL_PROVIDER_TIMEOUT_SECONDS=15
 EXTERNAL_MEDIA_DOWNLOAD_TOTAL_TIMEOUT_SECONDS=120
 ```
@@ -867,7 +867,8 @@ adapter IDs, and credential-present booleans.
 - The video is probed first. Embedded audio avoids a merge. Otherwise the
   highest useful bounded audio candidate is downloaded and ffmpeg first tries
   stream copy, then bounded H.264/AAC conversion at maximum 720p. The final file
-  must probe as video plus audio and remain at or below 50 MiB and 120 seconds.
+  must probe as video plus audio and remain at or below 50 MiB and the
+  configured source-video duration limit.
 
 The Docker image now installs `ffmpeg`, which also supplies `ffprobe`. External
 traffic fails closed when either required tool is unavailable.

@@ -90,7 +90,7 @@ value because the provider documents decimal GB.
 | Active output mode | `temp_file` | `MEDIA_EXTRACT_OUTPUT_MODE`, production JSON | Hard architecture choice | Avoids holding the complete video in RAM. Ephemeral data is deleted. |
 | Memory-buffer maximum | 35 MiB | `MAX_MEMORY_BUFFER_MB`, `app/config.py` | Hard, inactive production mode | Remains for the non-production output option; the active temp-file path does not use it. |
 | Gemini Files upload maximum | 2,000,000,000 bytes (2 GB) | `GEMINI_FILE_MAX_SIZE_BYTES`, defaults JSON; Gemini Files documentation | Hard startup invariant | Worker hard limit must not exceed it. Current 50 MiB is far below it. |
-| Media duration | 120 seconds | `MAX_VIDEO_DURATION_SECONDS`, defaults/production JSON | Hard | Known over-limit media is rejected before download/Gemini. |
+| Source-video duration | 180 seconds | `MAX_SOURCE_VIDEO_DURATION_SECONDS`, defaults JSON; development/production inherit unless intentionally overridden | Hard | Allowed range is 60–900 seconds. Known over-limit media is rejected before download/Gemini. This value is separate from structured recipe duration. |
 | Maximum useful video resolution | 720 short-edge pixels | `MAX_VIDEO_HEIGHT`, defaults/production JSON | Soft quality ceiling | Short edge is intentional for portrait media; avoids excluding 720x1280 as the old height-only selector did. |
 | Minimum useful video resolution | 360 short-edge pixels | `MIN_VIDEO_HEIGHT`, defaults/production JSON | Hard acceptance floor | 360p is the bounded last quality; no `worst` selection. |
 | Audio | Required | candidate filter in `stream_download.py` | Hard | Recipe speech/audio remains present. Audio-only and video-only candidates are rejected. |

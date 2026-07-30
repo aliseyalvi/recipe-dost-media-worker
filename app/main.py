@@ -332,7 +332,10 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         enable_social_video=settings.enable_social_video,
         enable_yt_dlp=settings.enable_yt_dlp,
         enable_cookie_file=settings.enable_cookie_file,
-        max_video_duration_seconds=settings.max_video_duration_seconds,
+        max_source_video_duration_seconds=(
+            settings.max_source_video_duration_seconds
+        ),
+        max_video_duration_seconds=settings.max_source_video_duration_seconds,
         preferred_video_size_mb=settings.preferred_video_size_mb,
         max_video_size_mb=settings.max_video_size_mb,
         media_adaptive_max_attempts=settings.media_adaptive_max_attempts,
@@ -436,7 +439,10 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
         "has_youtube_cookies": cookies_configured(settings, "youtube"),
         "has_tiktok_cookies": cookies_configured(settings, "tiktok"),
         "media_extract_output_mode": settings.media_extract_output_mode,
-        "max_video_duration_seconds": settings.max_video_duration_seconds,
+        "max_source_video_duration_seconds": (
+            settings.max_source_video_duration_seconds
+        ),
+        "max_video_duration_seconds": settings.max_source_video_duration_seconds,
         "preferred_video_size_mb": settings.preferred_video_size_mb,
         "max_video_size_mb": settings.max_video_size_mb,
         "media_adaptive_max_attempts": settings.media_adaptive_max_attempts,

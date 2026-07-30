@@ -274,19 +274,32 @@ def try_ytdlp_extract(
     duration_seconds = safe_duration_seconds(info.get("duration"))
     if (
         duration_seconds is not None
-        and duration_seconds > settings.max_video_duration_seconds
+        and duration_seconds > settings.max_source_video_duration_seconds
     ):
-        return extractor_result(
+        result = extractor_result(
             platform,
             info,
             selected_format,
             success=False,
             error_code="video_duration_exceeded",
-            safe_error_message="This video is too long for automatic recipe analysis.",
+            safe_error_message=(
+                "This video exceeds the configured source duration limit."
+            ),
             resolver=resolver,
             cookie_mode=cookie_mode,
             output_mode=output_mode,
         )
+        result.update(
+            {
+                "actual_duration_seconds": duration_seconds,
+                "max_duration_seconds": (
+                    settings.max_source_video_duration_seconds
+                ),
+                "duration_validation_source": "validated_resolver_metadata",
+                "retryable": False,
+            }
+        )
+        return result
 
     if output_mode == "memory_buffer":
         return extract_to_memory(
@@ -1357,7 +1370,9 @@ def duration_bucket(duration_seconds: int | None) -> str:
         return "60_90_seconds"
     if duration_seconds <= 120:
         return "90_120_seconds"
-    return "over_120_seconds"
+    if duration_seconds <= 180:
+        return "121_180_seconds"
+    return "over_180_seconds"
 
 
 def size_bucket(size_bytes: int | None) -> str:

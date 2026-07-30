@@ -35,7 +35,7 @@ from app.social.thumbnail_selection import should_update_thumbnail
 from app.social.thumbnail_upload import upload_source_thumbnail
 from app.social.models import SocialResolverError, SocialVideoInfo
 from app.social.resolver_orchestrator import resolve_social_video
-from app.supabase_client import MediaJobRepository
+from app.supabase_client import MediaJobRepository, valid_recipe_minutes
 
 logger = logging.getLogger("recipe_dost.worker")
 
@@ -249,8 +249,7 @@ def _caption_result_to_recipe_result(parsed: dict) -> GeminiRecipeResult:
 
     prep_time = None
     cook_time = None
-    if isinstance(time_minutes, (int, float)) and time_minutes > 0:
-        prep_time = int(time_minutes)
+    total_time = valid_recipe_minutes(time_minutes)
 
     difficulty = (
         confidence
@@ -266,6 +265,7 @@ def _caption_result_to_recipe_result(parsed: dict) -> GeminiRecipeResult:
         confidence=confidence,
         prep_time_minutes=prep_time,
         cook_time_minutes=cook_time,
+        total_time_minutes=total_time,
         servings=str(servings) if servings else None,
         difficulty=difficulty,
         ingredients=recipe_ingredients,
@@ -963,7 +963,7 @@ class JobRunner:
 
         if (
             info.duration_seconds is not None
-            and info.duration_seconds > settings.max_video_duration_seconds
+            and info.duration_seconds > settings.max_source_video_duration_seconds
         ):
             self._repository.insert_event(
                 job.id,
@@ -973,20 +973,22 @@ class JobRunner:
                     "platform": "tiktok",
                     "resolver": "tikwm",
                     "duration_seconds": info.duration_seconds,
-                    "max_video_duration_seconds": settings.max_video_duration_seconds,
+                    "max_duration_seconds": settings.max_source_video_duration_seconds,
                 },
             )
             raise PipelineFailure(
                 "video_duration_exceeded",
                 (
-                    "This video is longer than the current 90 second limit. "
-                    "Please try a shorter recipe video."
+                    "This video exceeds the configured source duration limit."
                 ),
                 {
                     "platform": "tiktok",
                     "resolver": "tikwm",
                     "duration_seconds": info.duration_seconds,
-                    "max_video_duration_seconds": settings.max_video_duration_seconds,
+                    "max_duration_seconds": settings.max_source_video_duration_seconds,
+                    "actual_duration_seconds": info.duration_seconds,
+                    "duration_validation_source": "validated_resolver_metadata",
+                    "retryable": False,
                 },
             )
 
@@ -1100,7 +1102,7 @@ class JobRunner:
         self._update_social_metadata_best_effort(job, info)
         if (
             info.duration_seconds is not None
-            and info.duration_seconds > settings.max_video_duration_seconds
+            and info.duration_seconds > settings.max_source_video_duration_seconds
         ):
             self._repository.insert_event(
                 job.id,
@@ -1110,20 +1112,22 @@ class JobRunner:
                     "platform": platform,
                     "resolver": info.resolver,
                     "duration_seconds": info.duration_seconds,
-                    "max_video_duration_seconds": settings.max_video_duration_seconds,
+                    "max_duration_seconds": settings.max_source_video_duration_seconds,
                 },
             )
             raise PipelineFailure(
                 "video_duration_exceeded",
                 (
-                    "This video is longer than the current 90 second limit. "
-                    "Please try a shorter recipe video."
+                    "This video exceeds the configured source duration limit."
                 ),
                 {
                     "platform": platform,
                     "resolver": info.resolver,
                     "duration_seconds": info.duration_seconds,
-                    "max_video_duration_seconds": settings.max_video_duration_seconds,
+                    "max_duration_seconds": settings.max_source_video_duration_seconds,
+                    "actual_duration_seconds": info.duration_seconds,
+                    "duration_validation_source": "validated_resolver_metadata",
+                    "retryable": False,
                 },
             )
         thumbnail_url = self._upload_social_thumbnail_best_effort(
@@ -1221,7 +1225,7 @@ class JobRunner:
         self._update_social_metadata_best_effort(job, info)
         if (
             info.duration_seconds is not None
-            and info.duration_seconds > settings.max_video_duration_seconds
+            and info.duration_seconds > settings.max_source_video_duration_seconds
         ):
             self._repository.insert_event(
                 job.id,
@@ -1231,20 +1235,22 @@ class JobRunner:
                     "platform": platform,
                     "resolver": info.resolver,
                     "duration_seconds": info.duration_seconds,
-                    "max_video_duration_seconds": settings.max_video_duration_seconds,
+                    "max_duration_seconds": settings.max_source_video_duration_seconds,
                 },
             )
             raise PipelineFailure(
                 "video_duration_exceeded",
                 (
-                    "This video is longer than the current 90 second limit. "
-                    "Please try a shorter recipe video."
+                    "This video exceeds the configured source duration limit."
                 ),
                 {
                     "platform": platform,
                     "resolver": info.resolver,
                     "duration_seconds": info.duration_seconds,
-                    "max_video_duration_seconds": settings.max_video_duration_seconds,
+                    "max_duration_seconds": settings.max_source_video_duration_seconds,
+                    "actual_duration_seconds": info.duration_seconds,
+                    "duration_validation_source": "validated_resolver_metadata",
+                    "retryable": False,
                 },
             )
         if platform == "tiktok":
@@ -1553,7 +1559,7 @@ class JobRunner:
         self._check_job_runtime(job.id, job_started_at)
         video_duration_exceeded = (
             info.duration_seconds is not None
-            and info.duration_seconds > settings.max_video_duration_seconds
+            and info.duration_seconds > settings.max_source_video_duration_seconds
         )
         thumbnail_url = self._upload_social_thumbnail_best_effort(
             job,

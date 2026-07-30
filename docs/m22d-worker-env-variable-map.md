@@ -64,9 +64,10 @@ These moved to committed JSON config. Existing Render env values with the same n
 | `GEMINI_VIDEO_INPUT_MODE` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default `file_api`. |
 | `GEMINI_VIDEO_MODEL` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | optional | moved | Default null; effective model falls back to primary. |
 | `LOCAL_BRIEF_PARSER_ENABLED` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | fallback | moved | Default false. |
-| `MAX_VIDEO_DURATION_SECONDS` | config/default/env override | `app/config.py`, multiple worker paths | no | no | yes | moved | Default 120; validator enforces `<= 120`. |
+| `MAX_SOURCE_VIDEO_DURATION_SECONDS` | config/default/env override | `app/config.py`, multiple worker paths | no | no | yes | canonical | Default 180; validator enforces 60–900. Development and production inherit the shared default. |
 | `MAX_VIDEO_HEIGHT` | config/default/env override | `app/config.py`, `app/social/stream_download.py` | no | no | yes | moved | Default 720 short-edge pixels. |
-| `MAX_VIDEO_SECONDS` | env override alias | `app/config.py`, legacy env | no | no | yes | legacy alias | Still accepted as alias for `MAX_VIDEO_DURATION_SECONDS`; do not use in new env files. |
+| `MAX_VIDEO_DURATION_SECONDS` | env override alias | `app/config.py`, legacy env | no | no | yes | legacy alias | Still accepted for compatibility; do not use in JSON or new env files. |
+| `MAX_VIDEO_SECONDS` | env override alias | `app/config.py`, legacy env | no | no | yes | legacy alias | Still accepted for compatibility; do not use in new env files. |
 | `MAX_VIDEO_SIZE_MB` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | yes | moved | Hard default 50 MiB; historical name says MB but conversion is binary MiB. |
 | `MEDIA_ADAPTIVE_MAX_ATTEMPTS` | config/default/env override | `app/config.py`, `app/social/stream_download.py` | no | no | yes | moved | Default and maximum 4 bounded format attempts. |
 | `MEDIA_EXTRACT_OUTPUT_MODE` | config/default/env override | `app/config.py`, `app/social/stream_download.py` | no | no | yes | moved | Default `temp_file`. |

@@ -1,5 +1,26 @@
 # Decision Log
 
+## 2026-07-30 — M23.W10C explicit duration semantics
+
+- `MAX_SOURCE_VIDEO_DURATION_SECONDS=180` is the canonical shared JSON
+  default. Development and production inherit it, nonblank environment values
+  remain compatibility overrides, Pydantic enforces 60–900, and health reports
+  the effective safe value.
+- Source-video duration remains worker/resolver/ffprobe metadata and persists
+  through `media_jobs.media_duration_seconds`. Recipe prep/cook/total comes
+  only from structured recipe data. Explicit total wins; otherwise both prep
+  and cook are required before deriving a total.
+- The companion app migration synchronizes explicit `recipe_items` duration
+  fields. Legacy `duration_seconds` is recipe-total seconds only and is never
+  populated from source-video duration.
+- `video_duration_exceeded` keeps its stable code and now carries bounded
+  actual/max/source/retryable metadata. W10B retry accepts an existing failure
+  only when locked server state or a server-written duration event proves a
+  source duration from 1 through 180 seconds.
+- Queue sequencing, wake behavior, stale recovery, quota behavior, Gemini
+  invocation/budget/accounting, provider routing, media limits other than source
+  duration, and frontend UI are unchanged.
+
 ## 2026-07-29 — M23.W10B retry queue compatibility
 
 - The authenticated retry transition lives only in the canonical app/Supabase

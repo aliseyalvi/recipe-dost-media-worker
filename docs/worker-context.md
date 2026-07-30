@@ -29,8 +29,9 @@ The worker may extract safe metadata, create temporary server-side media files f
 - Metadata preview remains a separate public/no-cookie, download-free path and
   never reserves AI quota or calls an external media provider.
 - External selection prefers H.264/AVC MP4 at or below 720p and 36 MiB. The
-  streaming/temp-file hard limit is 50 MiB and duration limit is 120 seconds;
-  `*_MB` names use binary MiB.
+  streaming/temp-file hard limit is 50 MiB and the source-video duration limit
+  defaults to 180 seconds through `MAX_SOURCE_VIDEO_DURATION_SECONDS`; `*_MB`
+  names use binary MiB.
 - Production is still external-disabled. Its legacy extractor is retained only
   as rollback code, while cookie use requires the separate fallback flag and is
   false by default.

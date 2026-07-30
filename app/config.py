@@ -212,9 +212,15 @@ class Settings(BaseSettings):
         default_factory=dict
     )
     gemini_dev_budget_reset_at: Optional[str] = None
-    max_video_duration_seconds: int = Field(
-        default=worker_config_value("max_video_duration_seconds", 90),
-        validation_alias=AliasChoices("MAX_VIDEO_DURATION_SECONDS", "MAX_VIDEO_SECONDS"),
+    max_source_video_duration_seconds: int = Field(
+        default=worker_config_value("max_source_video_duration_seconds", 180),
+        validation_alias=AliasChoices(
+            "MAX_SOURCE_VIDEO_DURATION_SECONDS",
+            "MAX_VIDEO_DURATION_SECONDS",
+            "MAX_VIDEO_SECONDS",
+        ),
+        ge=60,
+        le=900,
     )
     preferred_video_size_mb: int = worker_config_value(
         "preferred_video_size_mb", 36
@@ -439,6 +445,11 @@ class Settings(BaseSettings):
     @property
     def max_video_size_bytes(self) -> int:
         return self.max_video_size_mb * 1024 * 1024
+
+    @property
+    def max_video_duration_seconds(self) -> int:
+        """Deprecated read-only alias for older integrations and diagnostics."""
+        return self.max_source_video_duration_seconds
 
     @property
     def tikwm_configured(self) -> bool:

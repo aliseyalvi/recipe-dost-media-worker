@@ -44,6 +44,7 @@ class MetadataPreview:
     thumbnail_url: str | None
     author_username: str | None
     duration_seconds: int | None
+    duration_validation_source: str | None
     tags: list[str]
     metadata_status: str
     is_too_long: bool
@@ -63,6 +64,7 @@ class MetadataPreview:
             "thumbnail_url": self.thumbnail_url,
             "author_username": self.author_username,
             "duration_seconds": self.duration_seconds,
+            "duration_validation_source": self.duration_validation_source,
             "tags": self.tags,
             "metadata_status": self.metadata_status,
             "is_too_long": self.is_too_long,
@@ -303,10 +305,11 @@ def failed_preview(platform: str, resolver: str, settings: Settings) -> Metadata
         thumbnail_url=None,
         author_username=None,
         duration_seconds=None,
+        duration_validation_source=None,
         tags=[],
         metadata_status="failed",
         is_too_long=False,
-        max_duration_seconds=settings.max_video_duration_seconds,
+        max_duration_seconds=settings.max_source_video_duration_seconds,
         thumbnail_source="placeholder",
         thumbnail_provider=platform,
         thumbnail_strategy=thumbnail_strategy,
@@ -352,19 +355,36 @@ def preview_from_mapping(
         thumbnail_url=thumbnail_url,
         author_username=clean_text(source.get("author_username"), max_length=120),
         duration_seconds=duration_seconds,
+        duration_validation_source=duration_validation_source(
+            resolver,
+            duration_seconds,
+        ),
         tags=tags,
         metadata_status=metadata_status,
         is_too_long=(
             duration_seconds is not None
-            and duration_seconds > settings.max_video_duration_seconds
+            and duration_seconds > settings.max_source_video_duration_seconds
         ),
-        max_duration_seconds=settings.max_video_duration_seconds,
+        max_duration_seconds=settings.max_source_video_duration_seconds,
         thumbnail_source=thumbnail_source,
         thumbnail_provider=thumbnail_provider,
         thumbnail_strategy=thumbnail_strategy,
         thumbnail_candidate_count=thumbnail_candidate_count,
         thumbnail_selected=thumbnail_selected,
     )
+
+
+def duration_validation_source(
+    resolver: str,
+    duration_seconds: int | None,
+) -> str | None:
+    if duration_seconds is None:
+        return None
+    if resolver.endswith("_ytdlp") or resolver in {"yt-dlp", "ytdlp_stream"}:
+        return "validated_resolver_metadata"
+    if resolver.endswith("_opengraph"):
+        return "trusted_source_metadata"
+    return None
 
 
 def clean_title(value: Any) -> str | None:

@@ -415,7 +415,9 @@ def resolve_external_media(
                     candidate_final_probe = validate_final_media(
                         candidate_final_path,
                         byte_limit=settings.max_video_size_bytes,
-                        duration_limit_seconds=settings.max_video_duration_seconds,
+                        duration_limit_seconds=(
+                            settings.max_source_video_duration_seconds
+                        ),
                         timeout_seconds=settings.ytdlp_extract_timeout_seconds,
                     )
                     video = candidate
@@ -1076,7 +1078,9 @@ def _duration_bucket(value: int | None) -> str:
         return "up_to_60_seconds"
     if value <= 120:
         return "60_120_seconds"
-    return "over_120_seconds"
+    if value <= 180:
+        return "121_180_seconds"
+    return "over_180_seconds"
 
 
 def _text_length_bucket(value: int) -> str:

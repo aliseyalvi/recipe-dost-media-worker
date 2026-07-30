@@ -93,15 +93,22 @@ def check_runtime_config(environment: str) -> dict[str, object]:
             errors.append("ALLOW_RAW_URL_LOGS effective value must be false")
 
         try:
-            max_duration = int(_effective_value(config, "MAX_VIDEO_DURATION_SECONDS") or 0)
+            max_duration = int(
+                _effective_value(
+                    config,
+                    "MAX_SOURCE_VIDEO_DURATION_SECONDS",
+                )
+                or 0
+            )
         except (TypeError, ValueError):
-            errors.append("MAX_VIDEO_DURATION_SECONDS effective value must be an integer")
+            errors.append(
+                "MAX_SOURCE_VIDEO_DURATION_SECONDS effective value must be an integer"
+            )
         else:
-            if max_duration > 120:
-                errors.append("MAX_VIDEO_DURATION_SECONDS effective value must be <= 120")
-            if max_duration == 90:
+            if not 60 <= max_duration <= 900:
                 errors.append(
-                    "MAX_VIDEO_DURATION_SECONDS effective value still matches fallback 90"
+                    "MAX_SOURCE_VIDEO_DURATION_SECONDS effective value must be "
+                    "between 60 and 900"
                 )
 
         try:

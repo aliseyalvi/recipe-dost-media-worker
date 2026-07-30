@@ -65,16 +65,17 @@
 | 61 | M23.W7A-W7C Staged combined worker architecture | Done locally; durable lease migration blocked | Typed stages, bounded in-process transport, resource admission, combined/fail-closed standalone entry points, ACTIVE-point cleanup, deterministic staged/concurrency-two QA; cross-process lease recovery needs approval |
 | 62 | M23.W8A-W8D Instagram Unified v1 adapter | Done locally | Replace active broken Reels13 routing with the validated Unified v1 contract while preserving secure shared media preparation |
 | 63 | M23.W10A-CFG Queue-liveness configuration alignment | Done locally | Canonical JSON defaults, sparse overlay inheritance, optional env overrides, Pydantic bounds, and safe health reporting for W10A settings |
-| 64 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 65 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 66 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 64 | M23.W10C Explicit source/recipe duration semantics | Done locally | 180-second JSON source limit, bounded duration errors, explicit recipe durations, legacy mapping repair, and authoritative duration retry |
+| 65 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 66 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 67 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Owner-run the guarded Instagram diagnostic with development credentials, then
-deploy only the `develop` revision to the development Render service and retest
-the supplied Reel. Production stays unchanged; rollback is the previous
-development revision or external-resolver disablement, not Reels13 fallback.
+Apply the reviewed W10C app migration and deploy the two updated Edge Functions
+before deploying the W10C worker on `develop`. Verify health reports 180, then
+run authenticated 180/181 duration and eligible historical retry checks before
+any production rollout.
 
 - M23.W6A-W6C keeps single-pass structured extraction as the active strategy:
   one video call, one text-only repair when useful, and one compatible-model

@@ -316,7 +316,10 @@ def build_social_video_info(
             "This social video stream format is not supported yet.",
         )
     duration = safe_float(info.get("duration"))
-    if duration is not None and duration > settings.max_video_duration_seconds:
+    if (
+        duration is not None
+        and duration > settings.max_source_video_duration_seconds
+    ):
         raise SocialPipelineError(
             "media_duration_too_long",
             "This video is too long for automatic recipe analysis.",

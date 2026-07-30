@@ -59,7 +59,7 @@ CONFIG_ONLY_KEYS = [
     "GEMINI_VIDEO_INPUT_MODE",
     "GEMINI_VIDEO_MODEL",
     "LOCAL_BRIEF_PARSER_ENABLED",
-    "MAX_VIDEO_DURATION_SECONDS",
+    "MAX_SOURCE_VIDEO_DURATION_SECONDS",
     "MAX_VIDEO_HEIGHT",
     "MAX_VIDEO_SIZE_MB",
     "MEDIA_ADAPTIVE_MAX_ATTEMPTS",
@@ -240,18 +240,15 @@ def validate_config(environment: str) -> dict[str, Any]:
     errors: list[str] = []
 
     try:
-        max_duration = int(config.get("MAX_VIDEO_DURATION_SECONDS", 0))
+        max_duration = int(config.get("MAX_SOURCE_VIDEO_DURATION_SECONDS", 0))
     except (TypeError, ValueError):
-        errors.append("config MAX_VIDEO_DURATION_SECONDS must be an integer")
+        errors.append(
+            "config MAX_SOURCE_VIDEO_DURATION_SECONDS must be an integer"
+        )
     else:
-        if max_duration <= 0:
-            errors.append("config MAX_VIDEO_DURATION_SECONDS must be greater than 0")
-        if max_duration > 120:
-            errors.append("config MAX_VIDEO_DURATION_SECONDS must be <= 120")
-        if environment == "production" and max_duration == 90:
+        if not 60 <= max_duration <= 900:
             errors.append(
-                "production config MAX_VIDEO_DURATION_SECONDS must not be the "
-                "fallback default 90"
+                "config MAX_SOURCE_VIDEO_DURATION_SECONDS must be between 60 and 900"
             )
 
     if _config_bool(config.get("ALLOW_RAW_URL_LOGS", False)):

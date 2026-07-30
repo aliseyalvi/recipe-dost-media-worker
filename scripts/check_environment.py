@@ -112,18 +112,18 @@ def _runtime_checks(
         errors.append("raw_url_logging_enabled must be false")
 
     try:
-        max_duration = int(_effective_value(config, "MAX_VIDEO_DURATION_SECONDS") or 0)
+        max_duration = int(
+            _effective_value(config, "MAX_SOURCE_VIDEO_DURATION_SECONDS") or 0
+        )
     except (TypeError, ValueError):
-        checks["max_video_duration_seconds"] = "invalid"
-        errors.append("max_video_duration_seconds must be an integer")
+        checks["max_source_video_duration_seconds"] = "invalid"
+        errors.append("max_source_video_duration_seconds must be an integer")
     else:
-        checks["max_video_duration_seconds"] = str(max_duration)
-        if max_duration <= 0:
-            errors.append("max_video_duration_seconds must be greater than 0")
-        if max_duration > 120:
-            errors.append("max_video_duration_seconds must be <= 120")
-        if environment == "production" and max_duration == 90:
-            errors.append("production max_video_duration_seconds still matches fallback 90")
+        checks["max_source_video_duration_seconds"] = str(max_duration)
+        if not 60 <= max_duration <= 900:
+            errors.append(
+                "max_source_video_duration_seconds must be between 60 and 900"
+            )
 
     try:
         preferred_size = int(_effective_value(config, "PREFERRED_VIDEO_SIZE_MB") or 0)
@@ -222,7 +222,7 @@ def print_summary(summary: dict[str, object]) -> None:
         for key in (
             "worker_execution_mode",
             "enable_unified_ytdlp_stream_extractor",
-            "max_video_duration_seconds",
+            "max_source_video_duration_seconds",
             "preferred_video_size_mib",
             "hard_video_size_mib",
             "media_adaptive_max_attempts",

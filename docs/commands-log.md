@@ -2,6 +2,30 @@
 
 Keep only commands that future turns may need.
 
+## M23.W10C explicit source/recipe duration semantics
+
+```bash
+.venv/bin/python -m compileall app scripts
+.venv/bin/python -m unittest discover -s tests -p "test_*.py"
+# passed: 275 tests
+
+.venv/bin/python scripts/check_runtime_config.py development
+.venv/bin/python scripts/check_runtime_config.py production
+.venv/bin/python scripts/validate_env.py development --example
+.venv/bin/python scripts/validate_env.py production --example
+# passed; both environments inherit MAX_SOURCE_VIDEO_DURATION_SECONDS=180
+
+.venv/bin/python -m pip check
+.venv/bin/python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/replay_manifest.json
+.venv/bin/python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+git diff --check
+```
+
+No live media, Gemini, provider, Supabase, Sentry, Render, migration,
+deployment, commit, or push command was run.
+
 ## M23.W10A-CFG queue-liveness configuration alignment
 
 ```bash

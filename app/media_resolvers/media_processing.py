@@ -108,7 +108,13 @@ def validate_final_media(
     if probe.duration_seconds is not None and probe.duration_seconds > duration_limit_seconds:
         raise ResolverError(
             "video_duration_exceeded",
-            "This video is longer than the supported duration.",
+            "This video exceeds the configured source duration limit.",
+            diagnostic_state={
+                "actual_duration_seconds": probe.duration_seconds,
+                "max_duration_seconds": duration_limit_seconds,
+                "duration_validation_source": "ffprobe",
+                "retryable": False,
+            },
         )
     return probe
 

@@ -48,7 +48,6 @@ SOCIAL_ANALYSIS_MODE=text_first
 ENABLE_TIKTOK_TEXT_FALLBACK=true
 ENABLE_SOCIAL_VIDEO_GEMINI=false
 SOCIAL_TEXT_GEMINI_TIMEOUT_SECONDS=45
-MAX_VIDEO_DURATION_SECONDS=90
 
 GEMINI_MAX_CALLS_PER_JOB=3
 ENABLE_GEMINI_REPAIR_CALL=false
@@ -57,6 +56,11 @@ STORE_RAW_MEDIA=false
 ```
 
 Set `WORKER_API_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `GEMINI_API_KEY` as Render secrets.
+
+The source-video limit is not a required Render variable. The canonical
+`MAX_SOURCE_VIDEO_DURATION_SECONDS=180` default lives in
+`config/worker.defaults.json`; a nonblank environment override remains
+optional and must be within 60–900.
 
 ## W10A Queue-Liveness Configuration
 

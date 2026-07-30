@@ -70,7 +70,12 @@ from app.social.thumbnail_upload import (
     sample_video_frame_thumbnail,
     upload_source_thumbnail,
 )
-from app.supabase_client import MediaJobRepository, create_repository
+from app.supabase_client import (
+    MediaJobRepository,
+    create_repository,
+    derive_recipe_total_minutes,
+    valid_recipe_minutes,
+)
 
 logger = logging.getLogger("recipe_dost.worker")
 
@@ -285,11 +290,12 @@ CONFIDENCE
 MISSING_OR_UNCERTAIN_DETAILS"""
 
 RECIPE_JSON_PROMPT = """Convert this recipe brief into strict JSON only.
-Required keys: title, summary, ingredients, steps, prep_time_minutes, cook_time_minutes,
-servings, difficulty, cuisine, tags. Use null when unknown and arrays for ingredients,
-steps, grocery_list, tags, missing_info, and uncertainties. Tags must be 5-8 lowercase,
-useful searchable categories, each at most 24 characters. Do not include food, recipe,
-video, hashtags, source usernames, handles, or URLs.
+Required keys: title, summary, ingredients, steps, prep_time_minutes,
+cook_time_minutes, total_time_minutes, servings, difficulty, cuisine, tags.
+Use null when unknown and arrays for ingredients, steps, grocery_list, tags,
+missing_info, and uncertainties. Tags must be 5-8 lowercase, useful searchable
+categories, each at most 24 characters. Do not include food, recipe, video,
+hashtags, source usernames, handles, or URLs.
 
 Ingredients may be strings or objects with name, quantity, notes, name_en, name_ur,
 notes_en, and notes_ur. Steps may be strings or objects with instruction,
@@ -304,7 +310,8 @@ Use only the supplied recipe brief and source title. Do not use video, URLs, or 
 
 Required keys:
 title, summary, ingredients, steps, grocery_list, prep_time_minutes,
-cook_time_minutes, servings, difficulty, cuisine, tags, missing_info, confidence.
+cook_time_minutes, total_time_minutes, servings, difficulty, cuisine, tags,
+missing_info, confidence.
 
 Ingredient objects must include:
 name, quantity, notes, name_en, name_ur, notes_en, notes_ur.
@@ -801,6 +808,15 @@ def process_queue_job(
             job=job,
             platform=platform,
         )
+        if extract_result.get("duration_seconds") is not None:
+            extract_result.setdefault(
+                "duration_validation_source",
+                (
+                    "ffprobe"
+                    if extract_result.get("probe_performed")
+                    else "validated_resolver_metadata"
+                ),
+            )
 
         video_buffer = extract_result.get("video_buffer")  # type: ignore[assignment]
         temp_file_path = extract_result.get("temp_file_path")  # type: ignore[assignment]
@@ -1104,6 +1120,30 @@ def resolve_queue_media(
             result["resolver_strategy"] = "external"
             return result
         except ResolverError as exc:
+            duration_metadata = {
+                key: exc.diagnostic_state[key]
+                for key in (
+                    "actual_duration_seconds",
+                    "max_duration_seconds",
+                    "duration_validation_source",
+                    "retryable",
+                )
+                if key in exc.diagnostic_state
+            }
+            actual_duration = safe_int_or_none(
+                duration_metadata.get("actual_duration_seconds")
+            )
+            if (
+                exc.code == "video_duration_exceeded"
+                and actual_duration is not None
+            ):
+                try:
+                    repository.update_job_metadata_best_effort(
+                        job.id,
+                        {"media_duration_seconds": actual_duration},
+                    )
+                except Exception:
+                    pass
             if not (
                 settings.media_resolver_mode == "hybrid"
                 and settings.cookie_media_fallback_enabled
@@ -1123,6 +1163,7 @@ def resolve_queue_media(
                         "provider_attempt": getattr(exc, "provider_attempt", 0),
                         "fallback_used": getattr(exc, "provider_attempt", 1) > 1,
                         "failure_stage": exc.failure_stage or "final_media_validation",
+                        **duration_metadata,
                     },
                 ) from (exc if exc.technical else None)
             add_event(
@@ -1178,6 +1219,19 @@ def resolve_queue_media(
     emit_extractor_progress_events(repository, job.id, result)
     if not result.get("success"):
         error_code = str(result.get("error_code") or "unified_extractor_failed")
+        if error_code == "video_duration_exceeded":
+            actual_duration = safe_int_or_none(
+                result.get("actual_duration_seconds")
+                or result.get("duration_seconds")
+            )
+            if actual_duration is not None:
+                try:
+                    repository.update_job_metadata_best_effort(
+                        job.id,
+                        {"media_duration_seconds": actual_duration},
+                    )
+                except Exception:
+                    pass
         if not result.get("metadata_fallback_attempted"):
             add_event(
                 repository,
@@ -1351,6 +1405,9 @@ def public_source_metadata(
         "description": result.get("description"),
         "author_username": result.get("author_username"),
         "duration_seconds": result.get("duration_seconds"),
+        "duration_validation_source": result.get(
+            "duration_validation_source"
+        ),
         "thumbnail_source_present": thumbnail_source_present,
         "thumbnail_source": result.get("thumbnail_source") or "placeholder",
         "thumbnail_provider": result.get("thumbnail_provider") or result.get("platform"),
@@ -2390,7 +2447,7 @@ def canonical_time_value(time_value: object, key: str) -> int | None:
         "total": ("total_minutes", "time_minutes"),
     }[key]
     for alias in aliases:
-        value = safe_int_or_none(time_value.get(alias))
+        value = valid_recipe_minutes(time_value.get(alias))
         if value is not None:
             return value
     return None
@@ -2492,6 +2549,7 @@ def validate_and_normalize_canonical_recipe(
         confidence=confidence,
         prep_time_minutes=canonical_time_value(time_value, "prep"),
         cook_time_minutes=canonical_time_value(time_value, "cook"),
+        total_time_minutes=canonical_time_value(time_value, "total"),
         servings=(
             str(canonical_recipe.get("servings"))
             if canonical_recipe.get("servings") not in {None, ""}
@@ -3696,6 +3754,9 @@ def normalize_recipe_json(parsed: dict) -> dict:
         "grocery_list": parsed.get("grocery_list") or parsed.get("grocery") or [],
         "prep_time_minutes": parsed.get("prep_time_minutes"),
         "cook_time_minutes": parsed.get("cook_time_minutes"),
+        "total_time_minutes": (
+            parsed.get("total_time_minutes") or parsed.get("total_minutes")
+        ),
         "servings": parsed.get("servings"),
         "difficulty": parsed.get("difficulty"),
         "cuisine": parsed.get("cuisine"),
@@ -3743,6 +3804,7 @@ def fallback_recipe_json_from_brief(
         "grocery_list": sections.get("grocery") or sections.get("ingredients") or [],
         "prep_time_minutes": None,
         "cook_time_minutes": None,
+        "total_time_minutes": None,
         "servings": None,
         "difficulty": None,
         "cuisine": None,
@@ -3903,13 +3965,13 @@ def convert_brief_to_recipe_json(
 
 
 def recipe_json_to_caption_shape(parsed: dict) -> dict:
-    total_time = None
     prep = parsed.get("prep_time_minutes")
     cook = parsed.get("cook_time_minutes")
-    if isinstance(prep, int) or isinstance(cook, int):
-        total_time = (prep if isinstance(prep, int) else 0) + (
-            cook if isinstance(cook, int) else 0
-        )
+    total_time = derive_recipe_total_minutes(
+        prep,
+        cook,
+        parsed.get("total_time_minutes") or parsed.get("total_minutes"),
+    )
     tags = parsed.get("tags") or []
     cuisine = parsed.get("cuisine")
     if cuisine and isinstance(tags, list):
@@ -4580,6 +4642,7 @@ def normalize_recipe_card_payload(
             "grocery_list": [item.model_dump(mode="json") for item in raw_recipe.grocery_list],
             "prep_time_minutes": raw_recipe.prep_time_minutes,
             "cook_time_minutes": raw_recipe.cook_time_minutes,
+            "total_time_minutes": raw_recipe.total_time_minutes,
             "servings": raw_recipe.servings,
             "difficulty": raw_recipe.difficulty,
             "confidence": raw_recipe.confidence,
@@ -4666,8 +4729,13 @@ def normalize_recipe_card_payload(
         short_summary_en=summary,
         short_summary_ur=clean_recipe_text(raw.get("summary_ur") or raw.get("short_summary_ur")),
         confidence=confidence or "medium",
-        prep_time_minutes=safe_int_or_none(raw.get("prep_time_minutes")),
-        cook_time_minutes=safe_int_or_none(raw.get("cook_time_minutes")),
+        prep_time_minutes=valid_recipe_minutes(raw.get("prep_time_minutes")),
+        cook_time_minutes=valid_recipe_minutes(raw.get("cook_time_minutes")),
+        total_time_minutes=derive_recipe_total_minutes(
+            raw.get("prep_time_minutes"),
+            raw.get("cook_time_minutes"),
+            raw.get("total_time_minutes") or raw.get("total_minutes"),
+        ),
         servings=str(raw.get("servings")) if raw.get("servings") else None,
         difficulty=difficulty or "unknown",
         ingredients=recipe_ingredients,
@@ -5092,6 +5160,12 @@ def safe_extract_event_metadata(
         "title_present": bool(result.get("title")),
         "description_present": bool(result.get("description")),
         "duration_seconds": result.get("duration_seconds"),
+        "actual_duration_seconds": result.get("actual_duration_seconds"),
+        "max_duration_seconds": result.get("max_duration_seconds"),
+        "duration_validation_source": result.get(
+            "duration_validation_source"
+        ),
+        "retryable": result.get("retryable"),
         "has_thumbnail": bool(
             result.get("thumbnail_selected") or result.get("thumbnail_url")
         ),
@@ -5592,12 +5666,25 @@ def safe_terminal_metadata(metadata: dict[str, object]) -> dict[str, object]:
         "resolver_adapter",
         "route_audience",
         "fallback_used",
+        "actual_duration_seconds",
+        "max_duration_seconds",
+        "duration_validation_source",
+        "retryable",
     }
     return {key: metadata[key] for key in allowed if key in metadata}
 
 
 def terminal_extractor_metadata(result: dict[str, object]) -> dict[str, object]:
     return {
+        "actual_duration_seconds": (
+            result.get("actual_duration_seconds")
+            or result.get("duration_seconds")
+        ),
+        "max_duration_seconds": result.get("max_duration_seconds"),
+        "duration_validation_source": result.get(
+            "duration_validation_source"
+        ),
+        "retryable": result.get("retryable"),
         "duration_bucket": result.get("duration_bucket") or "unknown",
         "size_bucket": (
             result.get("actual_size_bucket")

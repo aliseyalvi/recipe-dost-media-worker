@@ -33,7 +33,8 @@ Do not fill `env/production.env` until the production Supabase project and produ
   `LOG_LEVEL=info`; Render derives environment from `main` and reads log level
   from production JSON.
 - Keep `ALLOW_RAW_URL_LOGS=false` in config.
-- Keep `MAX_VIDEO_DURATION_SECONDS=120` or lower in config.
+- Keep `MAX_SOURCE_VIDEO_DURATION_SECONDS` in committed JSON config. Its
+  default is 180 and its validated range is 60–900 seconds.
 - Do not store raw video, resolver CDN URLs, cookies, Gemini prompts, Gemini raw responses, or secrets in env docs or logs.
 - Keep non-secret runtime config out of clean env files. Legacy Render env values can remain during transition and still override config.
 - Blank environment overrides are ignored and cannot erase committed config.
@@ -238,7 +239,7 @@ Fix: in `WORKER_EXECUTION_MODE=queue`, `/process-job` now validates the worker s
 
 TikWM status: legacy/manual/debug only for production AI jobs. The M22D.5B TikWM timing fix is kept so the legacy path fails safely if someone deliberately runs non-queue/manual processing, but `config/worker.production.json` no longer carries explicit TikWM production overrides.
 
-Next smoke test order after redeploy: verify `/health.safe_config` shows `worker_execution_mode=queue`, `process_job_mode=queue_wake_compatibility`, `raw_url_logging_enabled=false`, duration `<=120`, and unified extraction enabled. Then run YouTube, Instagram, and TikTok production jobs. For normal TikTok/Instagram queue jobs, expected events include `worker_trigger_success`, `process_job_queue_wake_requested`, `queue_job_claimed`, and `unified_extractor_started`; unexpected events are `tikwm_resolver_started` and `instagram_resolver_disabled`.
+Next smoke test order after redeploy: verify `/health.safe_config` shows `worker_execution_mode=queue`, `process_job_mode=queue_wake_compatibility`, `raw_url_logging_enabled=false`, `max_source_video_duration_seconds=180`, and unified extraction enabled. Then run YouTube, Instagram, and TikTok production jobs. For normal TikTok/Instagram queue jobs, expected events include `worker_trigger_success`, `process_job_queue_wake_requested`, `queue_job_claimed`, and `unified_extractor_started`; unexpected events are `tikwm_resolver_started` and `instagram_resolver_disabled`.
 
 ## M22D.5E Production Config Packaging And Loading
 

@@ -84,6 +84,7 @@ class HealthResponse(BaseModel):
     enable_social_video: bool
     enable_yt_dlp: bool
     enable_cookie_file: bool
+    max_source_video_duration_seconds: int
     max_video_duration_seconds: int
     preferred_video_size_mb: int
     max_video_size_mb: int
@@ -218,6 +219,7 @@ class GeminiRecipeResult(BaseModel):
     confidence: str
     prep_time_minutes: Optional[int]
     cook_time_minutes: Optional[int]
+    total_time_minutes: Optional[int] = None
     servings: Optional[str]
     difficulty: str
     ingredients: list[RecipeIngredient]

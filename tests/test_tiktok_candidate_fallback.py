@@ -30,7 +30,7 @@ def settings_for(directory: str) -> SimpleNamespace:
         external_media_max_redirects=1,
         ytdlp_extract_timeout_seconds=5,
         max_job_runtime_seconds=30,
-        max_video_duration_seconds=120,
+        max_source_video_duration_seconds=180,
     )
 
 

@@ -9,6 +9,8 @@ from supabase import Client, create_client
 from app.config import Settings
 from app.schemas import GeminiRecipeResult, MediaJobRecord
 
+MAX_RECIPE_DURATION_MINUTES = 10_080
+
 MEDIA_JOB_SELECT = (
     "id,user_id,recipe_item_id,source_url,platform,status,progress,"
     "thumbnail_url,result_recipe_card_id,error_code,started_at"
@@ -491,9 +493,10 @@ class MediaJobRepository:
                         "cook_time_minutes": result.cook_time_minutes,
                         "prep_minutes": result.prep_time_minutes,
                         "cook_minutes": result.cook_time_minutes,
-                        "total_minutes": add_optional_minutes(
+                        "total_minutes": derive_recipe_total_minutes(
                             result.prep_time_minutes,
                             result.cook_time_minutes,
+                            result.total_time_minutes,
                         ),
                     },
                     "servings": result.servings,
@@ -563,7 +566,28 @@ def bilingual_list(
     ]
 
 
-def add_optional_minutes(first: int | None, second: int | None) -> int | None:
-    if first is None and second is None:
+def valid_recipe_minutes(value: object) -> int | None:
+    if isinstance(value, bool):
         return None
-    return (first or 0) + (second or 0)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0 or parsed > MAX_RECIPE_DURATION_MINUTES:
+        return None
+    return parsed
+
+
+def derive_recipe_total_minutes(
+    prep_minutes: object,
+    cook_minutes: object,
+    explicit_total_minutes: object = None,
+) -> int | None:
+    explicit = valid_recipe_minutes(explicit_total_minutes)
+    if explicit is not None:
+        return explicit
+    prep = valid_recipe_minutes(prep_minutes)
+    cook = valid_recipe_minutes(cook_minutes)
+    if prep is None or cook is None:
+        return None
+    return valid_recipe_minutes(prep + cook)
