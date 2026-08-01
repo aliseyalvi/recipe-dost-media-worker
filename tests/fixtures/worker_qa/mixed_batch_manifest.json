@@ -1,0 +1,11 @@
+{
+  "cases": [
+    "tiktok_success_1",
+    "tiktok_success_2",
+    "instagram_progressive_success",
+    "instagram_split_av_success",
+    "deliberate_gemini_parse_failure",
+    "provider_failure",
+    "private_metadata_failure"
+  ]
+}

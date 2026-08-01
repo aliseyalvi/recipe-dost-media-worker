@@ -2,6 +2,99 @@
 
 ## Current Status
 
+- M23.W10C raises the canonical source-video default to 180 seconds through
+  shared JSON config and exposes `max_source_video_duration_seconds` in health.
+  A known duration of 180 is accepted and 181 is rejected with bounded
+  actual/max/source/retryable metadata. Source duration and structured recipe
+  prep/cook/total persist separately; legacy Library duration is recipe total
+  only. Existing duration failures are retryable only when authoritative
+  server metadata proves 1–180 seconds.
+- M23.W10A-CFG moves the queue-liveness operational defaults into the canonical
+  worker JSON configuration. Development and production inherit the shared
+  5/600/2/60 values, optional nonblank environment overrides still pass through
+  Pydantic validation, and health reports the resolved safe values. No resolver,
+  media, Gemini, quota, or queue algorithm changed. Offline validation passed
+  264 tests plus the 11-case replay and seven-case mixed sequential batch.
+- M23.W8A-W8D replaces the broken active Instagram Reels13 route with
+  `rapidapi_instagram_unified_v1` in development. Reels13 remains present but
+  false-gated and absent from the chain. Unified v1 strictly validates
+  success/media/data/content, normalizes one probe-required video plus optional
+  separate audio and thumbnail, maps provider/HTTP failures safely, rejects
+  photo/sidecar, and permits only the existing Instagram CDN categories.
+- The downloader, DNS/redirect checks, byte/signature guards, ffprobe,
+  conditional ffmpeg mux, final A/V validation, Gemini handoff, and cleanup are
+  unchanged. Offline Python 3.12 validation passed 202 tests plus both replay
+  batches. The owner-only live diagnostic was not run by Codex.
+- M23.W7A-W7C separates the active queue into dispatch, ingest, Gemini analysis,
+  and finalization services while retaining one combined Render process and a
+  sequential rollback mode. In staged mode, local media is removed after the
+  Gemini file becomes ACTIVE, allowing the next ingest to overlap structured
+  extraction under bounded RSS/temp/ffmpeg/upload admission.
+- External final probe telemetry now reports `probe_performed=true`; thumbnail
+  presence survives safe provider-URL redaction; quota count snapshots identify
+  their observation point. Signed provider/CDN URLs are no longer persisted.
+- Offline staged QA passes 7/7 terminal with 5 expected successes, FIFO,
+  overlap, cleanup, zero active reservations, and analyzer-two isolation. The
+  database has no lease/heartbeat/attempt fence, so standalone workers and
+  automatic expired-lease recovery fail closed pending an approved migration.
+
+- M23.W6A-W6C resolves the post-`gemini_file_active` incidents locally. Upload
+  telemetry used stale `GEMINI_VIDEO_ANALYSIS_MODE=two_step_brief_then_json`
+  while branching used `GEMINI_EXTRACTION_MODE=single_pass_structured`; active
+  telemetry now consistently reports the latter. Requests are model-specific,
+  repair is text-only, failures are closed categories, and fallback never
+  claims invocation when budget/configuration preflight blocks it.
+- External resolver results often omit raw metadata, but the deployed
+  `raw_metadata jsonb not null` column rejected SQL null with `23502`. Missing
+  metadata now maps to `{}` and remains optional/nonterminal.
+- Offline mixed queue: 7 terminal jobs, 5 expected completions, 2 deliberate
+  failures, ratio 0.7143, concurrency 1, no starvation, cleanup passed, active
+  reservations 0.
+
+- M23.W3I-IG2 proves the current Instagram incident failed before download
+  because the provider's 1080x1920 video hit the shared 720 short-edge gate.
+  The incident shape is one video plus one audio candidate; codec is absent,
+  video container is declared `mp4`, and no MIME or size is declared. Instagram
+  now keeps unknown declarations probe-required, preserves role/URL-alternative
+  order, securely downloads and ffprobes actual H.264 MP4 compatibility, skips
+  mux when embedded audio exists, and otherwise probes an audio-role candidate
+  and muxes without video transcoding. The owner-only live diagnostic must
+  determine the actual codec before the development Render retest.
+- M23.W3D-IG passed in development end to end. The separate
+  `private_metadata_save_failed` event remains open and nonblocking; the working
+  Instagram media/Gemini route is unchanged.
+- M23.W3D-TK1 was insufficient. TK2 proved the worker passed an unresolved
+  `vt`/`vm` URL directly to AKNG, which returned a 2xx empty success wrapper.
+  TK3B3 expands TikTok-only redirects first, submits the numeric ID, then permits
+  one canonical-URL alternate only for an eligible empty/input-rejected result.
+  The owner manually verified complete contracts from both canonical and
+  numeric-ID inputs. Live reproduction then isolated a released 3xx peer socket
+  and variable-speed AKNG proxy streams. DNS-pinned short expansion plus the
+  live-proven smaller H.264 candidate and throughput-ranked URL alternatives now
+  make both explicit numeric-ID and short-link shared-path diagnostics exit zero
+  with signature, ffprobe video/audio, and cleanup verified.
+
+- M23.W3C-R repairs the development startup failure: the JSON file was loaded,
+  but chain and CDN-suffix Settings fields used empty factories instead of the
+  merged file source. File-based loading now covers all resolver fields and
+  safely reports their sources. The legacy Instagram selector remains
+  unresolved and parked; it is not re-enabled as the development default.
+- M23.W3C supersedes the unresolved legacy Instagram selector for new external
+  traffic. `rapidapi_instagram_reels13` and `akng_tiktok` are implemented behind
+  environment-specific config, with signed URLs held only in memory, structured
+  candidate selection, guarded URL alternatives, ffprobe, conditional ffmpeg
+  muxing, and final A/V validation. Development is configured for externally
+  routed already-authorized jobs once rotated secrets are installed; production
+  remains external-disabled. No live provider or Render verification has run.
+- M23.W3A confirms the latest Instagram failure occurs before adaptive work:
+  one raw candidate expands to ten normalized entries but yields zero eligible
+  format candidates, so download, probe, optimization, byte verification, and
+  Gemini never run. The active eligibility gate rejects unsupported
+  extension/protocol, missing video evidence, explicit no-audio, or short edge
+  below 360; safe telemetry cannot identify which live field failed without a
+  prohibited provider-body inspection. The target plan replaces default social
+  cookie extraction with disabled provider adapters and preserves yt-dlp only
+  as a separately flagged emergency rollback. No runtime change was made.
 - YouTube worker pipeline works.
 - Instagram works through self-hosted Cobalt.
 - TikTok failed on Cloud Run through yt-dlp and Cobalt.
@@ -32,6 +125,22 @@
 - M22D.5E fixes the config loading layer beneath the resolver path. Production `/health` showed queue-wake code but fallback config values because Docker did not copy `config/`; Render env was clean. After redeploy, first verify `/health.safe_config.config_source.loaded_files` contains `worker.defaults.json` and `worker.production.json` before social smoke tests.
 - M22D.5F completes production worker smoke testing. `/health` confirmed production config was loaded, queue wake compatibility was active, unified extractor/cookie flags were enabled, raw URL logging stayed false, and max duration stayed 120 seconds. Production YouTube, Instagram, and TikTok AI recipe generation all passed end to end.
 - M22E.0B adds branch/env safety checks only; resolver behavior is unchanged. Dev Render tracks `develop`, prod Render tracks `main`, and production deploy checks must be run from `main` unless the one-command `ALLOW_NON_MAIN_PROD_DEPLOY=1` override is deliberately used.
+- M23.W2 fixes the active unified extractor's portrait selection and oversize
+  visibility. The old `best[height<=720]/best` fallback excluded portrait
+  720x1280 and could choose 1080x1920. The queue path now inspects metadata,
+  pins combined audio/video IDs, targets 36 MiB, tries at most four decreasing
+  short-edge buckets (720/540/480/360), and aborts/removes partials beyond 50
+  MiB. Terminal size exhaustion persists `media_size_exceeded`, logs one safe
+  WARNING, and groups one warning occurrence per failed job in worker Sentry;
+  intermediate fallbacks do not capture. See `docs/m23-adaptive-media.md`.
+- M23.W2B fixes the post-W2 direct-candidate regression. The active normalizer
+  now reads `formats`, `requested_formats`/`requested_downloads`, and top-level
+  direct media, deduplicates them, and treats missing audio metadata as unknown.
+  The sanitized Instagram shape now produces one `top_level_direct` candidate
+  and at least one bounded attempt. Docker currently provides neither ffprobe
+  nor ffmpeg, so unknown-audio verification/optimization remains blocked until
+  the supported image supplies them; probe-unavailable and no-audio terminal
+  outcomes are safely cleaned up and grouped as a beta warning.
 
 ## TikTok / TikWM Finding
 
@@ -148,12 +257,12 @@ Full test plan:
 - M20/M22B single-pass health: verify `/health` includes `gemini_extraction_mode`, `gemini_primary_model`, `gemini_fallback_model`, `gemini_thinking_level`, `gemini_max_output_tokens`, `gemini_structured_output_enabled`, `local_brief_parser_enabled`, `recipe_quality_gate_enabled`, and `recipe_repair_enabled`. New TikTok/Instagram/YouTube recipe cards should have at least 2 ingredients, 3 steps, and 1 grocery item when recipe content is available; unrecoverable weak structured output should fail with `gemini_structured_extraction_failed` and a safe `failure_category`.
 - M22D.5B safe config health: verify `/health.safe_config` includes `app_env`, queue/Gemini modes, enabled platform booleans, resolver names, unified extractor flag, Instagram/yt-dlp cookie booleans, cookie presence booleans, media extract mode, max duration/size, Gemini model names, `raw_url_logging_enabled=false`, and mock fallback booleans. It must not include cookie values, raw URLs, source URLs, stream URLs, prompts, raw Gemini responses, or payloads.
 - M22D.5D process-job queue compatibility: in production queue mode, a trigger through `/process-job` should return `202`, emit `process_job_queue_wake_requested`, and then rely on the queue loop. The follow-on queue events for TikTok/Instagram should include `queue_job_claimed` and `unified_extractor_started`; `tikwm_resolver_started` is only expected for deliberate legacy/manual TikTok processing outside queue mode.
-- M22D.5E config source health: verify `/health.safe_config.config_source.production_config_loaded=true`, `defaults_config_loaded=true`, `missing_files=[]`, `enable_unified_ytdlp_stream_extractor=true`, `enable_instagram_cookies=true`, `enable_ytdlp_cookies=true`, and `max_video_duration_seconds=120` before running Instagram/TikTok smoke jobs.
+- M23.W10C config source health: verify `/health.safe_config.config_source.production_config_loaded=true`, `defaults_config_loaded=true`, `missing_files=[]`, and `max_source_video_duration_seconds=180` before duration acceptance testing.
 - M22D.5F production smoke completion: YouTube, Instagram, and TikTok production queue jobs have passed. Future social debugging should treat this queue/unified-extractor path as the known-good production path and keep TikWM as legacy/manual/debug only.
 - M22E.1R-B tag contract: active queue structured extraction uses prompt version `m22e_recipe_tags_v1`. Gemini returns 5-8 useful category tags in the existing structured JSON response; no extra Gemini call is used. Before saving, tags are trimmed, lowercased, deduplicated, limited to 24 characters and 8 values, and reject generic `food`/`recipe`/`video`, handles, and URL-like values. A real AI job with fewer than 5 valid tags fails safely as `recipe_tags_invalid`; successful cards write the final array to `recipe_cards.tags_json`. Events include only the safe tag count, never tag values or source data.
 - M22E.0B release checks: run `make check-dev` on `develop` before dev Render smoke, then run `make check-prod` on `main` before production deploy/smoke. The environment doctor output is limited to branch, requested environment, expected branch, config filenames, expected APP_ENV, Supabase host only, and non-secret runtime config booleans/numbers.
 - M22E.2C worker Sentry checks: only active queue startup/polling, unexpected terminal extraction/AI/persistence boundaries, and terminal-failure persistence may report. Legacy/manual `/process-job` direct execution, `/metadata-preview`, and debug resolver routes must never be captured. Expected invalid/private/deleted/unavailable/over-limit/quota/access/safety/schema/quality outcomes and intermediate retries remain event/database behavior only. Sentry events must contain no URLs, requests, headers, bodies, users, tokens, environment dictionaries, prompts/responses, recipe content, locals, source context, or breadcrumbs.
-- M21.7A metadata preview: verify `/health` includes `metadata_preview_enabled`, `max_video_duration_seconds`, and `supported_metadata_platforms`; YouTube preview returns title/thumbnail through oEmbed; TikTok/Instagram/Facebook preview returns yt-dlp metadata when available or safe OpenGraph partial metadata; over-limit duration sets `is_too_long=true` but still returns metadata.
+- M21.7A metadata preview: verify `/health` includes `metadata_preview_enabled`, `max_source_video_duration_seconds`, and `supported_metadata_platforms`; YouTube preview returns title/thumbnail through oEmbed; TikTok/Instagram/Facebook preview returns yt-dlp metadata when available or safe OpenGraph partial metadata; over-limit duration sets `is_too_long=true` but still returns metadata.
 - M21.9B thumbnail quality: verify yt-dlp social metadata uses a valid direct `thumbnail` when present; if direct thumbnail looks like an avatar or is missing, verify the largest non-avatar candidate from `thumbnails[]` is selected. `thumbnail_uploaded`/`thumbnail_upload_failed` events should include only safe thumbnail source labels and selection booleans.
 - M21.9B.1B no-downgrade: verify `/metadata-preview` includes `thumbnail_source`, `thumbnail_provider`, `thumbnail_strategy=platform_first_v2`, `thumbnail_candidate_count`, and `thumbnail_selected`; verify existing `i.ytimg.com`, TikTok CDN image, or Instagram CDN image thumbnails are not replaced by `early_frame_fallback`.
 - M21.9B.2 YouTube Shorts thumbnail variants: when oEmbed returns numbered frame variants such as `hq1`, `hq2`, or `hq3`, verify deterministic YouTube candidates are tried first and selected as `youtube_deterministic` when validation succeeds; logs/events must include only safe candidate kind/status fields, not URLs.

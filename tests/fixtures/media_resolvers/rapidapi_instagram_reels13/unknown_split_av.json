@@ -1,0 +1,20 @@
+{
+  "status": true,
+  "medias": [
+    {
+      "id": "video-unknown",
+      "type": "video",
+      "quality": "1080x1920p",
+      "resolution": "1080x1920",
+      "url": "https://provider.invalid/media/video"
+    },
+    {
+      "id": "audio-unknown",
+      "type": "audio",
+      "quality": "84kbps",
+      "resolution": null,
+      "url": "https://provider.invalid/media/audio"
+    }
+  ],
+  "error": null
+}

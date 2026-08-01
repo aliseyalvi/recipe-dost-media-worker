@@ -51,13 +51,95 @@
 | 47 | M22E.0B Worker branch and environment safety | Done | Safe env doctor, branch guard, Make checks, and dev/prod Render branch workflow docs |
 | 48 | M22E.1R-B AI-generated tags end-to-end | In Progress | Pushed to `develop`; active queue Gemini tag contract, normalization, and `recipe_cards.tags_json` persistence; development Render/database smoke awaits authenticated verification |
 | 49 | M22E.2C Privacy-safe worker Sentry monitoring | Done | Explicit active-queue-only Python Sentry capture, fail-closed production/development branch policy, strict sanitizer, and controlled development verification command |
-| 50 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 51 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 52 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 50 | M23.W2 Adaptive media processing and worker outcomes | Done locally | Size-aware 720p-to-360p selection, 36/50 MiB guards, Build 3-compatible failure persistence, safe Render logs, and grouped terminal Sentry warnings; staged Render verification pending |
+| 51 | M23.W2B Direct Instagram media candidate regression | Done locally | Normalize formats/requested/top-level candidates, preserve unknown audio until bounded post-download probe, and add safe beta outcome telemetry; development verification pending |
+| 52 | M23.W3A External media resolver architecture | Done locally | Audit-only metadata/AI separation, provider-neutral resolver contract, Build 3-compatible routing, security, observability, rollout, and rollback plan |
+| 53 | M23.W3C Feature-flagged external media resolver | Committed to develop | Instagram Reels13 and TikTok AKNG adapters, guarded download/probe/mux, active-queue routing, no-cookie metadata, quota guard, fixtures, and rollback flags |
+| 54 | M23.W3C-R File-based resolver config remediation | Done | File Settings source, safe source diagnostics, Python 3.12 tests, and healthy development Render startup |
+| 55 | M23.W3D-IG Development Instagram resolver verification | Passed | External route, guarded media preparation, Gemini extraction, recipe save, and temp cleanup completed |
+| 56 | M23.W3D-TK1 AKNG TikTok contract repair | Insufficient | Numeric-ID normalization was not validated against short-link provider behavior |
+| 57 | M23.W3D-TK2 AKNG input telemetry | Failed live | Unresolved short URL reached AKNG and returned an empty success wrapper |
+| 58 | M23.W3D-TK3B3 Python/curl parity and media proof | Passed locally | Numeric-ID primary, DNS-pinned short-link expansion, throughput-ranked AKNG proxy alternatives, and both live local A/V gates passed |
+| 59 | M23.W3I-IG2 Instagram split-AV compatibility repair | Done locally | Preserve unknown declarations for secure probe, keep roles separate, accept verified H.264 MP4, conditionally mux audio, and add an owner-only live gate |
+| 60 | M23.W6A-W6C Deterministic replay, Gemini reliability, queue finalization audit | Done locally | Offline replay/batch harness, model-specific structured extraction, closed failures, implicit quota-finalization proof, and private metadata fix |
+| 61 | M23.W7A-W7C Staged combined worker architecture | Done locally; durable lease migration blocked | Typed stages, bounded in-process transport, resource admission, combined/fail-closed standalone entry points, ACTIVE-point cleanup, deterministic staged/concurrency-two QA; cross-process lease recovery needs approval |
+| 62 | M23.W8A-W8D Instagram Unified v1 adapter | Done locally | Replace active broken Reels13 routing with the validated Unified v1 contract while preserving secure shared media preparation |
+| 63 | M23.W10A-CFG Queue-liveness configuration alignment | Done locally | Canonical JSON defaults, sparse overlay inheritance, optional env overrides, Pydantic bounds, and safe health reporting for W10A settings |
+| 64 | M23.W10C Explicit source/recipe duration semantics | Done locally | 180-second JSON source limit, bounded duration errors, explicit recipe durations, legacy mapping repair, and authoritative duration retry |
+| 65 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 66 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 67 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Continue in the app repo with M22C.3 RevenueCat + Google Play billing setup.
+Apply the reviewed W10C app migration and deploy the two updated Edge Functions
+before deploying the W10C worker on `develop`. Verify health reports 180, then
+run authenticated 180/181 duration and eligible historical retry checks before
+any production rollout.
+
+- M23.W6A-W6C keeps single-pass structured extraction as the active strategy:
+  one video call, one text-only repair when useful, and one compatible-model
+  fallback only when recovery requires it. The exact maximum is three calls.
+  The offline mixed batch completed 5/7 expected successes with all seven jobs
+  terminal, FIFO, serialized, cleaned, and quota-finalized.
+- `private_metadata_save_failed` was a worker payload defect: optional external
+  metadata became SQL null although the deployed JSONB column is non-null.
+  Missing raw metadata now persists as `{}`; no migration is required.
+
+- M23.W3I-IG2 proved the incident-compatible 1080x1920 candidate was rejected
+  by the shared 720 short-edge gate, not by its missing codec. Instagram now
+  treats unknown declared codec/container as probe-required, preserves video
+  and audio roles plus URL alternatives, securely downloads and ffprobes actual
+  media, skips mux for embedded audio, and uses video stream copy with bounded
+  audio-only AAC fallback when muxing is required. The live codec remains
+  unknown until the owner diagnostic runs.
+
+- M23.W3D-IG passed in development. `private_metadata_save_failed` remains an
+  open nonblocking metadata issue outside the working Instagram media/Gemini
+  path. The legacy Instagram selector remains parked.
+- M23.W3D-TK1 was insufficient and TK2 failed because a `vt`/`vm` URL was sent
+  directly. TK3B3 expands TikTok-only redirects and sends the extracted numeric
+  ID first; a known canonical URL is the one eligible alternate. The owner
+  manually verified complete AKNG contracts for both canonical URL and numeric
+  ID inputs. Final numeric-ID and short-link diagnostics both exit zero using
+  the shared worker path and the live-proven 4.7 MB H.264 candidate.
+
+- M23.W3C-R root cause is repaired locally: mode/audience loaded because their
+  Settings defaults queried JSON, while chains and CDN suffix lists used empty
+  factories and never received the merged file. JSON is now a real Settings
+  source, branch/file mismatches fail closed, and diagnostics/tests cover file
+  arrays, comma env overrides, blank values, missing/malformed files, startup,
+  and production isolation. Python 3.12 tests pass; Docker execution remains
+  pending because this machine has no Docker executable.
+
+- M23.W3C is complete locally. Development config selects external resolution
+  for all already-authorized AI jobs; production remains legacy/disabled with
+  cookie fallback false. Instagram and TikTok adapters, safe media preparation,
+  Build 3-compatible errors/events, atomic claim, Gemini call guard, and tests
+  are implemented without a provider call or deployment.
+
+- M23.W3A is complete locally as an audit-only milestone. The active metadata
+  preview is download-free but still cookie-capable, while active social AI
+  extraction remains coupled to yt-dlp/cookies and temp-file download. The
+  target separates public/no-cookie metadata from AI resolution, keeps YouTube
+  direct to Gemini, and starts external social routing with selected server-side
+  test users behind fail-closed flags. No runtime, provider, secret, schema,
+  Render, or mobile change was made.
+
+- M23.W2B is complete locally. The confirmed top-level Instagram candidate now
+  normalizes as one `top_level_direct/audio_unknown` format and receives a
+  bounded attempt. The current Docker image lacks ffprobe/ffmpeg, so unknown
+  audio cannot yet be confirmed or optimized in Render; this remains an
+  explicit development verification blocker, not a zero-candidate regression.
+
+- M23.W2 is complete locally. Active queue social extraction now pins
+  size-estimated combined audio/video formats through a bounded
+  720p/540p/480p/360p ladder, with a 36 MiB preferred target and 50 MiB hard
+  streaming/temp-file guard. Terminal `media_size_exceeded` persists the
+  existing code/message fields, produces one grouped privacy-safe warning in
+  production Sentry, and emits a searchable Render WARNING. Build 3 still uses
+  generic copy for this code and requires a later mobile update for improved
+  wording. No deployment or mobile change was performed.
 
 - M22E.1R-B is in progress on worker `develop` and commit `d3b29b3` is pushed. The queue structured prompt/schema now requires 5-8 searchable tags and `MediaJobRepository.insert_recipe_card` writes the normalized array to the existing `recipe_cards.tags_json` JSONB field. Local normalization and persistence-mapper smoke tests pass. The Render dashboard is unauthenticated in this workspace, so deployment observation and a disposable development job/card query remain pending. Next: authenticate to the development Render dashboard, verify the `develop` revision, then create one disposable development AI media job and confirm only its linked card's 5-8 compliant `tags_json` shape/count; do not deploy production.
 

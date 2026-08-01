@@ -2,6 +2,136 @@
 
 Keep only commands that future turns may need.
 
+## M23.W10C explicit source/recipe duration semantics
+
+```bash
+.venv/bin/python -m compileall app scripts
+.venv/bin/python -m unittest discover -s tests -p "test_*.py"
+# passed: 275 tests
+
+.venv/bin/python scripts/check_runtime_config.py development
+.venv/bin/python scripts/check_runtime_config.py production
+.venv/bin/python scripts/validate_env.py development --example
+.venv/bin/python scripts/validate_env.py production --example
+# passed; both environments inherit MAX_SOURCE_VIDEO_DURATION_SECONDS=180
+
+.venv/bin/python -m pip check
+.venv/bin/python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/replay_manifest.json
+.venv/bin/python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+git diff --check
+```
+
+No live media, Gemini, provider, Supabase, Sentry, Render, migration,
+deployment, commit, or push command was run.
+
+## M23.W10A-CFG queue-liveness configuration alignment
+
+```bash
+.venv/bin/python -m unittest \
+  tests.test_file_runtime_config tests.test_queue_liveness \
+  tests.test_fastapi_startup_config
+# 50 focused config/queue/startup/health tests passed
+
+.venv/bin/python -m unittest \
+  tests.test_queue_gemini_invocation tests.test_queue_gemini_guard \
+  tests.test_gemini_reliability tests.test_media_resolver_adapters \
+  tests.test_external_queue_routing tests.test_external_resolver_config
+# 63 unchanged Gemini/provider/resolver tests passed
+
+.venv/bin/python -m compileall app scripts
+.venv/bin/python -m unittest discover -s tests -p "test_*.py"
+.venv/bin/python -m pip check
+.venv/bin/python scripts/check_runtime_config.py development
+.venv/bin/python scripts/check_runtime_config.py production
+.venv/bin/python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/replay_manifest.json
+.venv/bin/python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+git diff --check
+# passed: compile; 264 tests; no broken requirements; both config checks;
+# 11-case replay; 7-case mixed batch; diff check
+```
+
+The mixed batch was FIFO, single-active-job, terminal 7/7, unstarved, and
+ended with zero active reservations. No live Supabase, Gemini, provider,
+Sentry, Render, deployment, database, frontend, secret, or dependency action
+occurred.
+
+## M23.W8A-W8D Instagram Unified v1 adapter
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python --version
+# Python 3.12.13
+
+PATH="$PWD/.venv/bin:$PATH" python -m unittest -q \
+  tests.test_media_resolver_adapters tests.test_file_runtime_config \
+  tests.test_instagram_live_diagnostic \
+  tests.test_instagram_candidate_compatibility \
+  tests.test_external_media_processing tests.test_external_media_security \
+  tests.test_provider_http_client tests.test_external_queue_routing \
+  tests.test_queue_gemini_guard tests.test_external_resolver_config
+# 86 focused tests passed
+
+PATH="$PWD/.venv/bin:$PATH" python -m compileall app scripts
+PATH="$PWD/.venv/bin:$PATH" python -m unittest discover \
+  -s tests -p "test_*.py"
+PATH="$PWD/.venv/bin:$PATH" python -m pip check
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/replay_manifest.json
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+git diff --check
+# passed: compile; 202 tests; no broken requirements; 11-case replay;
+# 7-case mixed batch; diff check.
+```
+
+The owner-only Instagram diagnostic was compile-tested and unit-tested but not
+executed. No live provider/media URL, Gemini, Supabase, Sentry, Render,
+deployment, main merge, mobile, schema, cookie, entitlement, quota, secret
+read, or secret output occurred.
+
+## M23.W7A-W7C staged combined worker
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python --version
+# Python 3.12.13
+
+PATH="$PWD/.venv/bin:$PATH" python -m compileall app scripts
+
+PATH="$PWD/.venv/bin:$PATH" python -m unittest discover \
+  -s tests -p "test_*.py"
+# intermediate pass: 190 tests
+
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py pipeline \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json \
+  --pipeline-mode staged
+# passed: 7 terminal, 5 expected completed, FIFO/backpressure/overlap/cleanup,
+# active reservations 0; analyzer-two probe reached 2 analyzers with ingest 1
+```
+
+No live provider, Gemini, Supabase, Sentry, or Render call was made. No deploy,
+branch switch, main merge, mobile/schema/quota-limit/direct-CDN/cookie/secret
+operation occurred. Final validation results are appended after the full pass.
+
+Final validation:
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python -m compileall app scripts
+PATH="$PWD/.venv/bin:$PATH" python -m unittest discover \
+  -s tests -p "test_*.py"
+PATH="$PWD/.venv/bin:$PATH" python -m pip check
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py pipeline \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json \
+  --pipeline-mode staged
+git diff --check
+# passed with Python 3.12.13: compile; 194 tests; no broken requirements;
+# 7-case batch; 7-case staged/concurrency-two QA; diff check.
+```
+
 ## Validation
 
 ```bash
@@ -1079,3 +1209,387 @@ git diff --check
 ```
 
 No Render deploy, live Sentry event, live Supabase/Gemini call, real URL processing, or production action was performed.
+
+## M23.W2 adaptive media and terminal outcomes
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+# passed: 47 tests covering adaptive selection/download guards/cleanup,
+# incident success and terminal fixtures, existing DB failure fields, queue
+# terminal behavior, Sentry policy/grouping/sanitization, and DSN isolation
+
+.venv/bin/python -m pytest -q
+# unavailable: the existing virtual environment has no pytest module; no
+# dependency was installed. Full unittest discovery above is the repository's
+# available suite.
+
+python3 -m compileall app scripts
+.venv/bin/python scripts/check_process_job_queue_mode.py
+.venv/bin/python scripts/check_recipe_tags.py
+.venv/bin/python -m pip check
+git diff --check
+# passed
+
+.venv/bin/python scripts/check_runtime_config.py development
+.venv/bin/python scripts/check_runtime_config.py production
+.venv/bin/python scripts/validate_env.py development --example
+.venv/bin/python scripts/validate_env.py production --example
+make check-dev
+# passed with masked/safe output
+```
+
+No production URL/media, Supabase, Gemini, Sentry transport, Render deployment,
+mobile write, `main` checkout/merge, or live job was used.
+
+## M23.W2B direct Instagram candidate regression
+
+```bash
+.venv/bin/python -m unittest tests.test_adaptive_media -v
+.venv/bin/python -m unittest tests.test_queue_failure_contract -q
+# focused candidate/direct/cookie/probe/size/contract tests passed
+
+.venv/bin/python -m unittest discover -s tests -v
+# passed: 61 tests
+
+python3 -m compileall app scripts
+.venv/bin/python scripts/check_process_job_queue_mode.py
+git diff --check
+# passed
+
+.venv/bin/python -m pytest -q
+# not rerun: pytest is not installed in the existing repository virtualenv;
+# unittest discovery is the available repository suite
+```
+
+`command -v ffprobe` and `command -v ffmpeg` returned no executable. Dockerfile
+inspection also confirmed neither dependency is installed. No live media,
+Instagram, Supabase, Gemini, Sentry transport, Render deployment, mobile write,
+or `main` operation occurred.
+
+## M23.W3A external media resolver architecture audit
+
+```bash
+python3 -m compileall app
+.venv/bin/python scripts/check_runtime_config.py development
+.venv/bin/python scripts/check_runtime_config.py production
+.venv/bin/python scripts/check_process_job_queue_mode.py
+git diff --check
+# passed; the queue-mode check emitted only the existing local LibreSSL warning
+
+git status --short
+# documentation files only: the consolidated M23.W3A plan and the required
+# decision, milestone, command, and social-debug tracking updates
+```
+
+The audit used targeted source searches and limited ranges in the worker and
+read-only Build 3 repositories. It did not call a provider, process a URL or
+media file, inspect secrets, contact Supabase/Gemini/Sentry/Render, modify the
+mobile repository, deploy, change schema/runtime configuration, switch or merge
+`main`, or install dependencies.
+
+## M23.W3C feature-flagged external resolver
+
+```bash
+python3 -m compileall app scripts
+# passed
+
+.venv/bin/python -m unittest discover -s tests -v
+# passed: 96 tests
+
+.venv/bin/python -m pytest -q
+# unavailable: pytest is not installed in the existing virtual environment;
+# no dependency was added
+
+.venv/bin/python scripts/check_runtime_config.py development
+.venv/bin/python scripts/check_runtime_config.py production
+.venv/bin/python scripts/validate_env.py development --example
+.venv/bin/python scripts/validate_env.py production --example
+.venv/bin/python scripts/check_process_job_queue_mode.py
+.venv/bin/python scripts/check_recipe_tags.py
+.venv/bin/python -m pip check
+git diff --check
+# passed; env output was masked and the queue check emitted only the existing
+# local LibreSSL warning
+```
+
+Sanitized fixture scans found no live provider URL, signed URL, or token-shaped
+credential. The supplied TikTok token was not written and must be revoked and
+rotated. No provider/media/Gemini/Supabase/Sentry network call, Render action,
+deployment, dependency installation, schema/mobile change, branch switch,
+commit, push, or `main` merge occurred.
+
+## M23.W3C-R file-based resolver configuration
+
+```bash
+uv venv --python 3.12 /private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv
+uv pip install --python /private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv/bin/python -r requirements.txt
+# Python 3.12.13; installed from the same requirements.txt used by Docker
+
+/private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv/bin/python \
+  -m unittest discover -s tests -p "test_*.py" -q
+# passed: 117 tests, 0 failures, 0 errors, 0 skipped, exit 0
+
+/private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv/bin/python -m compileall app scripts
+/private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv/bin/python -m pip check
+/private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv/bin/python scripts/check_process_job_queue_mode.py
+/private/tmp/recipe-dost-m23w3c-r.0eMw1j/venv/bin/python scripts/check_recipe_tags.py
+git diff --check
+# passed
+
+# Development diagnostic: RENDER=true, RENDER_GIT_BRANCH=develop, and dummy
+# provider credentials only. Production diagnostic: main branch metadata and
+# no provider credentials. Both passed and sourced all six resolver controls
+# from the matching config file.
+
+make resolver-config-docker
+# not executed: this Mac has no Docker executable; make exited 1 before build
+
+# A /service layout containing the Dockerfile COPY inputs (app/config/scripts)
+# was exercised with Python 3.12. Both development and production diagnostics
+# passed. This is not recorded as a Docker build pass.
+```
+
+The secret-pattern scan found no token-shaped credential. Signed-URL markers
+matched only deliberate `secret.invalid`/`provider.invalid` sanitizer and SSRF
+test strings. No actual provider secret was read or printed. No provider,
+Gemini, Supabase, or Sentry call, deployment, Render mutation, mobile/schema
+change, branch switch, commit, push, or main merge occurred.
+
+## M23.W3D-TK AKNG TikTok contract repair
+
+```bash
+uv venv --python 3.12 /private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv
+uv pip install --python /private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  -r requirements.txt
+# Python 3.12.13; dependencies came from the same requirements.txt used by Docker
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m unittest -q \
+  tests.test_media_resolver_adapters tests.test_provider_http_client \
+  tests.test_external_media_security tests.test_external_media_processing \
+  tests.test_external_queue_routing tests.test_queue_claim \
+  tests.test_queue_failure_contract tests.test_queue_gemini_guard \
+  tests.test_metadata_preview_no_cookies tests.test_sentry_observability \
+  tests.test_external_resolver_config tests.test_external_circuit_breaker \
+  tests.test_tiktok_source_context
+# passed: 78 focused tests
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  -m unittest discover -s tests -p "test_*.py" -q
+# passed after final regression pass: 134 tests, 0 failures, 0 errors, 0 skipped, exit 0
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m compileall -q app scripts
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m pip check
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python scripts/check_process_job_queue_mode.py
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python scripts/check_recipe_tags.py
+git diff --check
+# passed
+
+# Development config diagnostic used only dummy provider credentials plus
+# RENDER=true and RENDER_GIT_BRANCH=develop. Production used branch main and no
+# provider credentials. Both passed with resolver controls sourced from the
+# matching repository JSON file.
+
+# Privacy scan: no worktree match for the owner-provided token, real TikTok ID,
+# or short-link code. Generic credential-name matches were limited to config
+# identifiers and example/documentation placeholders; no value was read.
+```
+
+`scripts/check_tiktok_media_candidate.py` was compile-checked but deliberately
+not executed because it is an owner-only live development diagnostic. No AKNG,
+Instagram, Gemini, Supabase, Sentry, or Render request was made. No deployment,
+Render mutation, mobile/schema change, branch switch, commit, push, or main
+merge occurred.
+
+## M23.W3D-TK3 short-link expansion and local media gate
+
+```bash
+git status --short --branch
+git branch --show-current
+git diff --check
+# branch: develop; AKNG token presence checked as a boolean only: false
+
+# Owner response inspected with a jq shape/count projection only. No URL, ID,
+# token, content text, or response body was printed or committed.
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m compileall -q app scripts
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m unittest \
+  tests.test_media_resolver_adapters tests.test_tiktok_short_link \
+  tests.test_external_media_security
+# 32 passed
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  -m unittest discover -s tests -p "test_*.py"
+# 145 passed, 0 failures, 0 errors, exit 0 (intermediate TK3 pass)
+```
+
+The required opt-in live diagnostic was not run because
+`TIKTOK_AKNG_ACCESS_TOKEN` was absent from the Codex process environment. No
+provider, Gemini, Supabase, Sentry, or Render request was made. Final compile,
+test, dependency, diff, diagnostic-guard, and secret-scan results are recorded
+after the final validation pass below.
+
+```bash
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m unittest -q \
+  tests.test_file_runtime_config tests.test_external_resolver_config \
+  tests.test_media_resolver_adapters tests.test_tiktok_short_link \
+  tests.test_external_queue_routing tests.test_metadata_preview_no_cookies \
+  tests.test_provider_http_client tests.test_external_media_security \
+  tests.test_external_media_processing tests.test_sentry_observability \
+  tests.test_queue_claim tests.test_queue_failure_contract \
+  tests.test_queue_gemini_guard tests.test_tiktok_safe_diagnostics \
+  tests.test_tiktok_source_context
+# 109 focused tests passed, exit 0
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  -m unittest discover -s tests -p "test_*.py"
+# 146 tests passed, 0 failures, 0 errors, 0 skipped, exit 0
+
+env -u TIKTOK_AKNG_ACCESS_TOKEN APP_ENV=development \
+  ALLOW_LIVE_TIKTOK_DIAGNOSTIC=true \
+  /private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  scripts/check_tiktok_akng_end_to_end.py --input-kind numeric_id
+# refused before input/provider work as designed: token not configured; exit 1
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m compileall app scripts
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m pip check
+git diff --check
+# passed on develop; generic credential, signed-URL, and live-response-marker
+# scans each found zero files
+```
+
+The owner later verified AKNG manually with numeric-ID input. Its attached
+response was inspected only through a `jq` shape/count projection: complete
+`data.itemInfo.itemStruct.video`, 6 video entries, 0 separate-audio entries,
+and 22 aggregate download URLs. No ID, token, URL, response body, or response
+file was printed or committed, and Codex made no provider call.
+
+## M23.W3D-TK3B3 Python/curl parity final offline validation
+
+```bash
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python --version
+# Python 3.12.13
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m compileall app scripts
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m unittest -q \
+  tests.test_file_runtime_config tests.test_external_resolver_config \
+  tests.test_media_resolver_adapters tests.test_tiktok_short_link \
+  tests.test_tiktok_candidate_fallback tests.test_tiktok_live_diagnostic \
+  tests.test_external_queue_routing tests.test_metadata_preview_no_cookies \
+  tests.test_provider_http_client tests.test_external_media_security \
+  tests.test_external_media_processing tests.test_sentry_observability \
+  tests.test_queue_claim tests.test_queue_failure_contract \
+  tests.test_queue_gemini_guard tests.test_tiktok_safe_diagnostics \
+  tests.test_tiktok_source_context
+# 119 passed, 0 failures, 0 errors, exit 0
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  -m unittest discover -s tests -p "test_*.py"
+# 156 passed, 0 failures, 0 errors, 0 skipped, exit 0
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m pip check
+git diff --check
+# passed; no broken requirements
+
+env -u TIKTOK_AKNG_ACCESS_TOKEN APP_ENV=development \
+  ALLOW_LIVE_TIKTOK_DIAGNOSTIC=true \
+  /private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  scripts/check_tiktok_akng_end_to_end.py --input-kind numeric_id
+# failed closed before prompt/provider work, failure_stage=input_validation,
+# provider_call_attempted=false, cleanup_succeeded=true, exit 1
+```
+
+The live numeric-ID and short-link commands were intentionally not executed by
+Codex. No provider, Gemini, Supabase, Sentry, or Render call was made.
+
+## M23.W3D-TK3B3 live root-cause repair and final validation
+
+- Live short-link-only reproduction first failed at
+  `short_link_redirect_validation`: the zero-length 3xx response had no retained
+  urllib3 socket, so peer discovery returned no value. A DNS-pinned TLS GET then
+  passed with one redirect and resolved both canonical URL and numeric ID.
+- The local machine lacked ffprobe/ffmpeg. `brew install --yes ffmpeg` installed
+  ffmpeg/ffprobe 8.1.2; the Docker image already installs ffmpeg.
+- Live AKNG numeric-ID responses returned 2xx, a complete six-video contract,
+  zero separate-audio candidates, and three compatible media candidates.
+- Safe media probes showed AKNG proxy alternatives were HTTPS/public-peer
+  verified, 2xx video responses with valid initial MP4 bytes. They ignored
+  Range, omitted Content-Length, and used variable-speed chunked transfer.
+- The approximately 6.7 MB H.264 stream did not complete inside the bounded
+  budget. The approximately 4.7 MB H.264 stream completed in the 60–90 second
+  bucket, passed signature validation, and ffprobe proved video plus embedded
+  audio. TikTok selection now uses this evidence-backed smaller-first policy and
+  throughput-ranks URL alternatives.
+- Final explicit `numeric_id` and `short_url` shared-path diagnostics both
+  exited zero with `provider_status_class=2xx`, complete contract, six raw/three
+  eligible candidates, H.264 MP4 selection, verified download/signature/video/
+  audio, and cleanup. Inputs, token, response bodies, URLs, IDs, and temp paths
+  were not emitted or persisted.
+
+```bash
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python --version
+# Python 3.12.13
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m compileall app scripts
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python \
+  -m unittest discover -s tests -p "test_*.py"
+# 162 passed, 0 failures, 0 errors, 0 skipped, exit 0
+
+/private/tmp/recipe-dost-m23w3d-tk.LnFxdz/venv/bin/python -m pip check
+git diff --check
+# passed; no broken requirements
+```
+
+No Gemini, Supabase, Sentry, Render, deployment, main merge, mobile, schema,
+cookie, entitlement, or quota operation occurred.
+
+## M23.W3I-IG2 Instagram split-AV compatibility repair
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python -m compileall app scripts
+PATH="$PWD/.venv/bin:$PATH" python -m unittest discover -s tests -p "test_*.py"
+PATH="$PWD/.venv/bin:$PATH" python -m pip check
+git diff --check
+# Python 3.12.13; compile passed; 175 tests passed with 0 failures/errors;
+# no broken requirements; diff check passed.
+```
+
+Focused tests generated only synthetic local H.264/AAC and incompatible MPEG-4
+media with ffmpeg, then exercised the shared ffprobe/mux path. The owner-only
+Instagram diagnostic was compile-tested and unit-tested but deliberately not
+executed. No live provider/media URL, Gemini, Supabase, Sentry, Render,
+deployment, main merge, production worker, mobile, schema, cookie, entitlement,
+quota, secret read, or secret output occurred.
+
+## M23.W6A-W6C deterministic replay and Gemini reliability
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+# passed: 7/7 terminal, 5 completed, 2 deliberate failures, FIFO, concurrency 1,
+# cleanup true for all, active reservations 0, success ratio 0.7143
+
+PATH="$PWD/.venv/bin:$PATH" python -m unittest -q \
+  tests.test_gemini_reliability tests.test_worker_qa \
+  tests.test_queue_gemini_guard
+# passed: 14 tests
+```
+
+No live mode, provider, Gemini, Supabase, Sentry, Render, deployment, main
+merge, mobile, schema, entitlement-limit, concurrency, or secret change was
+performed.
+
+Final validation:
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python -m compileall app scripts
+PATH="$PWD/.venv/bin:$PATH" python -m unittest discover -s tests -p "test_*.py"
+PATH="$PWD/.venv/bin:$PATH" python -m pip check
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/replay_manifest.json
+PATH="$PWD/.venv/bin:$PATH" python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+git diff --check
+# passed: compile; 188 tests; pip check; 11-case replay; 7-case mixed batch;
+# diff check. Live mode also refused without owner credentials as designed.
+```

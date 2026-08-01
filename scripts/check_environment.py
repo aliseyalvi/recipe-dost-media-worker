@@ -73,7 +73,10 @@ def _host_only(url: str | None) -> str:
 
 
 def _effective_value(config: dict[str, Any], key: str) -> Any:
-    return os.environ.get(key, config.get(key))
+    environment_value = os.environ.get(key)
+    if environment_value is None or not environment_value.strip():
+        return config.get(key)
+    return environment_value
 
 
 def _bool_value(value: Any) -> bool:
@@ -109,18 +112,41 @@ def _runtime_checks(
         errors.append("raw_url_logging_enabled must be false")
 
     try:
-        max_duration = int(_effective_value(config, "MAX_VIDEO_DURATION_SECONDS") or 0)
+        max_duration = int(
+            _effective_value(config, "MAX_SOURCE_VIDEO_DURATION_SECONDS") or 0
+        )
     except (TypeError, ValueError):
-        checks["max_video_duration_seconds"] = "invalid"
-        errors.append("max_video_duration_seconds must be an integer")
+        checks["max_source_video_duration_seconds"] = "invalid"
+        errors.append("max_source_video_duration_seconds must be an integer")
     else:
-        checks["max_video_duration_seconds"] = str(max_duration)
-        if max_duration <= 0:
-            errors.append("max_video_duration_seconds must be greater than 0")
-        if max_duration > 120:
-            errors.append("max_video_duration_seconds must be <= 120")
-        if environment == "production" and max_duration == 90:
-            errors.append("production max_video_duration_seconds still matches fallback 90")
+        checks["max_source_video_duration_seconds"] = str(max_duration)
+        if not 60 <= max_duration <= 900:
+            errors.append(
+                "max_source_video_duration_seconds must be between 60 and 900"
+            )
+
+    try:
+        preferred_size = int(_effective_value(config, "PREFERRED_VIDEO_SIZE_MB") or 0)
+        hard_size = int(_effective_value(config, "MAX_VIDEO_SIZE_MB") or 0)
+        adaptive_attempts = int(
+            _effective_value(config, "MEDIA_ADAPTIVE_MAX_ATTEMPTS") or 0
+        )
+        min_height = int(_effective_value(config, "MIN_VIDEO_HEIGHT") or 0)
+        max_height = int(_effective_value(config, "MAX_VIDEO_HEIGHT") or 0)
+    except (TypeError, ValueError):
+        checks["media_size_policy"] = "invalid"
+        errors.append("media size policy values must be integers")
+    else:
+        checks["preferred_video_size_mib"] = str(preferred_size)
+        checks["hard_video_size_mib"] = str(hard_size)
+        checks["media_adaptive_max_attempts"] = str(adaptive_attempts)
+        checks["video_height_range"] = f"{min_height}-{max_height}"
+        if not 0 < preferred_size <= hard_size:
+            errors.append("media size limits must satisfy 0 < preferred <= hard")
+        if not 1 <= adaptive_attempts <= 4:
+            errors.append("media_adaptive_max_attempts must be between 1 and 4")
+        if not 360 <= min_height <= max_height <= 720:
+            errors.append("video height limits must satisfy 360 <= min <= max <= 720")
 
     return checks, errors
 
@@ -196,7 +222,10 @@ def print_summary(summary: dict[str, object]) -> None:
         for key in (
             "worker_execution_mode",
             "enable_unified_ytdlp_stream_extractor",
-            "max_video_duration_seconds",
+            "max_source_video_duration_seconds",
+            "preferred_video_size_mib",
+            "hard_video_size_mib",
+            "media_adaptive_max_attempts",
             "raw_url_logging_enabled",
         ):
             print(f"  {key}={runtime_checks.get(key)}")

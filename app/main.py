@@ -4,6 +4,8 @@ import hmac
 import asyncio
 import json
 import logging
+import platform
+from importlib.metadata import PackageNotFoundError, version
 from pydantic import BaseModel
 from pathlib import Path
 from typing import Annotated, Any, Optional, Union
@@ -14,15 +16,21 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.ai.gemini_recipe import GeminiRecipeAnalyzer
-from app.config import Settings, get_settings
+from app.config import Settings, get_settings, validate_external_resolver_runtime_config
 from app.job_runner import JobNotFoundError, JobRunner, WorkerProcessingError
 from app.metadata_preview import (
     MetadataPreviewError,
     SUPPORTED_METADATA_PLATFORMS,
     fetch_metadata_preview,
 )
+from app.worker_runtime.cleanup import cleanup_stale_media
 from app.observability.sentry import flush_sentry, initialize_sentry, report_worker_error
-from app.queue_worker import run_queue_loop
+from app.queue_worker import (
+    queue_liveness_config,
+    reset_queue_runtime,
+    run_queue_loop,
+    signal_queue_wake,
+)
 from app.runtime_config import worker_config_report
 from app.schemas import (
     ErrorDetail,
@@ -55,7 +63,109 @@ class JsonFormatter(logging.Formatter):
             "event": record.getMessage(),
             "logger": record.name,
         }
-        for field in ("media_job_id", "exception_type", "safe_config"):
+        for field in (
+            "media_job_id",
+            "exception_type",
+            "safe_config",
+            "stage",
+            "failure_stage",
+            "reason",
+            "attempt",
+            "from_resolution",
+            "to_resolution",
+            "error_code",
+            "normalized_error_code",
+            "source_platform",
+            "attempts",
+            "duration_bucket",
+            "size_bucket",
+            "selected_resolution_bucket",
+            "normalized_candidate_count",
+            "candidate_source_type",
+            "audio_state",
+            "probe_performed",
+            "probe_audio_present",
+            "probe_video_present",
+            "optimization_attempted",
+            "optimization_succeeded",
+            "terminal",
+            "sentry_event_id",
+            "resolver_adapter",
+            "route_audience",
+            "fallback_used",
+            "provider_attempt",
+            "provider_status_class",
+            "media_mode",
+            "latency_bucket",
+            "json_parsed",
+            "provider_input_kind",
+            "alternate_input_attempted",
+            "contract_complete",
+            "short_link_expanded",
+            "short_link_redirect_count",
+            "first_input_contract_complete",
+            "success_present",
+            "success_type",
+            "success_value",
+            "media_type",
+            "data_present",
+            "content_present",
+            "media_url_present",
+            "thumbnail_url_present",
+            "audio_object_present",
+            "audio_url_present",
+            "audio_downloadable",
+            "normalized_video_count",
+            "normalized_audio_count",
+            "normalized_thumbnail_count",
+            "data_type",
+            "item_info_present",
+            "item_struct_present",
+            "video_present",
+            "bitrate_info_present",
+            "bitrate_info_type",
+            "bitrate_info_count",
+            "bitrate_audio_info_present",
+            "bitrate_audio_info_type",
+            "bitrate_audio_info_count",
+            "play_addr_struct_present",
+            "download_urls_count",
+            "status_code",
+            "status_msg_present",
+            "raw_video_candidates",
+            "eligible_video_candidates",
+            "raw_audio_candidates",
+            "eligible_audio_candidates",
+            "raw_candidate_count",
+            "raw_video_count",
+            "raw_audio_count",
+            "unknown_role_count",
+            "declared_codec_present_count",
+            "declared_container_present_count",
+            "declared_mime_present_count",
+            "size_present_count",
+            "dimensions_present_count",
+            "eligible_declared_video_count",
+            "probe_required_video_count",
+            "eligible_audio_count",
+            "rejection_counts",
+            "stale_directories_removed",
+            "google_genai",
+            "pydantic",
+            "pydantic_core",
+            "pydantic_settings",
+            "python",
+            "worker_processing_model",
+            "pipeline_mode",
+            "configured_concurrency",
+            "queue_depth_bucket",
+            "active_stage_count",
+            "rss_bucket",
+            "temp_byte_bucket",
+            "latency_bucket",
+            "retry_recovery_category",
+            "lease_state_category",
+        ):
             value = getattr(record, field, None)
             if value is not None:
                 payload[field] = value
@@ -154,7 +264,7 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         ),
         ai_analysis_mode=settings.ai_analysis_mode,
         gemini_video_input_mode=settings.gemini_video_input_mode,
-        gemini_video_analysis_mode=settings.gemini_video_analysis_mode,
+        gemini_video_analysis_mode=settings.gemini_extraction_mode,
         gemini_extraction_mode=settings.gemini_extraction_mode,
         gemini_primary_model=settings.gemini_primary_model,
         gemini_fallback_model=settings.gemini_fallback_model,
@@ -162,6 +272,7 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         gemini_structured_output_enabled=settings.gemini_structured_output_enabled,
         local_brief_parser_enabled=settings.local_brief_parser_enabled,
         gemini_file_upload_timeout_seconds=settings.gemini_file_upload_timeout_seconds,
+        gemini_file_max_size_bytes=settings.gemini_file_max_size_bytes,
         gemini_file_poll_interval_seconds=settings.gemini_file_poll_interval_seconds,
         gemini_file_max_wait_seconds=settings.gemini_file_max_wait_seconds,
         gemini_save_mode=settings.gemini_save_mode,
@@ -221,10 +332,16 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         enable_social_video=settings.enable_social_video,
         enable_yt_dlp=settings.enable_yt_dlp,
         enable_cookie_file=settings.enable_cookie_file,
-        max_video_duration_seconds=settings.max_video_duration_seconds,
+        max_source_video_duration_seconds=(
+            settings.max_source_video_duration_seconds
+        ),
+        max_video_duration_seconds=settings.max_source_video_duration_seconds,
+        preferred_video_size_mb=settings.preferred_video_size_mb,
         max_video_size_mb=settings.max_video_size_mb,
+        media_adaptive_max_attempts=settings.media_adaptive_max_attempts,
         max_memory_buffer_mb=settings.max_memory_buffer_mb,
         max_video_height=settings.max_video_height,
+        min_video_height=settings.min_video_height,
         thumbnail_bucket=settings.thumbnail_bucket,
         use_source_thumbnail_first=settings.use_source_thumbnail_first,
         store_raw_media=settings.store_raw_media,
@@ -253,6 +370,7 @@ def health(settings: Settings = Depends(get_settings)) -> HealthResponse:
         cobalt_configured=settings.cobalt_configured,
         cobalt_enabled_platforms=settings.cobalt_enabled_platforms,
         worker_execution_mode=settings.worker_execution_mode,
+        worker_processing_model="sequential_queue",
         queue_loop_enabled=settings.worker_execution_mode == "queue"
         and queue_task is not None
         and not queue_task.done(),
@@ -285,9 +403,12 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
     )
     queue_mode = settings.worker_execution_mode == "queue"
     return {
+        "runtime_dependencies": runtime_dependency_versions(),
         "app_env": settings.app_env,
         "worker_execution_mode": settings.worker_execution_mode,
+        "worker_processing_model": "sequential_queue",
         "queue_mode_active": queue_mode,
+        **queue_liveness_config(settings).safe_config(),
         "process_job_mode": (
             "queue_wake_compatibility" if queue_mode else "legacy_direct_background"
         ),
@@ -318,12 +439,52 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
         "has_youtube_cookies": cookies_configured(settings, "youtube"),
         "has_tiktok_cookies": cookies_configured(settings, "tiktok"),
         "media_extract_output_mode": settings.media_extract_output_mode,
-        "max_video_duration_seconds": settings.max_video_duration_seconds,
+        "max_source_video_duration_seconds": (
+            settings.max_source_video_duration_seconds
+        ),
+        "max_video_duration_seconds": settings.max_source_video_duration_seconds,
+        "preferred_video_size_mb": settings.preferred_video_size_mb,
         "max_video_size_mb": settings.max_video_size_mb,
+        "media_adaptive_max_attempts": settings.media_adaptive_max_attempts,
+        "media_resolver_mode": settings.media_resolver_mode,
+        "external_media_resolver_audience": settings.external_media_resolver_audience,
+        "instagram_resolver_chain": settings.instagram_resolver_chain,
+        "tiktok_resolver_chain": settings.tiktok_resolver_chain,
+        "cookie_media_fallback_enabled": settings.cookie_media_fallback_enabled,
+        "youtube_direct_gemini_enabled": settings.youtube_direct_gemini_enabled,
+        "external_provider_credentials_configured": {
+            "rapidapi_instagram_unified_v1": (
+                settings.instagram_rapidapi_key is not None
+            ),
+            "akng_tiktok": settings.tiktok_akng_access_token is not None,
+        },
+        "instagram_external_resolver": {
+            "adapter_identifier": (
+                settings.instagram_resolver_chain[0]
+                if len(settings.instagram_resolver_chain) == 1
+                else "disabled"
+            ),
+            "enabled": (
+                settings.external_resolver_enabled
+                and settings.instagram_resolver_chain
+                == ["rapidapi_instagram_unified_v1"]
+            ),
+            "endpoint_configured": bool(
+                settings.instagram_rapidapi_host.strip()
+                and settings.instagram_rapidapi_base_url.strip()
+            ),
+            "credential_present": settings.instagram_rapidapi_key is not None,
+            "approved_host_suffix_categories": _instagram_host_categories(
+                settings.instagram_media_host_suffixes
+            ),
+        },
+        "min_video_height": settings.min_video_height,
+        "max_video_height": settings.max_video_height,
+        "gemini_file_max_size_bytes": settings.gemini_file_max_size_bytes,
         "gemini_video_model": settings.effective_gemini_video_model,
         "gemini_text_model": settings.effective_gemini_text_model,
         "raw_url_logging_enabled": settings.allow_raw_url_logs,
-        "config_source": worker_config_report(settings.app_env),
+        "config_source": safe_config_source_summary(settings),
         "mock_fallback": {
             "ai_analysis_mode": settings.ai_analysis_mode,
             "real_ai_fallback_to_mock": settings.real_ai_fallback_to_mock,
@@ -333,6 +494,79 @@ def safe_config_summary(settings: Settings) -> dict[str, object]:
             "allow_mock_completion_without_video": (
                 settings.allow_mock_completion_without_video
             ),
+        },
+    }
+
+
+def runtime_dependency_versions() -> dict[str, str]:
+    packages = {
+        "google_genai": "google-genai",
+        "pydantic": "pydantic",
+        "pydantic_core": "pydantic-core",
+        "pydantic_settings": "pydantic-settings",
+    }
+    versions: dict[str, str] = {}
+    for field, distribution in packages.items():
+        try:
+            versions[field] = version(distribution)
+        except PackageNotFoundError:
+            versions[field] = "not_installed"
+    versions["python"] = platform.python_version()
+    return versions
+
+
+def log_runtime_dependency_versions() -> None:
+    try:
+        logger.info(
+            "runtime_dependency_versions",
+            extra={
+                **runtime_dependency_versions(),
+                "worker_processing_model": "sequential_queue",
+            },
+        )
+    except Exception:
+        # Startup diagnostics are best-effort and must not block the worker.
+        return
+
+
+def _instagram_host_categories(suffixes: list[str]) -> list[str]:
+    categories: list[str] = []
+    for suffix in suffixes:
+        normalized = suffix.lower().lstrip(".")
+        category = (
+            "meta_fbcdn"
+            if normalized == "fbcdn.net"
+            else "instagram_cdn"
+            if normalized == "cdninstagram.com"
+            else "other_approved"
+        )
+        if category not in categories:
+            categories.append(category)
+    return categories
+
+
+def safe_config_source_summary(settings: Settings) -> dict[str, object]:
+    report = worker_config_report(settings.app_env)
+    all_sources = report.get("field_sources")
+    source_map = all_sources if isinstance(all_sources, dict) else {}
+    resolver_keys = (
+        "MEDIA_RESOLVER_MODE",
+        "EXTERNAL_MEDIA_RESOLVER_AUDIENCE",
+        "INSTAGRAM_RESOLVER_CHAIN",
+        "TIKTOK_RESOLVER_CHAIN",
+        "COOKIE_MEDIA_FALLBACK_ENABLED",
+        "YOUTUBE_DIRECT_GEMINI_ENABLED",
+    )
+    return {
+        "app_env": report.get("app_env"),
+        "environment_selection_source": report.get("environment_selection_source"),
+        "selected_config_display_path": report.get("selected_config_display_path"),
+        "selected_config_exists": report.get("selected_config_exists"),
+        "selected_config_loaded": report.get("selected_config_loaded"),
+        "loaded_files": report.get("loaded_files", []),
+        "missing_files": report.get("missing_files", []),
+        "resolver_field_sources": {
+            key.lower(): source_map.get(key, "model_default") for key in resolver_keys
         },
     }
 
@@ -370,6 +604,7 @@ def ensure_queue_worker_started(settings: Settings) -> None:
     global queue_task
     if settings.worker_execution_mode != "queue":
         return
+    signal_queue_wake()
     if queue_task is not None and not queue_task.done():
         return
     try:
@@ -404,9 +639,15 @@ async def wake(settings: Settings = Depends(get_settings)) -> dict[str, object]:
 async def start_queue_worker() -> None:
     try:
         settings = get_settings()
+        validate_external_resolver_runtime_config(settings)
+        stale_directories_removed = cleanup_stale_media(settings)
+        log_runtime_dependency_versions()
         logger.info(
             "worker_safe_config_summary",
-            extra={"safe_config": safe_config_summary(settings)},
+            extra={
+                "safe_config": safe_config_summary(settings),
+                "stale_directories_removed": stale_directories_removed,
+            },
         )
         ensure_queue_worker_started(settings)
     except Exception as exc:
@@ -433,6 +674,7 @@ async def stop_queue_worker() -> None:
         except asyncio.CancelledError:
             pass
         queue_task = None
+    reset_queue_runtime()
     flush_sentry(timeout=2.0)
 
 

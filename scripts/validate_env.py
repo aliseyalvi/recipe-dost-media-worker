@@ -25,10 +25,15 @@ ENV_ONLY_OPTIONAL_KEYS = [
     "YOUTUBE_COOKIES_B64",
     "FACEBOOK_COOKIES_B64",
     "TIKTOK_COOKIES_B64",
+    "INSTAGRAM_RAPIDAPI_KEY",
+    "TIKTOK_AKNG_ACCESS_TOKEN",
     "SENTRY_DSN",
+    "SENTRY_DEV_CANARY",
     "SENTRY_DEV_TEST",
 ]
-ENV_ONLY_EXPORT_KEYS = sorted(set(ENV_ONLY_REQUIRED_KEYS + ENV_ONLY_OPTIONAL_KEYS))
+ENV_ONLY_EXPORT_KEYS = sorted(
+    set(ENV_ONLY_REQUIRED_KEYS + ENV_ONLY_OPTIONAL_KEYS) - {"APP_ENV", "LOG_LEVEL"}
+)
 CONFIG_ONLY_KEYS = [
     "AI_ANALYSIS_MODE",
     "ALLOW_PRIVATE_METADATA_FAILURE",
@@ -42,6 +47,7 @@ CONFIG_ONLY_KEYS = [
     "ENABLE_YTDLP_COOKIES",
     "GEMINI_EXTRACTION_MODE",
     "GEMINI_FILE_MAX_WAIT_SECONDS",
+    "GEMINI_FILE_MAX_SIZE_BYTES",
     "GEMINI_FILE_POLL_INTERVAL_SECONDS",
     "GEMINI_FILE_UPLOAD_TIMEOUT_SECONDS",
     "GEMINI_JSON_FALLBACK_ENABLED",
@@ -53,14 +59,18 @@ CONFIG_ONLY_KEYS = [
     "GEMINI_VIDEO_INPUT_MODE",
     "GEMINI_VIDEO_MODEL",
     "LOCAL_BRIEF_PARSER_ENABLED",
-    "MAX_VIDEO_DURATION_SECONDS",
+    "MAX_SOURCE_VIDEO_DURATION_SECONDS",
+    "MAX_VIDEO_HEIGHT",
     "MAX_VIDEO_SIZE_MB",
+    "MEDIA_ADAPTIVE_MAX_ATTEMPTS",
     "MEDIA_EXTRACT_OUTPUT_MODE",
+    "MIN_VIDEO_HEIGHT",
     "MOCK_ANALYSIS_DELAY_MS",
     "MOCK_RECIPE_FIXTURE_PATH",
     "MOCK_VIDEO_PROCESSING_MODE",
     "QUEUE_EMPTY_SLEEP_SECONDS",
     "QUEUE_POLL_INTERVAL_SECONDS",
+    "PREFERRED_VIDEO_SIZE_MB",
     "REAL_AI_FALLBACK_TO_MOCK",
     "RECIPE_CARD_NORMALIZATION_ENABLED",
     "TEMP_MEDIA_DIR",
@@ -193,12 +203,20 @@ def validate_values(
             errors.append("production env must not contain the known dev Supabase ref")
         if values.get("SENTRY_DEV_TEST", "").strip().lower() not in {"", "false"}:
             errors.append("SENTRY_DEV_TEST must be false in production")
+        if values.get("SENTRY_DEV_CANARY", "").strip().lower() not in {"", "false"}:
+            errors.append("SENTRY_DEV_CANARY must be false in production")
 
     sentry_dev_test = values.get("SENTRY_DEV_TEST", "").strip().lower()
     if sentry_dev_test not in {"", "true", "false"}:
         errors.append("SENTRY_DEV_TEST must be true or false")
     if sentry_dev_test == "true" and not values.get("SENTRY_DSN", "").strip():
         errors.append("SENTRY_DEV_TEST=true requires SENTRY_DSN")
+
+    sentry_dev_canary = values.get("SENTRY_DEV_CANARY", "").strip().lower()
+    if sentry_dev_canary not in {"", "true", "false"}:
+        errors.append("SENTRY_DEV_CANARY must be true or false")
+    if sentry_dev_canary == "true" and not values.get("SENTRY_DSN", "").strip():
+        errors.append("SENTRY_DEV_CANARY=true requires SENTRY_DSN")
 
     worker_api_secret = values.get("WORKER_API_SECRET", "").strip()
     media_secret = values.get("MEDIA_WORKER_SHARED_SECRET", "").strip()
@@ -222,22 +240,42 @@ def validate_config(environment: str) -> dict[str, Any]:
     errors: list[str] = []
 
     try:
-        max_duration = int(config.get("MAX_VIDEO_DURATION_SECONDS", 0))
+        max_duration = int(config.get("MAX_SOURCE_VIDEO_DURATION_SECONDS", 0))
     except (TypeError, ValueError):
-        errors.append("config MAX_VIDEO_DURATION_SECONDS must be an integer")
+        errors.append(
+            "config MAX_SOURCE_VIDEO_DURATION_SECONDS must be an integer"
+        )
     else:
-        if max_duration <= 0:
-            errors.append("config MAX_VIDEO_DURATION_SECONDS must be greater than 0")
-        if max_duration > 120:
-            errors.append("config MAX_VIDEO_DURATION_SECONDS must be <= 120")
-        if environment == "production" and max_duration == 90:
+        if not 60 <= max_duration <= 900:
             errors.append(
-                "production config MAX_VIDEO_DURATION_SECONDS must not be the "
-                "fallback default 90"
+                "config MAX_SOURCE_VIDEO_DURATION_SECONDS must be between 60 and 900"
             )
 
     if _config_bool(config.get("ALLOW_RAW_URL_LOGS", False)):
         errors.append("config ALLOW_RAW_URL_LOGS must be false")
+
+    try:
+        preferred_size = int(config.get("PREFERRED_VIDEO_SIZE_MB", 0))
+        hard_size = int(config.get("MAX_VIDEO_SIZE_MB", 0))
+        provider_bytes = int(config.get("GEMINI_FILE_MAX_SIZE_BYTES", 0))
+        adaptive_attempts = int(config.get("MEDIA_ADAPTIVE_MAX_ATTEMPTS", 0))
+        min_height = int(config.get("MIN_VIDEO_HEIGHT", 0))
+        max_height = int(config.get("MAX_VIDEO_HEIGHT", 0))
+    except (TypeError, ValueError):
+        errors.append("config media limits must be integers")
+    else:
+        if not 0 < preferred_size <= hard_size:
+            errors.append(
+                "config size limits must satisfy 0 < preferred <= hard"
+            )
+        if hard_size * 1024 * 1024 > provider_bytes:
+            errors.append("config hard media limit must not exceed provider limit")
+        if not 1 <= adaptive_attempts <= 4:
+            errors.append("config adaptive attempt count must be between 1 and 4")
+        if not 360 <= min_height <= max_height <= 720:
+            errors.append(
+                "config video heights must satisfy 360 <= minimum <= maximum <= 720"
+            )
 
     if environment == "production":
         required_strings = {
@@ -254,10 +292,8 @@ def validate_config(environment: str) -> dict[str, Any]:
             if actual != expected:
                 errors.append(f"production config {key} must be {expected}")
         required_true = [
-            "ENABLE_INSTAGRAM_COOKIES",
             "ENABLE_RENDER_INSTAGRAM_RESOLVER",
             "ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR",
-            "ENABLE_YTDLP_COOKIES",
             "GEMINI_STRUCTURED_OUTPUT_ENABLED",
             "RECIPE_QUALITY_GATE_ENABLED",
             "RECIPE_REPAIR_ENABLED",
@@ -266,15 +302,23 @@ def validate_config(environment: str) -> dict[str, Any]:
             if not _config_bool(config.get(key, False)):
                 errors.append(f"production config {key} must be true")
         fallback_false_keys = [
-            "ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR",
+            "COOKIE_MEDIA_FALLBACK_ENABLED",
             "ENABLE_INSTAGRAM_COOKIES",
             "ENABLE_YTDLP_COOKIES",
         ]
         for key in fallback_false_keys:
-            if _config_bool(config.get(key, False)) is False:
-                errors.append(
-                    f"production effective config still has {key}=false"
-                )
+            if _config_bool(config.get(key, False)):
+                errors.append(f"production config {key} must be false")
+        required_resolver_strings = {
+            "MEDIA_RESOLVER_MODE": "legacy",
+            "EXTERNAL_MEDIA_RESOLVER_AUDIENCE": "disabled",
+        }
+        for key, expected in required_resolver_strings.items():
+            actual = str(config.get(key, "")).strip().lower()
+            if actual != expected:
+                errors.append(f"production config {key} must be {expected}")
+        if not _config_bool(config.get("YOUTUBE_DIRECT_GEMINI_ENABLED", False)):
+            errors.append("production config YOUTUBE_DIRECT_GEMINI_ENABLED must be true")
         if _config_bool(config.get("LOCAL_BRIEF_PARSER_ENABLED", False)):
             errors.append("production config LOCAL_BRIEF_PARSER_ENABLED must be false")
         if _config_bool(config.get("REAL_AI_FALLBACK_TO_MOCK", False)):

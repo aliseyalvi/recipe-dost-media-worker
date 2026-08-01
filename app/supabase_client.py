@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from typing import Any
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID
 
 from supabase import Client, create_client
 
 from app.config import Settings
 from app.schemas import GeminiRecipeResult, MediaJobRecord
+
+MAX_RECIPE_DURATION_MINUTES = 10_080
 
 MEDIA_JOB_SELECT = (
     "id,user_id,recipe_item_id,source_url,platform,status,progress,"
@@ -41,6 +43,156 @@ class MediaJobRepository:
         if not response.data:
             return None
         return MediaJobRecord.model_validate(response.data[0])
+
+    def claim_oldest_queued_job(self) -> MediaJobRecord | None:
+        response = self._client.rpc("claim_oldest_media_job").execute()
+        if not response.data:
+            return None
+        row = response.data[0] if isinstance(response.data, list) else response.data
+        return MediaJobRecord.model_validate(row)
+
+    def heartbeat_job(self, media_job_id: UUID) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        (
+            self._client.table("media_jobs")
+            .update({"worker_heartbeat_at": now})
+            .eq("id", str(media_job_id))
+            .in_("status", ["resolving", "downloading", "analyzing"])
+            .execute()
+        )
+
+    def release_job_lease(self, media_job_id: UUID) -> None:
+        (
+            self._client.table("media_jobs")
+            .update(
+                {
+                    "worker_claimed_at": None,
+                    "worker_heartbeat_at": None,
+                }
+            )
+            .eq("id", str(media_job_id))
+            .execute()
+        )
+
+    def recover_stale_jobs(
+        self,
+        *,
+        stale_after_seconds: int,
+        max_recovery_attempts: int,
+    ) -> list[dict[str, Any]]:
+        response = self._client.rpc(
+            "recover_stale_media_jobs",
+            {
+                "p_stale_after_seconds": stale_after_seconds,
+                "p_max_recovery_attempts": max_recovery_attempts,
+            },
+        ).execute()
+        if not isinstance(response.data, list):
+            return []
+        return [row for row in response.data if isinstance(row, dict)]
+
+    def get_ai_access_context(self, media_job_id: UUID) -> dict[str, Any] | None:
+        response = (
+            self._client.table("media_job_events")
+            .select("metadata")
+            .eq("media_job_id", str(media_job_id))
+            .eq("event_type", "media_job_created")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not response.data:
+            return None
+        metadata = response.data[0].get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+        access = metadata.get("ai_generation_access")
+        return access if isinstance(access, dict) else None
+
+    def has_external_resolver_attempt(
+        self,
+        media_job_id: UUID,
+        adapter_id: str,
+    ) -> bool:
+        response = (
+            self._client.table("media_job_events")
+            .select("id", count="exact", head=True)
+            .eq("media_job_id", str(media_job_id))
+            .eq("event_type", "external_resolver_started")
+            .contains("metadata", {"resolver_adapter": adapter_id})
+            .execute()
+        )
+        return int(response.count or 0) > 0
+
+    def has_event(self, media_job_id: UUID, event_type: str) -> bool:
+        response = (
+            self._client.table("media_job_events")
+            .select("id", count="exact", head=True)
+            .eq("media_job_id", str(media_job_id))
+            .eq("event_type", event_type)
+            .execute()
+        )
+        return int(response.count or 0) > 0
+
+    def get_quota_counts(
+        self,
+        *,
+        user_id: UUID,
+        plan: str,
+    ) -> dict[str, int]:
+        active_statuses = [
+            "queued",
+            "processing",
+            "analyzing",
+            "pending",
+            "running",
+            "resolving",
+            "downloading",
+            "validating",
+            "thumbnailing",
+            "uploading_to_ai",
+            "saving_result",
+        ]
+        active_query = (
+            self._client.table("media_jobs")
+            .select("id", count="exact", head=True)
+            .eq("user_id", str(user_id))
+            .in_("status", active_statuses)
+        )
+        successful_query = (
+            self._client.table("media_jobs")
+            .select("id", count="exact", head=True)
+            .eq("user_id", str(user_id))
+            .eq("status", "completed")
+            .not_.is_("result_recipe_card_id", "null")
+            .not_.is_("ai_provider", "null")
+        )
+        if plan == "premium":
+            now = datetime.now(timezone.utc)
+            month_start = now.replace(
+                day=1,
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            if month_start.month == 12:
+                next_month = month_start.replace(
+                    year=month_start.year + 1,
+                    month=1,
+                )
+            else:
+                next_month = month_start.replace(month=month_start.month + 1)
+            active_query = active_query.gte(
+                "created_at", month_start.isoformat()
+            ).lt("created_at", next_month.isoformat())
+            successful_query = successful_query.gte(
+                "completed_at", month_start.isoformat()
+            ).lt("completed_at", next_month.isoformat())
+        return {
+            "active_reservation_count": int(active_query.execute().count or 0),
+            "successful_count": int(successful_query.execute().count or 0),
+        }
 
     def update_job(
         self,
@@ -133,8 +285,8 @@ class MediaJobRepository:
             "resolver": resolver,
             "cdn_url": cdn_url,
             "cdn_url_expires_at": None,
-            "raw_metadata": raw_metadata,
-            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "raw_metadata": raw_metadata if isinstance(raw_metadata, dict) else {},
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         self._client.table("media_job_private_metadata").upsert(
             values,
@@ -292,6 +444,19 @@ class MediaJobRepository:
         if job.recipe_item_id is None:
             raise ValueError("Media job has no recipe item.")
 
+        existing = (
+            self._client.table("recipe_cards")
+            .select("id")
+            .eq("recipe_id", str(job.recipe_item_id))
+            .eq("user_id", str(job.user_id))
+            .order("created_at", desc=False)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
+            row = existing.data[0] if isinstance(existing.data, list) else existing.data
+            return UUID(str(row["id"]))
+
         ingredients = [
             {
                 **item.model_dump(mode="json"),
@@ -328,9 +493,10 @@ class MediaJobRepository:
                         "cook_time_minutes": result.cook_time_minutes,
                         "prep_minutes": result.prep_time_minutes,
                         "cook_minutes": result.cook_time_minutes,
-                        "total_minutes": add_optional_minutes(
+                        "total_minutes": derive_recipe_total_minutes(
                             result.prep_time_minutes,
                             result.cook_time_minutes,
+                            result.total_time_minutes,
                         ),
                     },
                     "servings": result.servings,
@@ -400,7 +566,28 @@ def bilingual_list(
     ]
 
 
-def add_optional_minutes(first: int | None, second: int | None) -> int | None:
-    if first is None and second is None:
+def valid_recipe_minutes(value: object) -> int | None:
+    if isinstance(value, bool):
         return None
-    return (first or 0) + (second or 0)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed <= 0 or parsed > MAX_RECIPE_DURATION_MINUTES:
+        return None
+    return parsed
+
+
+def derive_recipe_total_minutes(
+    prep_minutes: object,
+    cook_minutes: object,
+    explicit_total_minutes: object = None,
+) -> int | None:
+    explicit = valid_recipe_minutes(explicit_total_minutes)
+    if explicit is not None:
+        return explicit
+    prep = valid_recipe_minutes(prep_minutes)
+    cook = valid_recipe_minutes(cook_minutes)
+    if prep is None or cook is None:
+        return None
+    return valid_recipe_minutes(prep + cook)

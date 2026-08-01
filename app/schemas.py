@@ -32,6 +32,7 @@ class HealthResponse(BaseModel):
     gemini_structured_output_enabled: bool
     local_brief_parser_enabled: bool
     gemini_file_upload_timeout_seconds: int
+    gemini_file_max_size_bytes: int
     gemini_file_poll_interval_seconds: int
     gemini_file_max_wait_seconds: int
     gemini_save_mode: str
@@ -83,10 +84,14 @@ class HealthResponse(BaseModel):
     enable_social_video: bool
     enable_yt_dlp: bool
     enable_cookie_file: bool
+    max_source_video_duration_seconds: int
     max_video_duration_seconds: int
+    preferred_video_size_mb: int
     max_video_size_mb: int
+    media_adaptive_max_attempts: int
     max_memory_buffer_mb: int
     max_video_height: int
+    min_video_height: int
     thumbnail_bucket: str
     use_source_thumbnail_first: bool
     store_raw_media: bool
@@ -115,6 +120,7 @@ class HealthResponse(BaseModel):
     cobalt_configured: bool
     cobalt_enabled_platforms: list[str]
     worker_execution_mode: str
+    worker_processing_model: Literal["sequential_queue"]
     queue_loop_enabled: bool
     queue_poll_interval_seconds: int
     enable_unified_ytdlp_stream_extractor: bool
@@ -213,6 +219,7 @@ class GeminiRecipeResult(BaseModel):
     confidence: str
     prep_time_minutes: Optional[int]
     cook_time_minutes: Optional[int]
+    total_time_minutes: Optional[int] = None
     servings: Optional[str]
     difficulty: str
     ingredients: list[RecipeIngredient]

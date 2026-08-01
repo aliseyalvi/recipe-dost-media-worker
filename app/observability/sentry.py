@@ -21,6 +21,7 @@ ALLOWED_FEATURES = {
     "ai_generation",
     "persistence",
     "worker_loop",
+    "media_resolution",
 }
 ALLOWED_OPERATIONS = {
     "worker_startup",
@@ -32,6 +33,9 @@ ALLOWED_OPERATIONS = {
     "persist_recipe_card",
     "persist_job_failure",
     "controlled_test",
+    "resolve_media",
+    "download_media",
+    "merge_media",
 }
 ALLOWED_STAGES = {
     "startup",
@@ -51,6 +55,10 @@ ALLOWED_STAGES = {
     "job_completion_update",
     "terminal_failure",
     "verification",
+    "external_resolver",
+    "external_media_download",
+    "media_probe",
+    "media_merge",
 }
 ALLOWED_ERROR_CODES = {
     "sentry_verification",
@@ -68,8 +76,26 @@ ALLOWED_ERROR_CODES = {
     "youtube_gemini_url_failed",
     "gemini_video_analysis_failed",
     "terminal_failure_persistence_failed",
+    "media_size_exceeded",
+    "media_unavailable",
+    "media_private_or_deleted",
+    "unsupported_media",
+    "media_has_no_audio",
+    "resolver_rate_limited",
+    "resolver_temporarily_unavailable",
+    "resolver_configuration_error",
+    "resolver_contract_error",
+    "media_download_failed",
+    "media_validation_failed",
+    "media_merge_failed",
+    "youtube_processing_failed",
+    "ai_provider_failed",
+    "gemini_call_guard_failed",
+    "gemini_job_call_limit_reached",
 }
 ALLOWED_PLATFORMS = {"instagram", "tiktok", "youtube", "unknown"}
+ALLOWED_CANDIDATE_SOURCES = {"formats", "requested_formats", "top_level_direct", "unknown"}
+ALLOWED_AUDIO_STATES = {"audio_present", "audio_absent", "audio_unknown"}
 EXPECTED_PRODUCT_ERROR_CODES = {
     "invalid_url",
     "invalid_tiktok_url",
@@ -128,6 +154,10 @@ ALLOWED_TAG_KEYS = {
     "stage",
     "error_code",
     "source_platform",
+    "candidate_source_type",
+    "audio_state",
+    "resolver_adapter",
+    "route_audience",
 }
 ALLOWED_CONTEXT_KEYS = {
     "retry_attempt",
@@ -135,6 +165,32 @@ ALLOWED_CONTEXT_KEYS = {
     "recoverable",
     "terminal",
     "safe_http_status",
+    "duration_bucket",
+    "size_bucket",
+    "selected_resolution_bucket",
+    "adaptive_attempt_count",
+    "cookie_retry_used",
+    "normalized_candidate_count",
+    "probe_performed",
+    "probe_audio_present",
+    "probe_video_present",
+    "optimization_attempted",
+    "optimization_succeeded",
+    "fallback_used",
+    "provider_attempt",
+    "provider_status_class",
+    "media_mode",
+    "external_resolution_latency_bucket",
+}
+MEDIA_SIZE_WARNING_MESSAGE = "worker_outcome:media_size_exceeded"
+MEDIA_SIZE_FINGERPRINT = ["worker_outcome", "media_size_exceeded"]
+NO_SUPPORTED_MEDIA_WARNING_MESSAGE = "worker_outcome:no_supported_media"
+NO_SUPPORTED_MEDIA_FINGERPRINT = ["worker_outcome", "no_supported_media"]
+EXTERNAL_WARNING_CODES = {
+    "resolver_rate_limited",
+    "resolver_temporarily_unavailable",
+    "media_size_exceeded",
+    "media_has_no_audio",
 }
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 SAFE_RELEASE = re.compile(r"^recipe-dost-media-worker@[A-Za-z0-9._-]{7,64}$")
@@ -201,19 +257,25 @@ def compute_sentry_config(
 
     if not is_valid_sentry_dsn(dsn):
         return SentryRuntimeConfig(False, None, release, None, controlled_test, "dsn_missing_or_invalid")
+    if not on_render:
+        return SentryRuntimeConfig(False, None, release, None, controlled_test, "render_service_required")
 
     if controlled_test:
         if worker_env != "development":
             return SentryRuntimeConfig(False, None, release, None, True, "test_requires_development")
         if not _env_true(values.get("SENTRY_DEV_TEST")):
             return SentryRuntimeConfig(False, None, release, None, True, "test_flag_disabled")
-        if on_render and render_branch != "develop":
+        if render_branch != "develop":
             return SentryRuntimeConfig(False, None, release, None, True, "render_branch_mismatch")
         return SentryRuntimeConfig(True, "development-test", release, dsn, True, "enabled")
 
+    if worker_env == "development" and _env_true(values.get("SENTRY_DEV_CANARY")):
+        if render_branch != "develop":
+            return SentryRuntimeConfig(False, None, release, None, False, "render_branch_mismatch")
+        return SentryRuntimeConfig(True, "development-canary", release, dsn, False, "enabled")
     if worker_env != "production":
         return SentryRuntimeConfig(False, None, release, None, False, "runtime_requires_production")
-    if on_render and render_branch != "main":
+    if render_branch != "main":
         return SentryRuntimeConfig(False, None, release, None, False, "render_branch_mismatch")
     return SentryRuntimeConfig(True, "production", release, dsn, False, "enabled")
 
@@ -354,6 +416,13 @@ def _sanitize_tags(event: Mapping[str, Any]) -> dict[str, str] | None:
         return None
     if tags.get("source_platform", "unknown") not in ALLOWED_PLATFORMS:
         return None
+    if tags.get("candidate_source_type", "unknown") not in ALLOWED_CANDIDATE_SOURCES:
+        tags.pop("candidate_source_type", None)
+    if tags.get("audio_state", "audio_unknown") not in ALLOWED_AUDIO_STATES:
+        tags.pop("audio_state", None)
+    for key in ("resolver_adapter", "route_audience"):
+        if key in tags and not SAFE_IDENTIFIER.fullmatch(tags[key]):
+            tags.pop(key, None)
     if tags.get("flow") == "process" and tags.get("feature") != "worker_runtime":
         return None
     return tags
@@ -367,11 +436,60 @@ def _sanitize_worker_context(event: Mapping[str, Any]) -> dict[str, object] | No
     sanitized: dict[str, object] = {}
     for key in ALLOWED_CONTEXT_KEYS:
         value = worker.get(key)
-        if key in {"retry_exhausted", "recoverable", "terminal"} and isinstance(value, bool):
+        if key in {
+            "retry_exhausted",
+            "recoverable",
+            "terminal",
+            "cookie_retry_used",
+            "probe_performed",
+            "probe_audio_present",
+            "probe_video_present",
+            "optimization_attempted",
+            "optimization_succeeded",
+            "fallback_used",
+        } and isinstance(value, bool):
             sanitized[key] = value
-        elif key in {"retry_attempt", "safe_http_status"} and isinstance(value, int):
+        elif key in {
+            "retry_attempt",
+            "safe_http_status",
+            "adaptive_attempt_count",
+            "normalized_candidate_count",
+            "provider_attempt",
+        } and isinstance(value, int) and 0 <= value <= 1000:
+            sanitized[key] = value
+        elif key in {
+            "duration_bucket",
+            "size_bucket",
+            "selected_resolution_bucket",
+            "provider_status_class",
+            "media_mode",
+            "external_resolution_latency_bucket",
+        } and isinstance(value, str) and SAFE_IDENTIFIER.fullmatch(value):
             sanitized[key] = value
     return sanitized or None
+
+
+def _sanitize_message(event: Mapping[str, Any], error_code: str) -> str | None:
+    message = event.get("message")
+    if (
+        error_code == "media_size_exceeded"
+        and message == MEDIA_SIZE_WARNING_MESSAGE
+        and event.get("level") == "warning"
+    ):
+        return MEDIA_SIZE_WARNING_MESSAGE
+    if (
+        error_code == "unified_extractor_failed"
+        and message == NO_SUPPORTED_MEDIA_WARNING_MESSAGE
+        and event.get("level") == "warning"
+    ):
+        return NO_SUPPORTED_MEDIA_WARNING_MESSAGE
+    if (
+        error_code in EXTERNAL_WARNING_CODES
+        and message == f"worker_outcome:{error_code}"
+        and event.get("level") == "warning"
+    ):
+        return message
+    return None
 
 
 def before_send(event: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any] | None:
@@ -379,15 +497,30 @@ def before_send(event: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any] 
     if tags is None:
         return None
     exception = _sanitize_exception(event, tags["error_code"])
-    if exception is None:
+    message = _sanitize_message(event, tags["error_code"])
+    if exception is None and message is None:
         return None
 
     sanitized: dict[str, Any] = {
         "platform": "python",
-        "level": "error",
+        "level": "warning" if message is not None else "error",
         "tags": tags,
-        "exception": exception,
     }
+    if exception is not None:
+        sanitized["exception"] = exception
+    if message is not None:
+        sanitized["message"] = message
+        fingerprint = event.get("fingerprint")
+        normalized_fingerprint = tuple(fingerprint) if isinstance(fingerprint, list) else ()
+        if normalized_fingerprint in {
+            tuple(MEDIA_SIZE_FINGERPRINT),
+            tuple(NO_SUPPORTED_MEDIA_FINGERPRINT),
+        } or (
+            len(normalized_fingerprint) == 2
+            and normalized_fingerprint[0] == "external_resolver"
+            and normalized_fingerprint[1] in EXTERNAL_WARNING_CODES
+        ):
+            sanitized["fingerprint"] = list(normalized_fingerprint)
     event_id = event.get("event_id")
     if isinstance(event_id, str) and re.fullmatch(r"[a-fA-F0-9]{32}", event_id):
         sanitized["event_id"] = event_id
@@ -395,7 +528,7 @@ def before_send(event: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any] 
     if timestamp is not None:
         sanitized["timestamp"] = timestamp
     environment = event.get("environment")
-    if environment in {"production", "development-test"}:
+    if environment in {"production", "development-test", "development-canary"}:
         sanitized["environment"] = environment
     release = event.get("release")
     if isinstance(release, str) and SAFE_RELEASE.fullmatch(release):
@@ -439,6 +572,11 @@ def report_worker_error(
     recoverable: bool | None = None,
     terminal: bool | None = None,
     safe_http_status: int | None = None,
+    resolver_adapter: str | None = None,
+    route_audience: str | None = None,
+    fallback_used: bool | None = None,
+    provider_attempt: int | None = None,
+    provider_status_class: str | None = None,
 ) -> str | None:
     if feature not in ALLOWED_FEATURES:
         return None
@@ -482,6 +620,10 @@ def report_worker_error(
         "error_code": normalized_error_code,
         "source_platform": platform,
     }
+    if resolver_adapter:
+        tags["resolver_adapter"] = _safe_identifier(resolver_adapter, "unknown")
+    if route_audience:
+        tags["route_audience"] = _safe_identifier(route_audience, "unknown")
     worker_context = {
         key: value
         for key, value in {
@@ -490,6 +632,9 @@ def report_worker_error(
             "recoverable": recoverable,
             "terminal": terminal,
             "safe_http_status": status,
+            "fallback_used": fallback_used,
+            "provider_attempt": provider_attempt,
+            "provider_status_class": provider_status_class,
         }.items()
         if value is not None
     }
@@ -498,6 +643,150 @@ def report_worker_error(
             scope.set_tags(tags)
             scope.set_context("worker", worker_context)
             event_id = sentry_sdk.capture_exception(exception)
+        return str(event_id) if event_id else None
+    except Exception as capture_error:
+        logger.warning(
+            "sentry_capture_failed",
+            extra={"exception_type": type(capture_error).__name__},
+        )
+        return None
+
+
+def report_terminal_worker_outcome(
+    *,
+    error_code: str,
+    source_platform: str | None,
+    duration_bucket: str | None,
+    size_bucket: str | None,
+    selected_resolution_bucket: str | None,
+    adaptive_attempt_count: int,
+    cookie_retry_used: bool,
+    outcome_kind: str = "media_size_exceeded",
+    normalized_candidate_count: int = 0,
+    candidate_source_type: str | None = None,
+    audio_state: str | None = None,
+    probe_performed: bool = False,
+    probe_audio_present: bool | None = None,
+    probe_video_present: bool | None = None,
+    optimization_attempted: bool = False,
+    optimization_succeeded: bool = False,
+) -> str | None:
+    is_size_outcome = (
+        outcome_kind == "media_size_exceeded" and error_code == "media_size_exceeded"
+    )
+    is_media_outcome = (
+        outcome_kind == "no_supported_media"
+        and error_code == "unified_extractor_failed"
+    )
+    if not (is_size_outcome or is_media_outcome) or not initialize_sentry():
+        return None
+    platform = (source_platform or "unknown").strip().lower()
+    if platform not in ALLOWED_PLATFORMS:
+        platform = "unknown"
+    normalized_source = (
+        candidate_source_type
+        if candidate_source_type in ALLOWED_CANDIDATE_SOURCES
+        else "unknown"
+    )
+    normalized_audio = (
+        audio_state if audio_state in ALLOWED_AUDIO_STATES else "audio_unknown"
+    )
+    tags = {
+        "service": SERVICE_NAME,
+        "flow": "current",
+        "feature": "metadata",
+        "operation": "extract_metadata",
+        "stage": "unified_extractor",
+        "error_code": error_code,
+        "source_platform": platform,
+        "candidate_source_type": normalized_source,
+        "audio_state": normalized_audio,
+    }
+    worker_context = {
+        "duration_bucket": duration_bucket or "unknown",
+        "size_bucket": size_bucket or "unknown",
+        "selected_resolution_bucket": selected_resolution_bucket or "unknown",
+        "adaptive_attempt_count": max(0, min(adaptive_attempt_count, 4)),
+        "cookie_retry_used": bool(cookie_retry_used),
+        "normalized_candidate_count": max(0, min(normalized_candidate_count, 100)),
+        "probe_performed": bool(probe_performed),
+        "probe_audio_present": probe_audio_present,
+        "probe_video_present": probe_video_present,
+        "optimization_attempted": bool(optimization_attempted),
+        "optimization_succeeded": bool(optimization_succeeded),
+        "terminal": True,
+    }
+    message = (
+        MEDIA_SIZE_WARNING_MESSAGE
+        if is_size_outcome
+        else NO_SUPPORTED_MEDIA_WARNING_MESSAGE
+    )
+    fingerprint = (
+        MEDIA_SIZE_FINGERPRINT
+        if is_size_outcome
+        else NO_SUPPORTED_MEDIA_FINGERPRINT
+    )
+    try:
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tags(tags)
+            scope.set_context("worker", worker_context)
+            scope.fingerprint = list(fingerprint)
+            event_id = sentry_sdk.capture_message(
+                message,
+                level="warning",
+            )
+        return str(event_id) if event_id else None
+    except Exception as capture_error:
+        logger.warning(
+            "sentry_capture_failed",
+            extra={"exception_type": type(capture_error).__name__},
+        )
+        return None
+
+
+def report_external_resolver_outcome(
+    *,
+    error_code: str,
+    source_platform: str,
+    resolver_adapter: str,
+    route_audience: str,
+    fallback_used: bool,
+    provider_attempt: int = 0,
+    provider_status_class: str | None = None,
+) -> str | None:
+    if error_code not in EXTERNAL_WARNING_CODES or not initialize_sentry():
+        return None
+    platform = source_platform if source_platform in ALLOWED_PLATFORMS else "unknown"
+    adapter = _safe_identifier(resolver_adapter, "unknown")
+    audience = _safe_identifier(route_audience, "unknown")
+    tags = {
+        "service": SERVICE_NAME,
+        "flow": "current",
+        "feature": "media_resolution",
+        "operation": "resolve_media",
+        "stage": "external_resolver",
+        "error_code": error_code,
+        "source_platform": platform,
+        "resolver_adapter": adapter,
+        "route_audience": audience,
+    }
+    try:
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tags(tags)
+            scope.set_context(
+                "worker",
+                {
+                    "fallback_used": bool(fallback_used),
+                    "provider_attempt": max(0, min(provider_attempt, 2)),
+                    "provider_status_class": provider_status_class or "unknown",
+                    "terminal": True,
+                },
+            )
+            scope.fingerprint = ["external_resolver", error_code]
+            event_id = sentry_sdk.capture_message(
+                f"worker_outcome:{error_code}",
+                level="warning",
+            )
         return str(event_id) if event_id else None
     except Exception as capture_error:
         logger.warning(

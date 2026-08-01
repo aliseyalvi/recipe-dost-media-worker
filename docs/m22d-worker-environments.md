@@ -10,6 +10,11 @@ M22D keeps secrets and environment identity in env files, and moves non-secret w
 - Runtime defaults: `config/worker.defaults.json`
 - Environment overrides: `config/worker.development.json` and `config/worker.production.json`
 
+On Render, `RENDER_GIT_BRANCH` is the existing runtime selector: `develop`
+loads development config and `main` loads production config. `APP_ENV` remains
+supported but is not required when branch metadata is present; if both exist,
+they must agree. Local execution without either selector defaults to development.
+
 Never commit real env values. `env/development.env`, `env/production.env`, root `.env`, and local `.env.*` files are ignored.
 
 If an existing root `.env` is present, do not print or delete it automatically. If it points to the dev Supabase project, migrate those values manually into `env/development.env`, then stop using root `.env` as the shared source of truth.
@@ -24,11 +29,17 @@ Do not fill `env/production.env` until the production Supabase project and produ
 - Dev worker must never use the production Supabase service-role key.
 - Production worker must never use the development Supabase service-role key.
 - Production validation rejects the known dev Supabase ref `xvsiuwjidmkdqzkswoki`.
-- Keep `APP_ENV=production` and `LOG_LEVEL=info` in production.
+- Keep local production source files at `APP_ENV=production` and
+  `LOG_LEVEL=info`; Render derives environment from `main` and reads log level
+  from production JSON.
 - Keep `ALLOW_RAW_URL_LOGS=false` in config.
-- Keep `MAX_VIDEO_DURATION_SECONDS=120` or lower in config.
+- Keep `MAX_SOURCE_VIDEO_DURATION_SECONDS` in committed JSON config. Its
+  default is 180 and its validated range is 60–900 seconds.
 - Do not store raw video, resolver CDN URLs, cookies, Gemini prompts, Gemini raw responses, or secrets in env docs or logs.
 - Keep non-secret runtime config out of clean env files. Legacy Render env values can remain during transition and still override config.
+- Blank environment overrides are ignored and cannot erase committed config.
+- Resolver mode, audience, both chains, cookie fallback, and YouTube direct
+  routing remain only in `config/worker.*.json`.
 - Keep `SENTRY_DEV_TEST=false` except during the one controlled development verification; production requires it to remain false. Unsetting `SENTRY_DSN` is the monitoring rollback switch.
 
 ## Validate
@@ -46,9 +57,24 @@ Make targets:
 make env-check-dev
 make env-check-prod
 make env-check-examples
+make resolver-config-dev
+make resolver-config-prod
 ```
 
 The validator prints key names with masked values only. Missing env files fail with a migration hint. It also validates merged config JSON safety rules.
+
+Use Python 3.12, matching Docker. Do not use an unconfigured global Python 3.14:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+The repository already ignores `.venv/`. Docker and this workflow both install
+from the root `requirements.txt`.
 
 ## Export For Render
 
@@ -109,6 +135,21 @@ Current branch mapping:
 
 Render env groups should contain secrets and environment identity only. Non-secret runtime behavior belongs in `config/worker.defaults.json`, `config/worker.development.json`, and `config/worker.production.json`.
 
+Effective runtime values use this precedence: explicit `Settings` constructor
+input, nonblank process environment, nonblank `.env`, merged worker JSON
+(`worker.defaults.json` followed by the selected environment overlay), file
+secrets, then model fallbacks. Environment JSON files are sparse overlays and
+must not repeat shared defaults.
+
+The W10A queue-liveness defaults are version-controlled in
+`config/worker.defaults.json`: empty-queue polling is 5 seconds, stale work is
+eligible after 600 seconds, the recovery limit is 2, and stale scanning runs
+every 60 seconds. Development and production inherit these values. Matching
+Render variables remain supported as deliberate nonblank overrides, but are
+not required and should not be added merely to duplicate the JSON defaults.
+Pydantic `Settings` validates the effective values, and `/health.safe_config`
+reports only the four resolved safe numeric values.
+
 Use the safe environment doctor before deploys:
 
 ```bash
@@ -156,7 +197,11 @@ Phase B: verify queue worker behavior, `/health`, `/wake`, metadata preview, and
 
 Phase C: remove deprecated non-secret config variables from the Render env group, using [docs/m22d-worker-env-variable-map.md](m22d-worker-env-variable-map.md) as the checklist. Do not remove secrets or cookie/private auth values.
 
-Phase D: keep only env-only values in Render: `APP_ENV`, `LOG_LEVEL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`, `WORKER_API_SECRET`, `SENTRY_DSN`, `SENTRY_DEV_TEST=false`, and any required `*_COOKIES_B64` private auth values.
+Phase D: keep only server secrets and deliberate operational switches in Render:
+`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`,
+`WORKER_API_SECRET`, provider credentials, optional `SENTRY_DSN`/Sentry switches,
+and any explicitly retained private-auth secret. `APP_ENV` and `LOG_LEVEL` are
+not exported; branch metadata and JSON provide them.
 
 Do not remove non-secret Render env variables before Phase B succeeds.
 
@@ -194,7 +239,7 @@ Fix: in `WORKER_EXECUTION_MODE=queue`, `/process-job` now validates the worker s
 
 TikWM status: legacy/manual/debug only for production AI jobs. The M22D.5B TikWM timing fix is kept so the legacy path fails safely if someone deliberately runs non-queue/manual processing, but `config/worker.production.json` no longer carries explicit TikWM production overrides.
 
-Next smoke test order after redeploy: verify `/health.safe_config` shows `worker_execution_mode=queue`, `process_job_mode=queue_wake_compatibility`, `raw_url_logging_enabled=false`, duration `<=120`, and unified extraction enabled. Then run YouTube, Instagram, and TikTok production jobs. For normal TikTok/Instagram queue jobs, expected events include `worker_trigger_success`, `process_job_queue_wake_requested`, `queue_job_claimed`, and `unified_extractor_started`; unexpected events are `tikwm_resolver_started` and `instagram_resolver_disabled`.
+Next smoke test order after redeploy: verify `/health.safe_config` shows `worker_execution_mode=queue`, `process_job_mode=queue_wake_compatibility`, `raw_url_logging_enabled=false`, `max_source_video_duration_seconds=180`, and unified extraction enabled. Then run YouTube, Instagram, and TikTok production jobs. For normal TikTok/Instagram queue jobs, expected events include `worker_trigger_success`, `process_job_queue_wake_requested`, `queue_job_claimed`, and `unified_extractor_started`; unexpected events are `tikwm_resolver_started` and `instagram_resolver_disabled`.
 
 ## M22D.5E Production Config Packaging And Loading
 

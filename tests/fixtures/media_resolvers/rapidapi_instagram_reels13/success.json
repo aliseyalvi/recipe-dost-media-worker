@@ -1,0 +1,25 @@
+{
+  "status": true,
+  "author": "fixture-author",
+  "title": "fixture-title",
+  "thumbnail": "https://provider.invalid/media/thumbnail.jpg",
+  "medias": [
+    {
+      "id": "video-720",
+      "type": "video",
+      "quality": "720x1280p",
+      "resolution": "720x1280",
+      "extension": "mp4",
+      "url": "https://provider.invalid/media/video"
+    },
+    {
+      "id": "audio-main",
+      "type": "audio",
+      "quality": "64kbps",
+      "resolution": null,
+      "extension": "m4a",
+      "url": "https://provider.invalid/media/audio"
+    }
+  ],
+  "error": null
+}

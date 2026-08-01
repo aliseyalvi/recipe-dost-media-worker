@@ -6,6 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /service
 
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir --upgrade pip \
@@ -14,7 +18,8 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY app ./app
 COPY config ./config
+COPY scripts ./scripts
 
 EXPOSE 10000
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000} --timeout-keep-alive 120"]
+CMD ["python", "-m", "app.workers.combined_worker"]

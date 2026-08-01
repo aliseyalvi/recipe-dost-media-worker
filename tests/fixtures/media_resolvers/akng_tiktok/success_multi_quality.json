@@ -1,0 +1,47 @@
+{
+  "success": true,
+  "message": "",
+  "data": {
+    "download_urls": ["redacted-fixture-entry"],
+    "itemInfo": {
+      "itemStruct": {
+        "id": "0000000000000000000",
+        "desc": "Fixture recipe caption https://example.invalid/remove +1 555 010 9999",
+        "textLanguage": "en",
+        "author": {
+          "id": "redacted-author-id",
+          "secUid": "redacted-secuid",
+          "nickname": "Fixture Cook",
+          "uniqueId": "fixturecook"
+        },
+        "challenges": [
+          {"id": "redacted", "title": "fixturefood"},
+          {"id": "redacted", "title": "quickdinner"}
+        ],
+        "textExtra": [{"hashtagId": "redacted", "hashtagName": "fixturefood"}],
+        "stickersOnItem": [{"stickerType": 1, "stickerText": ["Add fixture spice"]}],
+        "music": {"id": "redacted", "title": "Fixture sound", "authorName": "Fixture artist"},
+        "video": {
+          "duration": 120,
+          "cover": "https://provider.invalid/media/thumbnail.jpg",
+          "PlayAddrStruct": {},
+          "bitrateInfo": [
+            {"Bitrate": 2238945, "GearName": "adapt-lowest-1080", "PlayAddr": {"DataSize": "47587094", "Width": 1080, "Height": 1920, "UrlList": ["https://provider.invalid/tiktok/download?file=fixture-a&path=video"]}, "CodecType": "h265_hvc1", "Format": "dash"},
+            {"Bitrate": 2124349, "GearName": "normal-540-large", "PlayAddr": {"DataSize": "47886554", "Width": 576, "Height": 1024, "UrlList": ["https://provider.invalid/tiktok/download?file=fixture-b&path=video"]}, "CodecType": "H264", "Format": "MP4"},
+            {"Bitrate": 1250180, "GearName": "adapt-lower-720", "PlayAddr": {"DataSize": "25106354", "Width": 720, "Height": 1280, "UrlList": ["https://provider.invalid/tiktok/download?file=fixture-c&path=video"]}, "CodecType": "h265_hvc1", "Format": "dash"},
+            {"Bitrate": 1101445, "GearName": "lower-540", "PlayAddr": {"DataSize": "24828499", "Width": 576, "Height": 1024, "UrlList": ["https://provider.invalid/tiktok/download?file=fixture-d&path=video"]}, "CodecType": "h264", "Format": "mp4"},
+            {"Bitrate": 926731, "GearName": "adapt-540", "PlayAddr": {"DataSize": "20115795", "Width": 576, "Height": 1024, "UrlList": ["https://provider.invalid/tiktok/download?file=fixture-e&path=video"]}, "CodecType": "h265_hvc1", "Format": "dash"}
+          ],
+          "bitrateAudioInfo": [
+            {"Bitrate": 64979, "AudioDataSize": "1463815", "UrlList": {"MainUrl": "https://provider.invalid/tiktok/download?file=fixture-audio-a&path=audio", "BackupUrl": "", "FallbackUrl": ""}, "CodecType": "aac", "Format": "dash", "AudioFormat": "m4a", "FileId": "audio-main"},
+            {"Bitrate": 50123, "AudioDataSize": "1200000", "UrlList": {"MainUrl": "https://provider.invalid/tiktok/download?file=fixture-audio-b&path=audio", "BackupUrl": "", "FallbackUrl": ""}, "CodecType": "aac", "Format": "dash", "AudioFormat": "m4a", "FileId": "audio-backup"},
+            {"Bitrate": 32000, "AudioDataSize": "900000", "UrlList": {"MainUrl": "https://provider.invalid/tiktok/download?file=fixture-audio-c&path=audio", "BackupUrl": "", "FallbackUrl": ""}, "CodecType": "aac", "Format": "dash", "AudioFormat": "m4a", "FileId": "audio-small"}
+          ]
+        }
+      }
+    },
+    "shareMeta": {"desc": "Fixture share caption", "title": "Fixture title"},
+    "statusCode": 0,
+    "statusMsg": ""
+  }
+}

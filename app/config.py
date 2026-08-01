@@ -2,11 +2,24 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Annotated, Literal, Optional
+from urllib.parse import urlparse
 
-from pydantic import AliasChoices, Field, SecretStr, field_validator
+from pydantic import (
+    AliasChoices,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from app.runtime_config import worker_config_value
+from app.runtime_config import (
+    selected_worker_environment,
+    worker_config_report,
+    worker_config_value,
+    worker_settings_file_source,
+)
 
 WorkerMode = Literal[
     "skeleton",
@@ -31,10 +44,37 @@ WorkerExecutionMode = Literal["webhook", "queue"]
 MediaExtractOutputMode = Literal["temp_file", "memory_buffer"]
 YouTubeAIInputMode = Literal["gemini_url", "ytdlp"]
 YouTubeMetadataMode = Literal["oembed"]
+MediaResolverMode = Literal["legacy", "external", "hybrid"]
+ExternalMediaResolverAudience = Literal[
+    "disabled",
+    "test_users",
+    "all_authorized_ai",
+]
+
+REGISTERED_EXTERNAL_MEDIA_ADAPTERS = {
+    "rapidapi_instagram_unified_v1",
+    "akng_tiktok",
+}
+RETIRED_INSTAGRAM_ADAPTER = "rapidapi_instagram_reels13"
+INSTAGRAM_UNIFIED_V1_RAPIDAPI_HOST = (
+    "insta-reels-downloader-the-fastest-hd-reels-fetcher-api.p.rapidapi.com"
+)
+
+
+def _without_blank_values(source: object):
+    def load() -> dict[str, object]:
+        values = source()
+        return {
+            key: value
+            for key, value in values.items()
+            if not (isinstance(value, str) and not value.strip())
+        }
+
+    return load
 
 
 class Settings(BaseSettings):
-    app_env: str = "development"
+    app_env: str = selected_worker_environment()[0]
     runtime_platform: str = "cloud_run_compatible"
     worker_mode: WorkerMode = "skeleton"
     media_pipeline_mode: MediaPipelineMode = "youtube_direct"
@@ -69,7 +109,7 @@ class Settings(BaseSettings):
     )
     gemini_max_retries: int = 1
     gemini_retry_base_seconds: float = 2.0
-    gemini_max_calls_per_job: int = worker_config_value("gemini_max_calls_per_job", 2)
+    gemini_max_calls_per_job: int = worker_config_value("gemini_max_calls_per_job", 3)
     gemini_daily_dev_call_limit: int = 5
     gemini_video_observation_timeout_seconds: int = 120
     gemini_text_normalization_timeout_seconds: int = 60
@@ -84,6 +124,9 @@ class Settings(BaseSettings):
     )
     gemini_file_upload_timeout_seconds: int = worker_config_value(
         "gemini_file_upload_timeout_seconds", 120
+    )
+    gemini_file_max_size_bytes: int = worker_config_value(
+        "gemini_file_max_size_bytes", 2_000_000_000
     )
     gemini_file_poll_interval_seconds: int = worker_config_value(
         "gemini_file_poll_interval_seconds", 5
@@ -169,11 +212,23 @@ class Settings(BaseSettings):
         default_factory=dict
     )
     gemini_dev_budget_reset_at: Optional[str] = None
-    max_video_duration_seconds: int = Field(
-        default=worker_config_value("max_video_duration_seconds", 90),
-        validation_alias=AliasChoices("MAX_VIDEO_DURATION_SECONDS", "MAX_VIDEO_SECONDS"),
+    max_source_video_duration_seconds: int = Field(
+        default=worker_config_value("max_source_video_duration_seconds", 180),
+        validation_alias=AliasChoices(
+            "MAX_SOURCE_VIDEO_DURATION_SECONDS",
+            "MAX_VIDEO_DURATION_SECONDS",
+            "MAX_VIDEO_SECONDS",
+        ),
+        ge=60,
+        le=900,
     )
-    max_video_size_mb: int = worker_config_value("max_video_size_mb", 30)
+    preferred_video_size_mb: int = worker_config_value(
+        "preferred_video_size_mb", 36
+    )
+    max_video_size_mb: int = worker_config_value("max_video_size_mb", 50)
+    media_adaptive_max_attempts: int = worker_config_value(
+        "media_adaptive_max_attempts", 4
+    )
     enable_social_video: bool = False
     enable_yt_dlp: bool = False
     cookie_dir: str = "/app/cookies"
@@ -212,7 +267,61 @@ class Settings(BaseSettings):
     ytdlp_enable_impersonation: bool = False
     enable_ytdlp_stdout_fallback: bool = False
     max_memory_buffer_mb: int = 35
-    max_video_height: int = 720
+    max_video_height: int = worker_config_value("max_video_height", 720)
+    min_video_height: int = worker_config_value("min_video_height", 360)
+    media_resolver_mode: MediaResolverMode = worker_config_value(
+        "media_resolver_mode", "legacy"
+    )
+    external_media_resolver_audience: ExternalMediaResolverAudience = (
+        worker_config_value("external_media_resolver_audience", "disabled")
+    )
+    instagram_resolver_chain: Annotated[list[str], NoDecode] = Field(
+        default_factory=list
+    )
+    tiktok_resolver_chain: Annotated[list[str], NoDecode] = Field(
+        default_factory=list
+    )
+    cookie_media_fallback_enabled: bool = worker_config_value(
+        "cookie_media_fallback_enabled", False
+    )
+    youtube_direct_gemini_enabled: bool = worker_config_value(
+        "youtube_direct_gemini_enabled", True
+    )
+    external_provider_timeout_seconds: int = worker_config_value(
+        "external_provider_timeout_seconds", 15
+    )
+    external_provider_response_max_bytes: int = worker_config_value(
+        "external_provider_response_max_bytes", 2 * 1024 * 1024
+    )
+    external_media_download_connect_timeout_seconds: int = worker_config_value(
+        "external_media_download_connect_timeout_seconds", 10
+    )
+    external_media_download_read_timeout_seconds: int = worker_config_value(
+        "external_media_download_read_timeout_seconds", 30
+    )
+    external_media_download_total_timeout_seconds: int = worker_config_value(
+        "external_media_download_total_timeout_seconds", 120
+    )
+    external_media_max_redirects: int = worker_config_value(
+        "external_media_max_redirects", 2
+    )
+    instagram_rapidapi_key: Optional[SecretStr] = None
+    instagram_rapidapi_host: str = worker_config_value(
+        "instagram_rapidapi_host", ""
+    )
+    instagram_rapidapi_base_url: str = worker_config_value(
+        "instagram_rapidapi_base_url", ""
+    )
+    tiktok_akng_access_token: Optional[SecretStr] = None
+    tiktok_akng_base_url: str = worker_config_value(
+        "tiktok_akng_base_url", ""
+    )
+    instagram_media_host_suffixes: Annotated[list[str], NoDecode] = Field(
+        default_factory=list
+    )
+    tiktok_media_host_suffixes: Annotated[list[str], NoDecode] = Field(
+        default_factory=list
+    )
     thumbnail_bucket: str = worker_config_value("thumbnail_bucket", "recipe-thumbnails")
     use_source_thumbnail_first: bool = True
     store_raw_media: bool = False
@@ -228,7 +337,29 @@ class Settings(BaseSettings):
     queue_poll_interval_seconds: int = worker_config_value(
         "queue_poll_interval_seconds", 5
     )
-    queue_empty_sleep_seconds: int = worker_config_value("queue_empty_sleep_seconds", 5)
+    queue_empty_sleep_seconds: int = Field(
+        default=worker_config_value("queue_empty_sleep_seconds", 5),
+        ge=1,
+        le=60,
+    )
+    queue_stale_after_seconds: int = Field(
+        default=worker_config_value("queue_stale_after_seconds", 600),
+        ge=60,
+        le=86_400,
+    )
+    queue_stale_max_recovery_attempts: int = Field(
+        default=worker_config_value("queue_stale_max_recovery_attempts", 2),
+        ge=1,
+        le=10,
+    )
+    queue_stale_scan_interval_seconds: int = Field(
+        default=worker_config_value("queue_stale_scan_interval_seconds", 60),
+        ge=5,
+        le=3_600,
+    )
+    # Deprecated compatibility input. Sequential is the only supported value;
+    # remove this field after the development soak confirms no stale override.
+    worker_pipeline_mode: Literal["sequential"] = "sequential"
     enable_unified_ytdlp_stream_extractor: bool = worker_config_value(
         "enable_unified_ytdlp_stream_extractor", False
     )
@@ -271,7 +402,25 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        populate_by_name=True,
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        return (
+            init_settings,
+            _without_blank_values(env_settings),
+            _without_blank_values(dotenv_settings),
+            worker_settings_file_source,
+            file_secret_settings,
+        )
 
     @property
     def effective_gemini_video_model(self) -> str:
@@ -290,12 +439,39 @@ class Settings(BaseSettings):
         return self.gemini_api_key is not None
 
     @property
+    def preferred_video_size_bytes(self) -> int:
+        return self.preferred_video_size_mb * 1024 * 1024
+
+    @property
+    def max_video_size_bytes(self) -> int:
+        return self.max_video_size_mb * 1024 * 1024
+
+    @property
+    def max_video_duration_seconds(self) -> int:
+        """Deprecated read-only alias for older integrations and diagnostics."""
+        return self.max_source_video_duration_seconds
+
+    @property
     def tikwm_configured(self) -> bool:
         return self.enable_tikwm_resolver and bool(self.tikwm_api_url.strip())
 
     @property
     def cobalt_configured(self) -> bool:
         return self.enable_cobalt_resolver and bool((self.cobalt_api_url or "").strip())
+
+    @property
+    def external_resolver_enabled(self) -> bool:
+        return (
+            self.media_resolver_mode in {"external", "hybrid"}
+            and self.external_media_resolver_audience != "disabled"
+        )
+
+    @property
+    def legacy_cookie_media_enabled(self) -> bool:
+        return (
+            self.media_resolver_mode in {"legacy", "hybrid"}
+            and self.cookie_media_fallback_enabled
+        )
 
     @field_validator("gemini_video_fallback_models", mode="before")
     @classmethod
@@ -304,7 +480,15 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
-    @field_validator("tikwm_enabled_platforms", "cobalt_enabled_platforms", mode="before")
+    @field_validator(
+        "tikwm_enabled_platforms",
+        "cobalt_enabled_platforms",
+        "instagram_resolver_chain",
+        "tiktok_resolver_chain",
+        "instagram_media_host_suffixes",
+        "tiktok_media_host_suffixes",
+        mode="before",
+    )
     @classmethod
     def parse_platform_list(cls, value: object) -> object:
         if isinstance(value, str):
@@ -314,6 +498,42 @@ class Settings(BaseSettings):
                 if item.strip()
             ]
         return value
+
+    @field_validator("instagram_resolver_chain", "tiktok_resolver_chain")
+    @classmethod
+    def validate_resolver_chain(
+        cls,
+        value: list[str],
+        info: ValidationInfo,
+    ) -> list[str]:
+        normalized: list[str] = []
+        for adapter_id in value:
+            item = str(adapter_id).strip().lower()
+            if not item or item in normalized:
+                continue
+            if item == RETIRED_INSTAGRAM_ADAPTER:
+                raise ValueError(
+                    "rapidapi_instagram_reels13 is retired and cannot be enabled"
+                )
+            if item not in REGISTERED_EXTERNAL_MEDIA_ADAPTERS:
+                raise ValueError(
+                    f"{info.field_name} contains unknown adapter identifier: {item}"
+                )
+            normalized.append(item)
+        if len(normalized) > 2:
+            raise ValueError("resolver chain supports at most primary plus one fallback")
+        return normalized
+
+    @field_validator("instagram_media_host_suffixes", "tiktok_media_host_suffixes")
+    @classmethod
+    def validate_media_host_suffixes(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for suffix in value:
+            item = str(suffix).strip().lower().lstrip(".")
+            if not item or "/" in item or ":" in item or item in normalized:
+                continue
+            normalized.append(item)
+        return normalized
 
     @field_validator("gemini_disabled_models", mode="before")
     @classmethod
@@ -333,6 +553,73 @@ class Settings(BaseSettings):
                     limits[model] = max(0, int(limit))
             return limits
         return value
+
+    @model_validator(mode="after")
+    def validate_media_limits(self) -> "Settings":
+        if self.preferred_video_size_mb <= 0:
+            raise ValueError("preferred_video_size_mb must be greater than 0")
+        if self.max_video_size_mb <= 0:
+            raise ValueError("max_video_size_mb must be greater than 0")
+        if self.preferred_video_size_mb > self.max_video_size_mb:
+            raise ValueError(
+                "preferred_video_size_mb must not exceed max_video_size_mb"
+            )
+        if self.max_video_size_bytes > self.gemini_file_max_size_bytes:
+            raise ValueError(
+                "max_video_size_mb must not exceed gemini_file_max_size_bytes"
+            )
+        if not 1 <= self.media_adaptive_max_attempts <= 4:
+            raise ValueError("media_adaptive_max_attempts must be between 1 and 4")
+        if not 360 <= self.min_video_height <= self.max_video_height <= 720:
+            raise ValueError(
+                "video height limits must satisfy 360 <= min <= max <= 720"
+            )
+        if not 5 <= self.external_provider_timeout_seconds <= 60:
+            raise ValueError("external_provider_timeout_seconds must be between 5 and 60")
+        if not 64 * 1024 <= self.external_provider_response_max_bytes <= 4 * 1024 * 1024:
+            raise ValueError("external_provider_response_max_bytes is outside safe bounds")
+        if not 0 <= self.external_media_max_redirects <= 3:
+            raise ValueError("external_media_max_redirects must be between 0 and 3")
+        if not 1 <= self.external_media_download_connect_timeout_seconds <= 30:
+            raise ValueError("external media connect timeout is outside safe bounds")
+        if not 1 <= self.external_media_download_read_timeout_seconds <= 60:
+            raise ValueError("external media read timeout is outside safe bounds")
+        if not 10 <= self.external_media_download_total_timeout_seconds <= self.max_job_runtime_seconds:
+            raise ValueError("external media total timeout exceeds the job budget")
+        if any(
+            adapter != "rapidapi_instagram_unified_v1"
+            for adapter in self.instagram_resolver_chain
+        ):
+            raise ValueError("Instagram resolver chain contains an incompatible adapter")
+        if any(adapter != "akng_tiktok" for adapter in self.tiktok_resolver_chain):
+            raise ValueError("TikTok resolver chain contains an incompatible adapter")
+        return self
+
+    @field_validator("media_resolver_mode", mode="before")
+    @classmethod
+    def validate_media_resolver_mode(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        if normalized not in {"legacy", "external", "hybrid"}:
+            raise ValueError("unknown media resolver mode")
+        return normalized
+
+    @field_validator("worker_pipeline_mode", mode="before")
+    @classmethod
+    def validate_worker_pipeline_mode(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        if normalized != "sequential":
+            raise ValueError(
+                "WORKER_PIPELINE_MODE is retired; only sequential is supported"
+            )
+        return normalized
+
+    @field_validator("external_media_resolver_audience", mode="before")
+    @classmethod
+    def validate_external_media_resolver_audience(cls, value: object) -> object:
+        normalized = str(value).strip().lower()
+        if normalized not in {"disabled", "test_users", "all_authorized_ai"}:
+            raise ValueError("unknown external media resolver audience")
+        return normalized
 
     @field_validator("worker_mode", mode="before")
     @classmethod
@@ -462,3 +749,50 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def validate_external_resolver_runtime_config(settings: Settings) -> None:
+    """Fail startup closed only when external adapters can receive traffic."""
+    if not settings.external_resolver_enabled:
+        return
+    if not settings.instagram_resolver_chain and not settings.tiktok_resolver_chain:
+        report = worker_config_report(settings.app_env)
+        selected_path = report.get("selected_config_display_path", "unknown")
+        raise ValueError(
+            f"{settings.app_env.capitalize()} external resolver configuration is enabled, "
+            f"but no social adapter chain was loaded from {selected_path}. Expected at "
+            "least one of INSTAGRAM_RESOLVER_CHAIN or TIKTOK_RESOLVER_CHAIN."
+        )
+    if "rapidapi_instagram_unified_v1" in settings.instagram_resolver_chain:
+        if settings.instagram_rapidapi_key is None:
+            raise ValueError("active Instagram resolver credentials are missing")
+        if not settings.instagram_rapidapi_host.strip() or not settings.instagram_rapidapi_base_url.strip():
+            raise ValueError("active Instagram resolver host configuration is missing")
+        instagram_base = urlparse(settings.instagram_rapidapi_base_url)
+        if (
+            instagram_base.scheme != "https"
+            or (instagram_base.hostname or "").lower()
+            != settings.instagram_rapidapi_host.strip().lower()
+        ):
+            raise ValueError("active Instagram resolver endpoint must match its HTTPS host")
+        if (
+            "rapidapi_instagram_unified_v1"
+            in settings.instagram_resolver_chain
+            and settings.instagram_rapidapi_host.strip().lower()
+            != INSTAGRAM_UNIFIED_V1_RAPIDAPI_HOST
+        ):
+            raise ValueError(
+                "active Instagram Unified v1 resolver host is not approved"
+            )
+        if not settings.instagram_media_host_suffixes:
+            raise ValueError("active Instagram media host policy is missing")
+    if "akng_tiktok" in settings.tiktok_resolver_chain:
+        if settings.tiktok_akng_access_token is None:
+            raise ValueError("active TikTok resolver credentials are missing")
+        if not settings.tiktok_akng_base_url.strip():
+            raise ValueError("active TikTok resolver host configuration is missing")
+        tiktok_base = urlparse(settings.tiktok_akng_base_url)
+        if tiktok_base.scheme != "https" or not tiktok_base.hostname:
+            raise ValueError("active TikTok resolver endpoint must use HTTPS")
+        if not settings.tiktok_media_host_suffixes:
+            raise ValueError("active TikTok media host policy is missing")

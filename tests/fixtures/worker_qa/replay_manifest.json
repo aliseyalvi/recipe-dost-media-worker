@@ -1,0 +1,15 @@
+{
+  "cases": [
+    "primary_valid_json",
+    "primary_fenced_json",
+    "primary_malformed_repaired",
+    "primary_empty_response",
+    "primary_safety_block",
+    "primary_client_error",
+    "fallback_configuration_rejection",
+    "call_budget_exhaustion",
+    "private_metadata_failure",
+    "wake_timeout",
+    "media_download_failure"
+  ]
+}

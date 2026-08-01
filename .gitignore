@@ -25,3 +25,4 @@ graphify-out/
 .mcp.json
 
 *.bak
+.worker-qa/

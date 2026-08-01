@@ -8,7 +8,7 @@ These remain in Render env groups and local `env/*.env` files.
 
 | Variable name | Source | Used by file | Required? | Secret? | Current worker path? | Status | Notes |
 |---|---|---|---:|---:|---:|---|---|
-| `APP_ENV` | env | `app/config.py`, `app/runtime_config.py`, `scripts/validate_env.py` | yes | no | yes | keep | Selects `config/worker.<env>.json`; must be `production` in prod. |
+| `APP_ENV` | env | `app/config.py`, `app/runtime_config.py`, `scripts/validate_env.py` | optional on Render | no | yes | keep if already present | Selects `config/worker.<env>.json`; when absent, Render branch metadata selects `develop` -> development and `main` -> production. If present, it must agree with the branch. |
 | `LOG_LEVEL` | env/config | `scripts/validate_env.py`, `config/worker.*.json` | yes | no | deploy convention | keep | Kept in env as environment identity; mirrored in config docs only. |
 | `SUPABASE_URL` | env | `app/config.py`, `app/supabase_client.py` | yes | no | yes | keep | Environment-specific Supabase URL. |
 | `SUPABASE_SERVICE_ROLE_KEY` | env | `app/config.py`, `app/supabase_client.py` | yes | yes | yes | keep | Server-only key; never reuse across dev/prod. |
@@ -21,6 +21,11 @@ These remain in Render env groups and local `env/*.env` files.
 | `TIKTOK_COOKIES_B64` | env | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | yes | optional | keep if needed | Cookie/private auth value; never commit. |
 | `SENTRY_DSN` | env | `app/observability/sentry.py` | production monitoring | yes | active queue observability | keep | Unset disables Sentry; never print or commit a real value. |
 | `SENTRY_DEV_TEST` | env | `app/observability/sentry.py`, `scripts/validate_env.py` | no | no | controlled verification only | keep false normally | May be `true` only for the one development verification command; production validation requires false. |
+| `INSTAGRAM_RAPIDAPI_KEY` | env | `app/config.py`, `app/media_resolvers/registry.py` | active development Instagram adapter | yes | external AI resolver | keep server-only | Required only when `rapidapi_instagram_reels13` can receive traffic. |
+| `TIKTOK_AKNG_ACCESS_TOKEN` | env | `app/config.py`, `app/media_resolvers/registry.py` | active development TikTok adapter | yes | external AI resolver | keep server-only | Required only when `akng_tiktok` can receive traffic. |
+
+The resolver mode, audience, both adapter chains, cookie fallback, and YouTube
+direct flag are config-only policy. Do not duplicate them in Render.
 
 ## Config Variables
 
@@ -39,12 +44,13 @@ These moved to committed JSON config. Existing Render env values with the same n
 | `ENABLE_YTDLP_COOKIES` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | optional | moved | Default false. |
 | `GEMINI_EXTRACTION_MODE` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default `single_pass_structured`. |
 | `GEMINI_FALLBACK_MODEL` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default `gemini-2.5-flash`. |
+| `GEMINI_FILE_MAX_SIZE_BYTES` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | provider guard | moved | Default 2,000,000,000 bytes; worker hard limit cannot exceed it. |
 | `GEMINI_FILE_MAX_WAIT_SECONDS` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default 120. |
 | `GEMINI_FILE_POLL_INTERVAL_SECONDS` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default 5. |
 | `GEMINI_FILE_UPLOAD_TIMEOUT_SECONDS` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default 120. |
 | `GEMINI_JSON_FALLBACK_ENABLED` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | legacy two-step | moved | Default true. |
 | `GEMINI_JSON_RETRY_ENABLED` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | legacy two-step | moved | Default true. |
-| `GEMINI_MAX_CALLS_PER_JOB` | config/default/env override | `app/config.py`, `app/main.py` | no | no | quota guard | moved | Default 2; quota logic unchanged. |
+| `GEMINI_MAX_CALLS_PER_JOB` | config/default/env override | `app/config.py`, `app/main.py` | no | no | quota guard | moved | Default 3: primary, text-only repair, bounded compatible-model fallback; entitlement quota unchanged. |
 | `GEMINI_MAX_OUTPUT_TOKENS` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default 12000. |
 | `GEMINI_PRIMARY_MODEL` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default `gemini-3.1-flash-lite`. |
 | `GEMINI_RECIPE_REPAIR_MAX_RETRIES` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default 1. |
@@ -58,15 +64,23 @@ These moved to committed JSON config. Existing Render env values with the same n
 | `GEMINI_VIDEO_INPUT_MODE` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | yes | moved | Default `file_api`. |
 | `GEMINI_VIDEO_MODEL` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | optional | moved | Default null; effective model falls back to primary. |
 | `LOCAL_BRIEF_PARSER_ENABLED` | config/default/env override | `app/config.py`, `app/main.py`, `app/queue_worker.py` | no | no | fallback | moved | Default false. |
-| `MAX_VIDEO_DURATION_SECONDS` | config/default/env override | `app/config.py`, multiple worker paths | no | no | yes | moved | Default 120; validator enforces `<= 120`. |
-| `MAX_VIDEO_SECONDS` | env override alias | `app/config.py`, legacy env | no | no | yes | legacy alias | Still accepted as alias for `MAX_VIDEO_DURATION_SECONDS`; do not use in new env files. |
-| `MAX_VIDEO_SIZE_MB` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | yes | moved | Default 30. |
+| `MAX_SOURCE_VIDEO_DURATION_SECONDS` | config/default/env override | `app/config.py`, multiple worker paths | no | no | yes | canonical | Default 180; validator enforces 60–900. Development and production inherit the shared default. |
+| `MAX_VIDEO_HEIGHT` | config/default/env override | `app/config.py`, `app/social/stream_download.py` | no | no | yes | moved | Default 720 short-edge pixels. |
+| `MAX_VIDEO_DURATION_SECONDS` | env override alias | `app/config.py`, legacy env | no | no | yes | legacy alias | Still accepted for compatibility; do not use in JSON or new env files. |
+| `MAX_VIDEO_SECONDS` | env override alias | `app/config.py`, legacy env | no | no | yes | legacy alias | Still accepted for compatibility; do not use in new env files. |
+| `MAX_VIDEO_SIZE_MB` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | yes | moved | Hard default 50 MiB; historical name says MB but conversion is binary MiB. |
+| `MEDIA_ADAPTIVE_MAX_ATTEMPTS` | config/default/env override | `app/config.py`, `app/social/stream_download.py` | no | no | yes | moved | Default and maximum 4 bounded format attempts. |
 | `MEDIA_EXTRACT_OUTPUT_MODE` | config/default/env override | `app/config.py`, `app/social/stream_download.py` | no | no | yes | moved | Default `temp_file`. |
+| `MIN_VIDEO_HEIGHT` | config/default/env override | `app/config.py`, `app/social/stream_download.py` | no | no | yes | moved | Default 360 short-edge pixels. |
 | `MOCK_ANALYSIS_DELAY_MS` | config/default/env override | `app/config.py`, `app/job_runner.py` | no | no | mock/dev | moved | Default 500. |
 | `MOCK_RECIPE_FIXTURE_PATH` | config/default/env override | `app/config.py`, `app/job_runner.py` | no | no | mock/dev | moved | Default `app/fixtures/mock_recipe_card.json`. |
 | `MOCK_VIDEO_PROCESSING_MODE` | config/default/env override | `app/config.py`, `app/job_runner.py`, `app/main.py` | no | no | mock/dev | moved | Default `skip_video_download`. |
-| `QUEUE_EMPTY_SLEEP_SECONDS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default 5. |
+| `QUEUE_EMPTY_SLEEP_SECONDS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Shared JSON default 5; validated 1-60. Render override is optional. |
 | `QUEUE_POLL_INTERVAL_SECONDS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default 5. |
+| `QUEUE_STALE_AFTER_SECONDS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Shared JSON default 600; validated 60-86400. Render override is optional. |
+| `QUEUE_STALE_MAX_RECOVERY_ATTEMPTS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Shared JSON default 2; validated 1-10. Render override is optional. |
+| `QUEUE_STALE_SCAN_INTERVAL_SECONDS` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Shared JSON default 60; validated 5-3600. Render override is optional. |
+| `PREFERRED_VIDEO_SIZE_MB` | config/default/env override | `app/config.py`, `app/main.py`, `app/social/stream_download.py` | no | no | yes | moved | Soft default 36 MiB; historical name says MB but conversion is binary MiB. |
 | `REAL_AI_FALLBACK_TO_MOCK` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | fallback | moved | Default false; production config must keep false. |
 | `RECIPE_BILINGUAL_OUTPUT_ENABLED` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default true. |
 | `RECIPE_CARD_NORMALIZATION_ENABLED` | config/default/env override | `app/config.py`, `app/queue_worker.py` | no | no | yes | moved | Default true. |

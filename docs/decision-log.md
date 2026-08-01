@@ -1,12 +1,418 @@
 # Decision Log
 
+## 2026-07-30 — M23.W10C explicit duration semantics
+
+- `MAX_SOURCE_VIDEO_DURATION_SECONDS=180` is the canonical shared JSON
+  default. Development and production inherit it, nonblank environment values
+  remain compatibility overrides, Pydantic enforces 60–900, and health reports
+  the effective safe value.
+- Source-video duration remains worker/resolver/ffprobe metadata and persists
+  through `media_jobs.media_duration_seconds`. Recipe prep/cook/total comes
+  only from structured recipe data. Explicit total wins; otherwise both prep
+  and cook are required before deriving a total.
+- The companion app migration synchronizes explicit `recipe_items` duration
+  fields. Legacy `duration_seconds` is recipe-total seconds only and is never
+  populated from source-video duration.
+- `video_duration_exceeded` keeps its stable code and now carries bounded
+  actual/max/source/retryable metadata. W10B retry accepts an existing failure
+  only when locked server state or a server-written duration event proves a
+  source duration from 1 through 180 seconds.
+- Queue sequencing, wake behavior, stale recovery, quota behavior, Gemini
+  invocation/budget/accounting, provider routing, media limits other than source
+  duration, and frontend UI are unchanged.
+
+## 2026-07-29 — M23.W10B retry queue compatibility
+
+- The authenticated retry transition lives only in the canonical app/Supabase
+  repository as `public.retry_media_job(p_job_id uuid)`. It reuses the same
+  job ID and canonical `queued` state, so the existing W10A periodic FIFO claim
+  discovers it without `/wake`.
+- Worker production code is unchanged. Atomic claim, sequential drain, stale
+  recovery, direct Gemini invocation, `GeminiProviderCallBudget`, provider
+  accounting, resolver/media behavior, recipe-card reuse, and terminal quota
+  finalization retain their W10A behavior.
+- Focused worker coverage proves a retried queued row is drained without wake,
+  FIFO remains serial, an existing recipe card is reused, and terminal success
+  is committed once. Full validation passed compileall, 268 tests, pip check,
+  the 11-case offline replay, the seven-case mixed FIFO batch, secret-pattern
+  review, and diff checks. No live Supabase, Gemini, provider, Sentry, Render,
+  deployment, frontend, schema application, or media operation was performed.
+
+## 2026-07-29 — M23.W10A-CFG queue-liveness configuration alignment
+
+- The four W10A queue-liveness values now use the established worker config
+  architecture: shared defaults in `config/worker.defaults.json`, sparse
+  development/production overlays, optional nonblank environment overrides,
+  and bounds enforced by Pydantic `Settings`.
+- `queue_worker.py` receives the resolved values from `Settings`; it no longer
+  independently reads process environment variables. `/health.safe_config`
+  continues to report the four effective safe numeric values.
+- Render does not require these variables when the committed defaults are
+  suitable. Secrets remain environment-only. Queue algorithms, the companion
+  Supabase migration, Gemini/provider/media paths, quota behavior, dependencies,
+  and frontend code are unchanged.
+- Offline validation passed 50 focused config/queue/startup tests, 63 unchanged
+  Gemini/provider/resolver tests, 264 full tests, both runtime-config checks,
+  the 11-case replay, and the seven-case FIFO mixed batch.
+
+## 2026-07-29 — M23.W10A sequential queue liveness
+
+- The active FastAPI queue path retains `/wake` calls in one `asyncio.Event`,
+  owns one queue task and drain lock, drains FIFO jobs until none remain, and
+  uses the existing five-second empty-queue interval as its bounded safety
+  poll. A wake never runs a job inline or creates a second processor.
+- `claim_oldest_media_job()` now atomically claims `queued` rows using
+  `created_at ASC, id ASC` plus `FOR UPDATE SKIP LOCKED`. Minimal
+  `worker_claimed_at`, `worker_heartbeat_at`, and
+  `processing_attempt_count` fields support a 600-second stale threshold,
+  60-second scan, and two recovery attempts. Recovery and its queue/quota
+  events are transactional; source URL and valid metadata are preserved. The
+  canonical companion migration is
+  `../recipe-dost/supabase/migrations/202607290001_m23_w10a_queue_liveness.sql`.
+- Periodic and stage-boundary heartbeats are best-effort and non-fatal.
+  Terminal lease cleanup is also best-effort. Existing recipe cards for the
+  same recipe/user are reused after recovery, preventing a crash between card
+  insert and job finalization from creating a duplicate.
+- Offline validation passed: 36 focused queue/startup tests, 113 focused
+  queue/finalization/Gemini/resolver tests, 263 full tests, the 11-case replay,
+  and the seven-case mixed sequential batch. Both batches were FIFO,
+  single-active-job, terminal, unstarved, fully cleaned, and ended with zero
+  active reservations. No live service was called.
+- The recovered direct Gemini invocation, `GeminiProviderCallBudget`, provider
+  attempt accounting, production prompt/schema/model/thinking configuration,
+  resolver/media behavior, dependencies, quota semantics, and mobile behavior
+  are unchanged.
+
+## 2026-07-29 — M23.GD9 temporary Gemini diagnostic removed
+
+- The protected GD6/GD7 Gemini request-ladder route, its enable flag, endpoint
+  models, implementation, and endpoint-only tests were removed after GD8Q2
+  passed live YouTube, Instagram, and TikTok acceptance.
+- The recovered direct queued Gemini invocation, local call budget,
+  non-blocking telemetry, provider-attempt accounting, request construction,
+  fallback behavior, and safe provider-error classification remain unchanged.
+
+## 2026-07-29 — M23.GD8Q2 direct queued Gemini invocation
+
+- Structured extraction now enforces its existing per-job call maximum with
+  local attempt state immediately before each SDK invocation. Gemini events,
+  context metadata, safe-error metadata, and their persistence are best-effort
+  observability and cannot suppress a valid provider request or trigger model
+  fallback.
+- The protected request ladder uses the same authoritative provider-call path
+  without clearing queue context. Production models, prompts, schema, thinking,
+  token limits, parsing, quota finalization, and queue sequencing are unchanged.
+
+## 2026-07-29 — M23.GD7B minimal Gemini diagnostic schema
+
+- The protected tiny-schema diagnostic now uses an ordinary one-field Pydantic
+  response model so the Gemini Developer API `responseSchema` contains only the
+  required object/boolean shape and omits unsupported `additionalProperties`.
+  Endpoint request strictness and every production Gemini path remain unchanged.
+
+## 2026-07-29 — M23.GD6 protected Gemini request ladder
+
+- Development may temporarily enable one shared-secret-protected diagnostic
+  route that performs exactly one Gemini call at a selected plain-text, tiny
+  schema, production recipe-schema text, or production-shaped YouTube level.
+  It has no queue, quota, Supabase, resolver, Sentry, fallback, retry, repair,
+  persistence, or response-content path.
+- Existing Gemini call-failure events retain their names and coarse production
+  classification while gaining bounded structured SDK status/category fields.
+  Exception text, provider bodies, prompts, schemas, URLs, keys, identifiers,
+  and paths remain excluded. Production request and terminal behavior are
+  unchanged.
+
+## 2026-07-29 — M23.GD3A verified Gemini runtime pins
+
+- Render and Docker now install the owner-verified `google-genai`, Pydantic,
+  and pydantic-core versions exactly from the shared root requirements file.
+- Safe health/startup diagnostics report only those package versions,
+  pydantic-settings, Python, and the sequential worker processing category.
+  Gemini requests, schemas, models, queue behavior, and secrets are unchanged.
+
+## 2026-07-29 — M23.W9D2 neutral sequential resource controls
+
+- Active FFmpeg and Gemini-upload guards now have one authoritative
+  `threading.BoundedSemaphore(1)` state in `app.worker_runtime.resources`.
+  Queue, media processing, stream download, and thumbnail code import the
+  neutral module directly with unchanged context-manager semantics.
+- `app.pipeline.resources` retains W7 admission, capacity, telemetry-bucket,
+  and system-resource logic. It re-exports the active guards by identity and
+  delegates retired W7 compatibility hooks to the same underlying state.
+
+## 2026-07-29 — M23.W9D1 neutral startup cleanup
+
+- Sequential FastAPI startup now imports stale-media cleanup from
+  `app.worker_runtime.cleanup`; its root, age threshold, directory matching,
+  symlink safety, exception behavior, logging context, return value, and startup
+  ordering are unchanged.
+- `app.pipeline.recovery` keeps its W7-oriented capability symbols and
+  temporarily re-exports the same cleanup function for compatibility. The
+  active neutral module has no reverse dependency on the mixed pipeline module.
+
+## 2026-07-29 — M23.W9B sequential execution exclusivity
+
+- FastAPI startup and `/wake` now have one queue architecture:
+  `run_queue_loop()` only. The active app no longer imports or selects the W7
+  runtime.
+- `WORKER_PIPELINE_MODE` is a temporary deprecated compatibility input.
+  Absence or `sequential` is accepted; `staged` and unsupported values fail
+  settings validation before queue-task creation.
+- W7 transport, stage concurrency, queue-size, and admission settings were
+  removed from active settings, committed defaults, health, and safe config.
+  Shared sequential semaphores and stale-media cleanup remain unchanged.
+- Docker retains `app.workers.combined_worker` as a compatibility-named uvicorn
+  façade. Dormant W7 files remain for a later deletion patch; future
+  concurrency requires durable leases, fencing, and idempotency.
+
+## 2026-07-28 — M23.W8A-W8D Instagram Unified v1 adapter
+
+- Development Instagram routing now contains only
+  `rapidapi_instagram_unified_v1`. The Reels13 implementation remains present
+  but is false-gated by `INSTAGRAM_REELS13_ENABLED` and is not a fallback.
+- Unified v1 accepts only a boolean success contract and supported video
+  objects. Missing/null/unsafe media URLs and malformed contract types fail as
+  `provider_contract_invalid`; photo and sidecar retain exact safe
+  `unsupported_media` messages.
+- Video, optional separate audio, title, and thumbnail are normalized into the
+  existing provider-neutral contract. Unknown declarations remain
+  probe-required; the shared secure download, ffprobe, conditional mux, final
+  validation, and cleanup path is unchanged.
+- Instagram media URLs are limited to the existing `fbcdn.net` and
+  `cdninstagram.com` categories. Signed URLs remain in-memory candidates only,
+  and provider bodies, URLs, credentials, titles, shortcodes, creator data, and
+  temp paths are absent from telemetry.
+- Production remains external-disabled. No live provider, Gemini, Supabase,
+  Sentry, Render, schema, queue, quota, TikTok, YouTube, or mobile action was
+  performed.
+
+## 2026-07-27 — M23.W7A-W7C staged combined worker
+
+- One Render service now has sequential compatibility and bounded staged modes;
+  the Docker/Render entry point is `python -m app.workers.combined_worker`.
+- Typed internal contracts omit runtime paths/job snapshots from serialization,
+  and in-process queues are the only enabled transport. Standalone stage
+  commands fail closed because no durable transport is configured.
+- Dispatch checks ingest capacity, RSS, worst-case temp bytes, free temp space,
+  ffmpeg, and upload budgets before conditional claim. All concurrency defaults
+  remain one; analyzer two is offline-tested but not approved for Render.
+- Local media is deleted only after Gemini Files API reports ACTIVE. Signed
+  provider/CDN URLs are not persisted even in private metadata.
+- The existing schema has no lease owner/expiry, heartbeat, attempt fence,
+  durable stage, or result idempotency key. Unsafe `started_at` reclaim was not
+  added and no migration was created; true crash recovery/separate services
+  remain approval-blocked.
+- Quota terminal events remain idempotent. Probe, thumbnail, and quota snapshot
+  telemetry now state the lifecycle fact they actually represent.
+
+## 2026-07-26 — M23.W6A-W6C deterministic worker reliability
+
+- The active strategy is one single-pass video structured-output call, followed
+  by at most one text-only repair and, only when recoverable, one model fallback
+  that reuses the active Gemini file. `GEMINI_MAX_CALLS_PER_JOB=3` changes the
+  provider recovery budget, not user entitlement or usage limits.
+- `gemini-3.1-flash-lite` uses JSON MIME, JSON Schema, and
+  `thinking_level=high`. `gemini-2.5-flash` uses its own schema field and omits
+  the Gemini-3 thinking-level option. Configuration is validated before quota
+  accounting or provider invocation.
+- Fallback telemetry is emitted only after budget/configuration preflight. A
+  two-call primary+repair sequence skips fallback with
+  `gemini_call_budget_exhausted` and records no provider request.
+- Quota remains status-derived in the Edge access code: active statuses reserve,
+  failed/cancelled release, and only completed jobs with a result card and AI
+  provider count as success. Worker events audit this idempotently; there is no
+  reservation row or quota RPC.
+- `media_job_private_metadata.raw_metadata` is non-null JSONB. External jobs
+  supplied `None`, explaining `APIError`/Postgres `23502`; missing metadata now
+  writes `{}`. Service-role/RLS and types match, so no migration is needed.
+- Offline replay/batch QA uses production pipeline functions and writes only a
+  gitignored sanitized report.
+
+## 2026-07-23 — M23.W3I-IG2 Instagram split-AV compatibility repair
+
+- The incident-compatible normalized candidates are one 1080x1920 video and
+  one audio entry. The video has no declared codec, declares `mp4` through the
+  provider extension, has no MIME/size, and has one URL. The audio declares
+  `m4a`, has no codec/MIME/size/dimensions, and has one URL.
+- The exact pre-download rejection was the shared
+  `short_edge > max_short_edge` predicate: 1080 exceeded the 720 TikTok policy.
+  Missing codec was already accepted; missing container was not. The terminal
+  H.264/MP4 message therefore misclassified a resolution-policy rejection.
+- Instagram now has three declared states: `compatible_declared`,
+  `incompatible_declared`, and `probe_required`. Explicit H.265/non-MP4 is
+  rejected; absent/unknown declarations continue to the existing guarded
+  downloader and ffprobe. MIME and URL suffix are not compatibility truth.
+- Instagram video selection no longer inherits TikTok's 720 hard gate. Declared
+  compatible video ranks before probe-required video, candidates remain role
+  separated, provider order breaks metadata ties, and URL alternatives are
+  bounded by the existing downloader.
+- ffprobe now proves H.264 plus an MP4-family container before acceptance.
+  Embedded audio skips separate audio and mux. Missing audio selects only an
+  audio-role candidate, probes it, and muxes with argv-only ffmpeg. The first
+  attempt is stream copy; the bounded fallback copies video and re-encodes
+  audio to AAC only. Video transcoding was removed.
+- `instagram_candidate_normalization_summary` emits only allowlisted counts.
+  `scripts/check_instagram_media_candidate.py` is an opt-in, develop-only,
+  hidden-input owner gate using the shared worker path without Supabase, Gemini,
+  or Sentry. Codex did not run it; the live candidate's actual codec remains
+  unproven.
+- Direct external-URL Gemini input is deferred from this repair. The current
+  worker must first download and probe to enforce its DNS/redirect/content/
+  signature/byte/codec/audio policy. A future opt-in experiment may compare a
+  post-verification external URL handoff against Files API upload without
+  weakening those controls or persisting signed URLs.
+
+## 2026-07-22 — M23.W3D-TK3B3 Python/curl parity and live media gate
+
+- TK1 was insufficient; TK2 proved `normalize_akng_input()` left `vt`/`vm`
+  inputs unresolved and the adapter sent that short URL directly to AKNG.
+- Normal processing now expands TikTok redirects under HTTPS-only, exact-host,
+  public-DNS/peer-IP, no-proxy, no-cookie, timeout, redirect-count, and bounded
+  HTML guards. An unresolved short URL never reaches AKNG.
+- The owner proved curl short-link expansion and then proved AKNG numeric-ID
+  input on the same machine. Numeric ID is therefore the primary provider input.
+  A canonical full URL is attempted once only when it is available and numeric
+  input returns an empty success wrapper or explicit input rejection. Both empty maps to
+  `media_unavailable`; malformed nested types after `itemInfo` map to
+  `resolver_contract_error`.
+- Live reproduction proved Requests/urllib3 released the zero-length 3xx
+  connection before peer inspection, so `connected_peer_ip()` returned `None`.
+  Short-link GETs now use a TLS connection pinned to one prevalidated public DNS
+  answer while retaining TikTok hostname/SNI certificate validation, exact-host
+  redirects, and bounded response handling.
+- AKNG's media proxy ignores Range, omits Content-Length, and uses variable-speed
+  chunked streams. The 6.7 MB H.264 candidate did not complete within budget;
+  the 4.7 MB H.264 candidate completed, had a valid MP4 signature, and ffprobe
+  proved embedded video and audio. TikTok therefore prefers the smallest
+  compatible H.264 candidate and throughput-probes its bounded URL alternatives.
+- `scripts/check_tiktok_akng_end_to_end.py` is the pre-Render gate and shares the
+  worker resolver/download/probe/mux path. It requires an explicit input kind,
+  is development-only, opt-in, hidden-input, and secret/URL/body safe. Offline
+  tests pass. Both numeric-ID and short-link modes exited zero against the
+  development provider and completed signature, ffprobe A/V, and cleanup. No
+  Gemini, Supabase, Sentry, Render, or deployment operation occurred.
+
+## 2026-07-22 — M23.W3D-TK1/TK2 superseded approach
+
+- TK1 normalized expanded TikTok links to numeric IDs but left `vt`/`vm` links
+  unresolved. TK2's live failure disproved that approach; TK3 above supersedes
+  it with safe expansion and a bounded alternate input.
+- `INPUT_NOT_VALID` is terminal `media_unavailable`. A malformed 2xx provider
+  schema is technical `resolver_contract_error`, not a configuration error, and
+  retains the 2xx status plus actual attempt count.
+- Candidate eligibility uses structured provider metadata, never a URL suffix.
+  H.264 MP4 stays the compatibility gate; downloaded bytes remain
+  SSRF/redirect/byte/signature/ffprobe guarded, with audio muxed only when the
+  video probe proves it absent.
+- Optional TikTok context is bounded, sanitized, memory-only, marked untrusted
+  in the Gemini instruction, and observed only through counts/buckets. No live
+  provider call, deploy, Render mutation, mobile/schema change, or main merge
+  was performed by Codex.
+
+## 2026-07-21 — M23.W3C-R file-based resolver configuration
+
+- Root cause was a partial Settings source: scalar resolver fields read JSON in
+  their defaults, while chains and CDN suffix lists used empty factories. The
+  merged JSON object is now a Pydantic source, so every matching field loads.
+- Canonical file chains are JSON arrays; non-blank env overrides may remain
+  comma-separated, while blank overrides are ignored. Unknown keys/types and
+  adapter IDs fail closed.
+- On Render, `develop` selects development and `main` selects production through
+  existing branch metadata. `APP_ENV` is optional there and must agree when set.
+  Production remains external-disabled and requires no provider credentials.
+- Local tests use Python 3.12 and root `requirements.txt`. No provider call,
+  deployment, Render mutation, mobile/schema change, or main merge occurred.
+
+## 2026-07-21 — M23.W3C external resolver implementation
+
+- The active queue now receives only provider-neutral resolutions. Instagram
+  uses `rapidapi_instagram_reels13`; TikTok uses structured AKNG `bitrateInfo`
+  through `akng_tiktok`; YouTube remains direct to Gemini.
+- Development config enables external routing for all jobs that already passed
+  server access. Production remains external-disabled. No flag grants access:
+  the worker requires the server-written AI-access event before provider work.
+- H.264 MP4 within 36 MiB and at most 720p is preferred; the hard final/download
+  limit is 50 MiB and duration remains 120 seconds. Video is probed and separate
+  audio is muxed only when needed. Explicit H.265/DASH remains unsupported.
+- External URL handling is HTTPS/host-policy/SSRF/redirect/byte/signature/probe
+  guarded. Direct URLs never enter events/tables. Cookie metadata is removed;
+  cookie media requires both a legacy/hybrid strategy and its independent flag.
+- Queue claim is conditional, paid adapter attempts are ledgered/bounded, the
+  circuit breaker is local, and every active Gemini call now uses the existing
+  repository-backed call ceiling. No live provider/deployment/mobile/schema or
+  `main` action occurred.
+
+## 2026-07-21 — M23.W3A external media resolver architecture
+
+- Saved-link metadata and AI generation are separate pipelines: metadata is
+  public/no-cookie, download-free, quota-free, bounded, deduplicated, and able
+  to retain the existing minimal Build 3 record.
+- Social AI resolution will use a provider-neutral contract behind disabled,
+  fail-closed flags. Instagram and TikTok use independently testable adapters;
+  YouTube keeps its public URL-to-Gemini route. Cookie yt-dlp is not a default
+  and any temporary emergency fallback requires a separate false-by-default
+  flag.
+- The first production external canary is server-authorized selected test users,
+  followed by Premium and only then `all_ai`, which includes free users' three
+  existing successful generations. Known-failing social routes must reject
+  before job creation instead of consuming an active reservation.
+- Before rollout, the active queue must gain an atomic claim, a shared
+  repository-backed guard before every Gemini call, SSRF-safe bounded media
+  fetching, and one sanitized authoritative Sentry capture after retries are
+  exhausted. This milestone added no integration or runtime behavior.
+
+## 2026-07-16 — M22E.2E observability QA freeze
+
+- Worker Sentry now fails closed unless execution is on Render with the exact
+  deployment branch: production runtime requires production + `main`; the one
+  controlled diagnostic requires development + `develop` + `SENTRY_DEV_TEST=true`.
+- The active queue flow, retry/backoff and job-state semantics, expected product
+  failure exclusions, sanitizer, and legacy-flow exclusion remain unchanged.
+- Focused policy/privacy/reporting/active-boundary tests pass. No deployment,
+  controlled event, provider call, live Supabase call, or legacy instrumentation
+  was performed.
+
 Keep this file terse: only durable architecture decisions, not full task history.
+
+## 2026-07-20 — M23.W2B direct Instagram candidate normalization
+
+- The active queue extractor normalizes `formats`, `requested_formats`/
+  `requested_downloads`, and top-level direct media through one deduplicating
+  layer shared by normal and cookie-authenticated metadata extraction.
+- Missing audio metadata is unknown, not absent. Unknown audio may be downloaded
+  under the 50 MiB guard but must be confirmed after download before Gemini.
+- `ffprobe`/`ffmpeg` support is optional and bounded; neither exists in the
+  supported Docker image, so no dependency or unconditional transcoding was
+  added. Probe-unavailable direct media fails safely and is visible as one beta
+  grouped warning rather than being discarded as zero candidates.
+
+## 2026-07-20 — M23.W2 adaptive media and terminal outcomes
+
+- Active queue social extraction uses a 36 MiB preferred target, a 50 MiB hard
+  downloaded-byte/temp-file limit, and at most four combined audio/video source
+  formats across 720p, 540p, 480p, and 360p. The historical `*_MB` names are
+  binary MiB. Gemini's configured Files limit is 2,000,000,000 bytes and is a
+  startup invariant above the worker hard limit.
+- Portrait quality is measured by short edge, fixing the old `height<=720`
+  selector that excluded 720x1280 and fell through to unrestricted 1080p.
+  Exact format IDs are pinned; partials are removed between attempts.
+- Compression is rejected for this milestone because the Docker runtime does
+  not install ffmpeg and Render Free has 0.1 CPU. Smaller source selection is
+  the supported optimization.
+- Terminal `media_size_exceeded` retains the existing database code/message
+  contract, logs one privacy-safe WARNING, and captures one Sentry warning with
+  a stable fingerprint. Intermediate attempts remain Sentry-silent. Build 3
+  ignores the server message for this unmapped code, so improved app copy needs
+  a future mobile release.
 
 ## Completed Decisions
 
 - YouTube remains the stable direct Gemini path: public URL -> video observation -> recipe normalization -> `recipe_cards`.
 - Gemini free-tier guardrails stay enabled for development: max 2 calls/job, low retry count, repair/fallback chains disabled unless explicitly enabled.
-- Social video uses resolver metadata plus bounded in-memory bytes. Raw video is never written to disk, uploaded to Supabase/Drive, or exposed as a download.
+- Social AI media uses isolated, bounded temporary files that are removed after
+  processing. Raw video is never retained, uploaded to Supabase/Drive, or
+  exposed as a download.
 - yt-dlp is still retained for social metadata/direct stream discovery. Use platform-specific cookies only; Facebook cookies must not be used for TikTok.
 - M14G-4R1 TikTok parser: select direct non-HLS MP4 from `formats[]`, preserve selected `http_headers`, and stream with those headers.
 - M14G-4TWM0 adds TikWM as a protected debug-only probe path. It does not call Gemini, process jobs, save recipe cards, store video, or expose TikWM video URLs.

@@ -27,7 +27,10 @@ def _bool_value(value: Any) -> bool:
 
 
 def _effective_value(config: dict[str, Any], key: str) -> Any:
-    return os.environ.get(key, config.get(key))
+    environment_value = os.environ.get(key)
+    if environment_value is None or not environment_value.strip():
+        return config.get(key)
+    return environment_value
 
 
 def _read_environment_config(environment: str) -> dict[str, Any]:
@@ -62,28 +65,69 @@ def check_runtime_config(environment: str) -> dict[str, object]:
             if actual != expected:
                 errors.append(f"{key} effective value must be {expected}")
 
+        for key in ("ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR",):
+            if not _bool_value(_effective_value(config, key)):
+                errors.append(f"{key} effective value must be true")
+
         for key in (
-            "ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR",
+            "COOKIE_MEDIA_FALLBACK_ENABLED",
             "ENABLE_INSTAGRAM_COOKIES",
             "ENABLE_YTDLP_COOKIES",
         ):
-            if not _bool_value(_effective_value(config, key)):
-                errors.append(f"{key} effective value must be true")
+            if _bool_value(_effective_value(config, key)):
+                errors.append(f"{key} effective value must be false")
+
+        expected_resolver_strings = {
+            "MEDIA_RESOLVER_MODE": "legacy",
+            "EXTERNAL_MEDIA_RESOLVER_AUDIENCE": "disabled",
+        }
+        for key, expected in expected_resolver_strings.items():
+            actual = str(_effective_value(config, key) or "").strip().lower()
+            if actual != expected:
+                errors.append(f"{key} effective value must be {expected}")
+
+        if not _bool_value(_effective_value(config, "YOUTUBE_DIRECT_GEMINI_ENABLED")):
+            errors.append("YOUTUBE_DIRECT_GEMINI_ENABLED effective value must be true")
 
         if _bool_value(_effective_value(config, "ALLOW_RAW_URL_LOGS")):
             errors.append("ALLOW_RAW_URL_LOGS effective value must be false")
 
         try:
-            max_duration = int(_effective_value(config, "MAX_VIDEO_DURATION_SECONDS") or 0)
-        except (TypeError, ValueError):
-            errors.append("MAX_VIDEO_DURATION_SECONDS effective value must be an integer")
-        else:
-            if max_duration > 120:
-                errors.append("MAX_VIDEO_DURATION_SECONDS effective value must be <= 120")
-            if max_duration == 90:
-                errors.append(
-                    "MAX_VIDEO_DURATION_SECONDS effective value still matches fallback 90"
+            max_duration = int(
+                _effective_value(
+                    config,
+                    "MAX_SOURCE_VIDEO_DURATION_SECONDS",
                 )
+                or 0
+            )
+        except (TypeError, ValueError):
+            errors.append(
+                "MAX_SOURCE_VIDEO_DURATION_SECONDS effective value must be an integer"
+            )
+        else:
+            if not 60 <= max_duration <= 900:
+                errors.append(
+                    "MAX_SOURCE_VIDEO_DURATION_SECONDS effective value must be "
+                    "between 60 and 900"
+                )
+
+        try:
+            preferred_size = int(_effective_value(config, "PREFERRED_VIDEO_SIZE_MB") or 0)
+            hard_size = int(_effective_value(config, "MAX_VIDEO_SIZE_MB") or 0)
+            provider_bytes = int(
+                _effective_value(config, "GEMINI_FILE_MAX_SIZE_BYTES") or 0
+            )
+            min_height = int(_effective_value(config, "MIN_VIDEO_HEIGHT") or 0)
+            max_height = int(_effective_value(config, "MAX_VIDEO_HEIGHT") or 0)
+        except (TypeError, ValueError):
+            errors.append("effective media size limits must be integers")
+        else:
+            if not 0 < preferred_size <= hard_size:
+                errors.append("effective size limits must satisfy 0 < preferred <= hard")
+            if hard_size * 1024 * 1024 > provider_bytes:
+                errors.append("effective hard media limit exceeds provider limit")
+            if not 360 <= min_height <= max_height <= 720:
+                errors.append("effective video height limits are invalid")
 
         production_config = _read_environment_config("production")
         for key in ("ENABLE_TIKWM_RESOLVER", "TIKWM_API_URL"):

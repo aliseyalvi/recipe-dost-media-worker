@@ -4,12 +4,19 @@ FastAPI worker for Recipe Dost media jobs. The production cutover path is the se
 
 ## Scope
 
-- Queue mode is the primary production flow: startup and `GET /wake` keep one serialized queue loop active.
+- Queue mode is the only active worker architecture. Render starts
+  `app.main:app`; Docker's historical
+  `python -m app.workers.combined_worker` name is a thin façade for the same
+  sequential durable queue loop.
 - `/process-job` remains available only for legacy/manual/debug job kicks.
 - YouTube uses Gemini native URL input when `YOUTUBE_AI_INPUT_MODE=gemini_url`; it does not use yt-dlp in that mode.
-- TikTok and Instagram use the unified extractor to create a verified temp file, then Gemini Files API analysis.
+- TikTok and Instagram can use the provider-neutral external resolver pipeline;
+  production remains external-disabled until canary approval. Legacy unified
+  extraction is rollback-only and platform cookies require an independent flag.
 - Gemini 3.1 Flash-Lite single-pass structured extraction is the default recipe path.
-- Raw video is never written to disk, uploaded to Supabase/Drive, exposed as a download, or logged.
+- Raw video is written only to isolated, bounded temporary files for active AI
+  processing; it is never retained, uploaded to Supabase/Drive, exposed as a
+  download, or logged.
 - Secrets, cookies, source URLs, stream URLs, Gemini prompts/raw responses, ingredients, and steps must not appear in logs or job events.
 
 ## Local Setup
@@ -21,7 +28,12 @@ pip install -r requirements.txt
 cp env/development.example.env env/development.env
 ```
 
-Set real development-only server values in `env/development.env`: `MEDIA_WORKER_SHARED_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `GEMINI_API_KEY` when Gemini is needed. See [docs/m22d-worker-environments.md](docs/m22d-worker-environments.md) for dev/prod env source-of-truth, validation, and Render export steps.
+Set real development-only server values in `env/development.env`:
+`MEDIA_WORKER_SHARED_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
+`GEMINI_API_KEY` when Gemini is needed, and the two provider credentials when
+external resolution is enabled. See
+[docs/m22d-worker-environments.md](docs/m22d-worker-environments.md) for dev/prod
+env source-of-truth, validation, and Render export steps.
 
 ## Key Environment
 
@@ -32,9 +44,16 @@ SUPABASE_URL=https://your-dev-project-ref.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=replace-with-development-service-role-key
 MEDIA_WORKER_SHARED_SECRET=replace-with-development-worker-shared-secret
 GEMINI_API_KEY=replace-with-development-gemini-api-key
+INSTAGRAM_RAPIDAPI_KEY=replace-with-development-instagram-rapidapi-key
+TIKTOK_AKNG_ACCESS_TOKEN=replace-with-rotated-development-token
 ```
 
 Non-secret runtime settings live in `config/worker.defaults.json` with environment overrides in `config/worker.development.json` and `config/worker.production.json`. Existing Render env vars still override config during the migration window.
+
+Render can select the file from its existing branch metadata (`develop` ->
+development, `main` -> production), so `APP_ENV` is optional there. If retained,
+it must agree with the branch. Blank environment values are ignored rather than
+erasing file values.
 
 Render export maps `MEDIA_WORKER_SHARED_SECRET` to runtime `WORKER_API_SECRET`. See [docs/m22d-worker-env-variable-map.md](docs/m22d-worker-env-variable-map.md) before removing old Render env keys.
 
@@ -42,7 +61,11 @@ Render export maps `MEDIA_WORKER_SHARED_SECRET` to runtime `WORKER_API_SECRET`. 
 
 Sentry covers only the active production queue flow: `app.main:app` startup/`GET /wake` -> `run_queue_loop` -> `process_queue_job` -> active YouTube oEmbed or unified social extraction -> Gemini structured extraction -> recipe/job persistence. The legacy direct `JobRunner` branch behind non-queue `/process-job`, `/metadata-preview`, and debug resolver routes are excluded. Default and auto-enabled Sentry integrations are disabled, so FastAPI and Python logging cannot report those routes implicitly.
 
-Production reporting requires `APP_ENV=production`, a valid `SENTRY_DSN`, and, on Render, `RENDER_GIT_BRANCH=main`. Ordinary development is disabled. One controlled development event is permitted only with `APP_ENV=development`, `SENTRY_DEV_TEST=true`, a valid DSN, and, on Render, `RENDER_GIT_BRANCH=develop`:
+Production reporting requires `APP_ENV=production`, a valid `SENTRY_DSN`, and,
+on Render, `RENDER_GIT_BRANCH=main`. Ordinary development is disabled. A bounded
+external-resolver canary may set `SENTRY_DEV_CANARY=true` only on the development
+Render service and `develop`; unset it after verification. The one controlled
+diagnostic event still requires `SENTRY_DEV_TEST=true`:
 
 ```bash
 python -m app.observability.sentry_test
@@ -110,9 +133,17 @@ Cookies are platform-specific. Do not use Facebook cookies for TikTok. `COOKIE_F
 ## Run
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
+PORT=8080 python -m app.workers.combined_worker
 curl http://localhost:8080/health
 ```
+
+The retired `WORKER_PIPELINE_MODE` compatibility input may be absent or set to
+`sequential`; `staged` and unsupported values fail startup before a queue task
+is created. W7 staged execution was reverted. Its design remains in Git
+history, while dormant source files are retained temporarily for a later
+deletion patch and are not imported by the active runtime. Any future
+concurrency design requires durable leases, fencing, and idempotent stage
+transitions.
 
 Wake the queue worker:
 
@@ -194,7 +225,14 @@ This endpoint does not call Gemini, does not create media jobs, does not downloa
 `WORKER_EXECUTION_MODE=queue` is the primary production mode. FastAPI starts one in-process queue loop on startup; `GET /wake` safely starts it again if Render Free has idled the service. The queue loop claims the oldest `queued` job and must finish each job as `completed` or `failed`.
 
 - YouTube uses oEmbed metadata plus Gemini native URL input when `YOUTUBE_AI_INPUT_MODE=gemini_url`.
-- TikTok and Instagram use verified temp-file extraction plus Gemini Files API.
+- With external routing enabled, TikTok and Instagram use registered provider
+  adapters, guarded download/probe/optional A/V mux, then the unchanged Gemini
+  Files API path. Development adapter IDs are `akng_tiktok` and
+  `rapidapi_instagram_unified_v1`.
+- Social extraction chooses combined audio/video formats through a bounded
+  720p -> 540p -> 480p -> 360p ladder, targets 36 MiB, and enforces a 50 MiB
+  streaming/temp-file hard limit. The historical `*_MB` config names are binary
+  MiB.
 - Gemini 3.1 Flash-Lite single-pass structured extraction is the documented default.
 - Cobalt is not used for TikTok or YouTube.
 - Temporary stream URLs are never stored or returned.
@@ -206,21 +244,45 @@ See [docs/worker-context.md](docs/worker-context.md) for the compact current con
 See [docs/render-deploy.md](docs/render-deploy.md) for Render setup notes.
 See [docs/m22d-worker-environments.md](docs/m22d-worker-environments.md) for worker environment source-of-truth setup.
 See [docs/m22d-worker-env-variable-map.md](docs/m22d-worker-env-variable-map.md) for env/config ownership.
+See [docs/m23-adaptive-media.md](docs/m23-adaptive-media.md) for the audited media policy, failure/Sentry contract, and staged deployment/rollback checklist.
+See [docs/m23-w3-external-media-routing-plan.md](docs/m23-w3-external-media-routing-plan.md) for external resolver flags, security, fixtures, canary, and rollback.
 
 ## Validation
 
 ```bash
-python3 -m compileall app scripts
-python3 scripts/check_runtime_config.py development
-python3 scripts/check_environment.py development
+python3.12 -m compileall app scripts
+python3.12 scripts/check_runtime_config.py development
+INSTAGRAM_RAPIDAPI_KEY=dummy-development-key \
+TIKTOK_AKNG_ACCESS_TOKEN=dummy-development-token \
+python3.12 scripts/check_external_resolver_config.py development
+python3.12 scripts/check_environment.py development
 ```
+
+Owner-only Instagram media gate (never run from Codex or production):
+
+```bash
+APP_ENV=development \
+ALLOW_LIVE_INSTAGRAM_DIAGNOSTIC=true \
+python scripts/check_instagram_media_candidate.py
+```
+
+The command requires `INSTAGRAM_RAPIDAPI_KEY` in the environment, reads the
+Instagram URL through a hidden prompt, uses the worker adapter/selection/
+download/ffprobe/mux path, and prints counts/categories only. It makes no
+Supabase, Gemini, or Sentry call and exits zero only when final H.264 MP4 video
+with audio is ready for Gemini.
 
 Production preflight from `main`:
 
 ```bash
-python3 scripts/check_runtime_config.py production
-python3 scripts/check_environment.py production
+python3.12 scripts/check_runtime_config.py production
+python3.12 scripts/check_external_resolver_config.py production
+python3.12 scripts/check_environment.py production
 ```
+
+Use `make resolver-config-docker` for the Render-like image check. It passes no
+resolver mode, audience, chain, cookie-fallback, or YouTube-direct environment
+overrides.
 
 ## Deploy Note
 
@@ -326,4 +388,27 @@ cd /Users/sadaqatali/Documents/AiAppBuilder/recipe-dost/recipe-dost
 
 npm run env:supabase:dev:dry
 node scripts/env/sync-supabase-secrets.mjs development --apply
+```
+
+## Deterministic worker QA
+
+Offline QA calls production normalization, selection, request construction,
+parsing, validation, recovery, terminal-state, cleanup, and quota-finalization
+functions without network calls or secrets:
+
+```bash
+python scripts/worker_qa.py replay --case primary_malformed_repaired
+python scripts/worker_qa.py batch \
+  --manifest tests/fixtures/worker_qa/mixed_batch_manifest.json
+```
+
+The sanitized report is `.worker-qa/latest/summary.json` and is gitignored.
+Owner-only live development mode uses an in-memory repository, so it performs no
+Supabase writes or entitlement charge:
+
+```bash
+APP_ENV=development ALLOW_LIVE_WORKER_QA=true \
+python scripts/worker_qa.py live \
+  --manifest .worker-qa/private/live-manifest.json \
+  --max-total-calls 8
 ```
