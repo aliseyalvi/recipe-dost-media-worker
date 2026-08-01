@@ -85,7 +85,7 @@ paths, environment contents, or secrets.
 - Do not expose user-facing downloads.
 - Do not log full source URLs, stream URLs, cookies, Gemini prompts, raw Gemini responses, ingredients, or steps.
 - TikTok uses TikWM metadata plus Gemini text-first analysis only in W-M14R1.
-- Instagram/Facebook remain disabled until their Render resolver paths are separately validated.
+- Instagram uses Unified v1 with controlled yt-dlp fallback; Facebook remains disabled.
 
 # M23.W3C external resolver canary
 
@@ -98,11 +98,10 @@ INSTAGRAM_RAPIDAPI_KEY
 TIKTOK_AKNG_ACCESS_TOKEN
 ```
 
-Development config currently selects `external`, `all_authorized_ai`,
-`rapidapi_instagram_reels13`, and `akng_tiktok`, with cookie fallback false and
-YouTube direct Gemini true. Rotate the token that appeared in user-provided
-input before installing it. Use separate development and production provider
-applications/keys.
+Development config selects `hybrid`, `all_authorized_ai`,
+`rapidapi_instagram_unified_v1`, and `akng_tiktok`, with the controlled
+Instagram fallback enabled and YouTube direct Gemini true. Use separate
+development and production provider applications/keys.
 
 After an offline green test run, deploy only `develop`, confirm safe health
 configuration/credential booleans, and process one authorized test-user job per
@@ -111,12 +110,10 @@ IDs, and recipe content must be absent from Render/Sentry/events. Optional
 development Sentry requires `SENTRY_DEV_CANARY=true` plus the development DSN;
 turn it off after the bounded test.
 
-The first production canary uses production config `external` plus
-`test_users`, the verified provider chains/host policies, cookie fallback false,
-and direct YouTube true. Production secrets are separate. Roll back by setting
-the audience to `disabled`; no mobile release is required. Cookie rollback also
-requires legacy/hybrid mode, `COOKIE_MEDIA_FALLBACK_ENABLED=true`, and the
-existing cookie configuration.
+Production config uses `hybrid`, `all_authorized_ai`,
+`rapidapi_instagram_unified_v1`, the verified host policy, controlled Instagram
+fallback, and direct YouTube true. Production secrets are separate. Roll back
+by setting the audience to `disabled`; no mobile release is required.
 
 ## M23.W3C-R configuration recovery
 
@@ -138,12 +135,11 @@ YOUTUBE_DIRECT_GEMINI_ENABLED
 ```
 
 Before redeploy, run `make resolver-config-docker` on a machine with Docker.
-The development image check supplies only dummy provider credentials and branch
-metadata; the production check supplies no provider credentials. Expected safe
-development startup event is `worker_safe_config_summary` with config path
+The image checks supply only dummy provider credentials and branch metadata.
+Expected safe development startup event is `worker_safe_config_summary` with config path
 `config/worker.development.json`, selection source `RENDER_GIT_BRANCH`, mode
-`external`, audience `all_authorized_ai`, adapters
-`rapidapi_instagram_reels13`/`akng_tiktok`, cookie fallback false, YouTube direct
+`hybrid`, audience `all_authorized_ai`, adapters
+`rapidapi_instagram_unified_v1`/`akng_tiktok`, cookie fallback true, YouTube direct
 true, and both credential-presence booleans true.
 
 Owner recovery checklist:
@@ -156,8 +152,8 @@ Owner recovery checklist:
    passes.
 5. Confirm the one safe startup summary before running any media job.
 
-Rollback is config-only: disable the development external audience in
-`worker.development.json` and redeploy. Do not enable cookie fallback.
+Rollback is config-only: disable the external audience in the affected worker
+JSON and redeploy.
 
 ## M23.W3D-TK development retest
 
@@ -198,6 +194,6 @@ A successful job continues through bounded download, probe, optional merge,
 final validation, `gemini_source_context_prepared`, Gemini extraction, recipe
 save, queue completion, and temp deletion. On failure, retain only safe
 shape/count fields, normalized code, bounded input attempt, and status class.
-Do not copy a provider body or URL from Render/Supabase. Roll back by setting the
-development JSON audience to `disabled` and redeploying `develop`; keep cookie
-fallback false. Production remains legacy/external-disabled.
+Do not copy a provider body or URL from Render/Supabase. Roll back Instagram by
+setting its JSON audience to `disabled` and redeploying the affected branch.
+M23.W10F otherwise keeps Unified v1 primary with controlled hybrid fallback.

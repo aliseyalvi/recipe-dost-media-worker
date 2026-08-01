@@ -73,7 +73,7 @@ class FileRuntimeConfigTests(unittest.TestCase):
             settings = build_settings()
             validate_external_resolver_runtime_config(settings)
             report = worker_config_report("development")
-        self.assertEqual(settings.media_resolver_mode, "external")
+        self.assertEqual(settings.media_resolver_mode, "hybrid")
         self.assertEqual(settings.external_media_resolver_audience, "all_authorized_ai")
         self.assertEqual(
             settings.instagram_resolver_chain,
@@ -81,7 +81,7 @@ class FileRuntimeConfigTests(unittest.TestCase):
         )
         self.assertNotIn("instagram_reels13_enabled", Settings.model_fields)
         self.assertEqual(settings.tiktok_resolver_chain, ["akng_tiktok"])
-        self.assertFalse(settings.cookie_media_fallback_enabled)
+        self.assertTrue(settings.cookie_media_fallback_enabled)
         self.assertTrue(settings.youtube_direct_gemini_enabled)
         safe_instagram = safe_config_summary(settings)[
             "instagram_external_resolver"
@@ -131,17 +131,26 @@ class FileRuntimeConfigTests(unittest.TestCase):
         ):
             self.assertNotIn(key, ENV_ONLY_EXPORT_KEYS)
 
-    def test_actual_production_file_is_external_disabled_without_provider_secrets(self) -> None:
-        with self.isolated_environment(APP_ENV="production"):
+    def test_actual_production_file_enables_instagram_unified_v1(self) -> None:
+        with self.isolated_environment(
+            APP_ENV="production",
+            INSTAGRAM_RAPIDAPI_KEY="dummy-instagram",
+        ):
             settings = build_settings()
             validate_external_resolver_runtime_config(settings)
         self.assertEqual(settings.app_env, "production")
-        self.assertEqual(settings.media_resolver_mode, "legacy")
-        self.assertEqual(settings.external_media_resolver_audience, "disabled")
-        self.assertEqual(settings.instagram_resolver_chain, [])
+        self.assertEqual(settings.media_resolver_mode, "hybrid")
+        self.assertEqual(
+            settings.external_media_resolver_audience,
+            "all_authorized_ai",
+        )
+        self.assertEqual(
+            settings.instagram_resolver_chain,
+            ["rapidapi_instagram_unified_v1"],
+        )
         self.assertEqual(settings.tiktok_resolver_chain, [])
-        self.assertFalse(settings.cookie_media_fallback_enabled)
-        self.assertIsNone(settings.instagram_rapidapi_key)
+        self.assertTrue(settings.cookie_media_fallback_enabled)
+        self.assertIsNotNone(settings.instagram_rapidapi_key)
         self.assertIsNone(settings.tiktok_akng_access_token)
 
     def test_queue_liveness_defaults_are_inherited_by_both_environments(self) -> None:
@@ -361,7 +370,11 @@ class FileRuntimeConfigTests(unittest.TestCase):
 
         with patch.dict(
             os.environ,
-            {"RENDER": "true", "RENDER_GIT_BRANCH": "main"},
+            {
+                "RENDER": "true",
+                "RENDER_GIT_BRANCH": "main",
+                "INSTAGRAM_RAPIDAPI_KEY": "dummy-instagram",
+            },
             clear=True,
         ):
             clear_worker_config_cache()
@@ -373,7 +386,14 @@ class FileRuntimeConfigTests(unittest.TestCase):
             production_report["environment_selection_source"],
             "RENDER_GIT_BRANCH",
         )
-        self.assertEqual(production.external_media_resolver_audience, "disabled")
+        self.assertEqual(
+            production.external_media_resolver_audience,
+            "all_authorized_ai",
+        )
+        self.assertEqual(
+            production.instagram_resolver_chain,
+            ["rapidapi_instagram_unified_v1"],
+        )
 
     def test_retired_reels13_configuration_is_rejected_and_flag_is_ignored(
         self,

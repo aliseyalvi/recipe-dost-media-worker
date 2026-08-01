@@ -20,6 +20,7 @@ def settings_for(environment: str, **overrides: object) -> Settings:
         "worker_api_secret": "test-only",
         "supabase_url": "https://example.invalid",
         "supabase_service_role_key": "test-only",
+        "instagram_rapidapi_key": "dummy-instagram",
     }
     values.update(overrides)
     with patch.dict(os.environ, {"APP_ENV": environment}, clear=True):
@@ -267,10 +268,14 @@ class FastApiStartupConfigTests(unittest.TestCase):
             ):
                 asyncio.run(main.start_queue_worker())
 
-    def test_production_external_disabled_starts_without_provider_secrets(self) -> None:
+    def test_production_instagram_unified_starts_with_existing_secret(self) -> None:
         with patch.dict(
             os.environ,
-            {"RENDER": "true", "RENDER_GIT_BRANCH": "main"},
+            {
+                "RENDER": "true",
+                "RENDER_GIT_BRANCH": "main",
+                "INSTAGRAM_RAPIDAPI_KEY": "dummy-instagram",
+            },
             clear=True,
         ):
             clear_worker_config_cache()
@@ -281,6 +286,10 @@ class FastApiStartupConfigTests(unittest.TestCase):
                 supabase_service_role_key="test-only",
             )
             self.run_startup(settings)
+        self.assertEqual(
+            settings.instagram_resolver_chain,
+            ["rapidapi_instagram_unified_v1"],
+        )
 
     def test_wrong_file_for_render_branch_fails_before_start(self) -> None:
         with patch.dict(

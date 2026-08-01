@@ -1088,7 +1088,16 @@ def resolve_queue_media(
     job: MediaJobRecord,
     platform: str,
 ) -> dict[str, object]:
-    external_route = external_audience_route(repository, settings, job)
+    platform_chain_configured = (
+        platform == "instagram" and bool(settings.instagram_resolver_chain)
+    ) or (
+        platform == "tiktok" and bool(settings.tiktok_resolver_chain)
+    )
+    external_route = (
+        external_audience_route(repository, settings, job)
+        if platform_chain_configured
+        else None
+    )
     should_external = (
         platform in {"instagram", "tiktok"}
         and settings.ai_analysis_mode == "gemini_video_poc"
@@ -1104,7 +1113,9 @@ def resolve_queue_media(
             "platform": platform,
             "resolver_strategy": "external" if should_external else "legacy",
             "route_audience": external_route or "not_enabled",
-            "cookie_fallback_enabled": settings.legacy_cookie_media_enabled,
+            "cookie_fallback_enabled": (
+                platform == "instagram" and settings.legacy_cookie_media_enabled
+            ),
         },
     )
     if should_external:
@@ -1145,7 +1156,8 @@ def resolve_queue_media(
                 except Exception:
                     pass
             if not (
-                settings.media_resolver_mode == "hybrid"
+                platform == "instagram"
+                and settings.media_resolver_mode == "hybrid"
                 and settings.cookie_media_fallback_enabled
                 and exc.fallback_allowed
             ):

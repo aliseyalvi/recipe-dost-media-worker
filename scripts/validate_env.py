@@ -301,22 +301,29 @@ def validate_config(environment: str) -> dict[str, Any]:
         for key in required_true:
             if not _config_bool(config.get(key, False)):
                 errors.append(f"production config {key} must be true")
-        fallback_false_keys = [
-            "COOKIE_MEDIA_FALLBACK_ENABLED",
-            "ENABLE_INSTAGRAM_COOKIES",
-            "ENABLE_YTDLP_COOKIES",
-        ]
+        if not _config_bool(config.get("COOKIE_MEDIA_FALLBACK_ENABLED", False)):
+            errors.append(
+                "production config COOKIE_MEDIA_FALLBACK_ENABLED must be true"
+            )
+        fallback_false_keys = ["ENABLE_INSTAGRAM_COOKIES", "ENABLE_YTDLP_COOKIES"]
         for key in fallback_false_keys:
             if _config_bool(config.get(key, False)):
                 errors.append(f"production config {key} must be false")
         required_resolver_strings = {
-            "MEDIA_RESOLVER_MODE": "legacy",
-            "EXTERNAL_MEDIA_RESOLVER_AUDIENCE": "disabled",
+            "MEDIA_RESOLVER_MODE": "hybrid",
+            "EXTERNAL_MEDIA_RESOLVER_AUDIENCE": "all_authorized_ai",
         }
         for key, expected in required_resolver_strings.items():
             actual = str(config.get(key, "")).strip().lower()
             if actual != expected:
                 errors.append(f"production config {key} must be {expected}")
+        if config.get("INSTAGRAM_RESOLVER_CHAIN") != [
+            "rapidapi_instagram_unified_v1"
+        ]:
+            errors.append(
+                "production config INSTAGRAM_RESOLVER_CHAIN must select "
+                "rapidapi_instagram_unified_v1"
+            )
         if not _config_bool(config.get("YOUTUBE_DIRECT_GEMINI_ENABLED", False)):
             errors.append("production config YOUTUBE_DIRECT_GEMINI_ENABLED must be true")
         if _config_bool(config.get("LOCAL_BRIEF_PARSER_ENABLED", False)):

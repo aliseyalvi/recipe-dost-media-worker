@@ -130,6 +130,37 @@ class ExternalQueueRoutingTests(unittest.TestCase):
         self.assertEqual(captured.exception.metadata["provider_status_class"], "2xx")
         self.assertEqual(captured.exception.metadata["resolver_adapter"], "akng_tiktok")
 
+    def test_instagram_provider_failure_uses_controlled_legacy_fallback(self) -> None:
+        repository = self.repository()
+        error = ResolverError(
+            "provider_server_error",
+            "The Instagram resolver is temporarily unavailable.",
+            retryable=True,
+            fallback_allowed=True,
+            http_status_class="5xx",
+            technical=True,
+        )
+        legacy_result = {"success": True, "resolver": "ytdlp_stream"}
+        active = settings(
+            media_resolver_mode="hybrid",
+            cookie_media_fallback_enabled=True,
+        )
+        with patch(
+            "app.queue_worker.resolve_external_media",
+            side_effect=error,
+        ) as external, patch(
+            "app.queue_worker.extract_social_video",
+            return_value=legacy_result,
+        ) as legacy:
+            result = resolve_queue_media(
+                repository=repository,
+                settings=active,
+                job=job(),
+                platform="instagram",
+            )
+        external.assert_called_once()
+        legacy.assert_called_once()
+        self.assertEqual(result["resolver_strategy"], "legacy")
 
 if __name__ == "__main__":
     unittest.main()

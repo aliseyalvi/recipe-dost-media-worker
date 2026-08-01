@@ -20,6 +20,32 @@
       }
     }
   },
+  "current_nested_split_av_has_audio_false": {
+    "success": true,
+    "media_type": "video",
+    "shortcode": "fixture-current-shape",
+    "data": {
+      "title": "Current Unified v1 recipe fixture",
+      "content": {
+        "media_url": "https://media.fbcdn.net/fixture/current-video.mp4?signature=memory-only",
+        "thumbnail_url": "https://media.cdninstagram.com/fixture/current-thumbnail.jpg?signature=memory-only",
+        "audio": {
+          "audio_url": "https://media.fbcdn.net/fixture/current-audio.mp4?signature=memory-only",
+          "downloadable": true,
+          "title": "Original audio",
+          "artist": "fixture-chef",
+          "is_original_audio": true,
+          "audio_id": "fixture-audio-id",
+          "has_audio": false,
+          "API": "ADV_NEW_GQL"
+        }
+      },
+      "metadata": {
+        "api_version": "unified_v1",
+        "processed_at": "2026-08-01T11:49:01Z"
+      }
+    }
+  },
   "valid_video_only": {
     "success": true,
     "media_type": "video",

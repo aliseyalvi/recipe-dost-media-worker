@@ -1,5 +1,26 @@
 # Decision Log
 
+## 2026-08-01 — M23.W10F Instagram Unified v1 provider routing
+
+- `EXTERNAL_MEDIA_RESOLVER_AUDIENCE=disabled` was the direct cause of
+  `route_audience=not_enabled`; production also selected
+  `MEDIA_RESOLVER_MODE=legacy` with an empty Instagram chain. Canonical JSON now
+  selects `hybrid`, `all_authorized_ai`, and
+  `rapidapi_instagram_unified_v1` in development and production.
+- The existing environment-only `INSTAGRAM_RAPIDAPI_KEY` remains the sole
+  credential input. Non-secret endpoint and CDN host policy stay in worker JSON;
+  no new Render variable was added.
+- Instagram routing is provider first. Provider, contract, download, probe, or
+  mux failures marked fallback-safe may use legacy yt-dlp only through the
+  existing hybrid/fallback gate. TikTok fallback behavior and YouTube routing
+  are unchanged.
+- Unified v1 treats `media_url` as probe-required and `audio_url` as an optional
+  audio candidate. It ignores provider `has_audio` declarations, trusts ffprobe
+  for embedded audio, and downloads/muxes separate audio only when needed.
+  Signed CDN URLs remain memory-only and are never persisted.
+- Offline validation only; no RapidAPI, Supabase, Gemini, Render, Sentry,
+  deployment, schema, dependency, queue, quota, or frontend action was taken.
+
 ## 2026-07-30 — M23.W10C explicit duration semantics
 
 - `MAX_SOURCE_VIDEO_DURATION_SECONDS=180` is the canonical shared JSON

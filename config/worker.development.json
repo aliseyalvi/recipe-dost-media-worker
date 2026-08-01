@@ -1,10 +1,10 @@
 {
   "LOG_LEVEL": "debug",
-  "MEDIA_RESOLVER_MODE": "external",
+  "MEDIA_RESOLVER_MODE": "hybrid",
   "EXTERNAL_MEDIA_RESOLVER_AUDIENCE": "all_authorized_ai",
   "INSTAGRAM_RESOLVER_CHAIN": ["rapidapi_instagram_unified_v1"],
   "TIKTOK_RESOLVER_CHAIN": ["akng_tiktok"],
-  "COOKIE_MEDIA_FALLBACK_ENABLED": false,
+  "COOKIE_MEDIA_FALLBACK_ENABLED": true,
   "YOUTUBE_DIRECT_GEMINI_ENABLED": true,
   "INSTAGRAM_RAPIDAPI_HOST": "insta-reels-downloader-the-fastest-hd-reels-fetcher-api.p.rapidapi.com",
   "INSTAGRAM_RAPIDAPI_BASE_URL": "https://insta-reels-downloader-the-fastest-hd-reels-fetcher-api.p.rapidapi.com",
