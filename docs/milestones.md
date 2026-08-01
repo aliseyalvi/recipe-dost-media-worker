@@ -66,16 +66,16 @@
 | 62 | M23.W8A-W8D Instagram Unified v1 adapter | Done locally | Replace active broken Reels13 routing with the validated Unified v1 contract while preserving secure shared media preparation |
 | 63 | M23.W10A-CFG Queue-liveness configuration alignment | Done locally | Canonical JSON defaults, sparse overlay inheritance, optional env overrides, Pydantic bounds, and safe health reporting for W10A settings |
 | 64 | M23.W10C Explicit source/recipe duration semantics | Done locally | 180-second JSON source limit, bounded duration errors, explicit recipe durations, legacy mapping repair, and authoritative duration retry |
-| 65 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 66 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 67 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 65 | M23.W10F Restore Instagram Unified v1 Provider Routing | Done locally | Unified v1 preferred in development and production, probe-driven split audio, and controlled Instagram-only yt-dlp fallback |
+| 66 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 67 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 68 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 
-Apply the reviewed W10C app migration and deploy the two updated Edge Functions
-before deploying the W10C worker on `develop`. Verify health reports 180, then
-run authenticated 180/181 duration and eligible historical retry checks before
-any production rollout.
+Review and commit W10F on `develop`, deploy the development worker, and verify
+safe health plus one authorized Instagram job before merging to `main` for the
+production check and rollout.
 
 - M23.W6A-W6C keeps single-pass structured extraction as the active strategy:
   one video call, one text-only repair when useful, and one compatible-model

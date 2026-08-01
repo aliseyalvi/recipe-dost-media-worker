@@ -270,6 +270,25 @@ class InstagramUnifiedV1AdapterTests(unittest.TestCase):
             "probe_required",
         )
 
+    def test_current_nested_payload_does_not_trust_has_audio_false(self) -> None:
+        result = self.resolver(
+            "current_nested_split_av_has_audio_false"
+        ).resolve(request("instagram"))
+        self.assertEqual(result.media_mode, "split_av")
+        self.assertEqual(
+            [candidate.media_type for candidate in result.candidates],
+            ["video", "audio"],
+        )
+        self.assertEqual(result.candidates[0].audio_state, "unknown")
+        self.assertEqual(result.candidates[1].audio_state, "present")
+        self.assertTrue(result.contract_diagnostic["media_url_present"])
+        self.assertTrue(result.contract_diagnostic["thumbnail_url_present"])
+        self.assertTrue(result.contract_diagnostic["audio_url_present"])
+        self.assertNotIn(
+            "signature=memory-only",
+            json.dumps(result.safe_to_dict()),
+        )
+
     def test_null_non_https_and_disallowed_media_urls_are_contract_invalid(
         self,
     ) -> None:
@@ -318,6 +337,10 @@ class InstagramUnifiedV1AdapterTests(unittest.TestCase):
             self.assertNotIn(
                 "fixture provider message",
                 captured.exception.safe_message,
+            )
+            self.assertEqual(
+                captured.exception.fallback_allowed,
+                name != "private_url",
             )
 
     def test_photo_and_sidecar_have_exact_safe_policy_messages(self) -> None:
@@ -394,6 +417,7 @@ class InstagramUnifiedV1AdapterTests(unittest.TestCase):
                     request("instagram")
                 )
             self.assertEqual(captured.exception.code, code)
+            self.assertTrue(captured.exception.fallback_allowed)
 
 
 class TikTokAdapterTests(unittest.TestCase):

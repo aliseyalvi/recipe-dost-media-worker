@@ -2,6 +2,18 @@
 
 ## Current Status
 
+- M23.W10F restores Instagram Unified v1 as the preferred queue resolver in
+  development and production. `EXTERNAL_MEDIA_RESOLVER_AUDIENCE=disabled`
+  directly produced `route_audience=not_enabled`; production also used legacy
+  mode with an empty Instagram chain. Both environments now use the existing
+  hybrid/audience/chain/fallback JSON settings and the existing environment-only
+  `INSTAGRAM_RAPIDAPI_KEY` secret.
+- The current nested Unified v1 payload is supported: `media_url` is downloaded
+  and probed, `thumbnail_url` remains ephemeral for immediate upload, and
+  optional `audio_url` is downloaded/probed/muxed only when the video probe
+  reports no embedded audio. `has_audio=false` is not trusted over ffprobe.
+  Signed CDN URLs are never persisted. Provider/download failures may reach the
+  controlled Instagram legacy fallback; TikTok and YouTube routing is unchanged.
 - M23.W10C raises the canonical source-video default to 180 seconds through
   shared JSON config and exposes `max_source_video_duration_seconds` in health.
   A known duration of 180 is accepted and 181 is rejected with bounded

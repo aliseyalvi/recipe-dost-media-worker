@@ -69,22 +69,33 @@ def check_runtime_config(environment: str) -> dict[str, object]:
             if not _bool_value(_effective_value(config, key)):
                 errors.append(f"{key} effective value must be true")
 
-        for key in (
-            "COOKIE_MEDIA_FALLBACK_ENABLED",
-            "ENABLE_INSTAGRAM_COOKIES",
-            "ENABLE_YTDLP_COOKIES",
+        if not _bool_value(
+            _effective_value(config, "COOKIE_MEDIA_FALLBACK_ENABLED")
         ):
+            errors.append(
+                "COOKIE_MEDIA_FALLBACK_ENABLED effective value must be true"
+            )
+
+        for key in ("ENABLE_INSTAGRAM_COOKIES", "ENABLE_YTDLP_COOKIES"):
             if _bool_value(_effective_value(config, key)):
                 errors.append(f"{key} effective value must be false")
 
         expected_resolver_strings = {
-            "MEDIA_RESOLVER_MODE": "legacy",
-            "EXTERNAL_MEDIA_RESOLVER_AUDIENCE": "disabled",
+            "MEDIA_RESOLVER_MODE": "hybrid",
+            "EXTERNAL_MEDIA_RESOLVER_AUDIENCE": "all_authorized_ai",
         }
         for key, expected in expected_resolver_strings.items():
             actual = str(_effective_value(config, key) or "").strip().lower()
             if actual != expected:
                 errors.append(f"{key} effective value must be {expected}")
+
+        if _effective_value(config, "INSTAGRAM_RESOLVER_CHAIN") != [
+            "rapidapi_instagram_unified_v1"
+        ]:
+            errors.append(
+                "INSTAGRAM_RESOLVER_CHAIN effective value must select "
+                "rapidapi_instagram_unified_v1"
+            )
 
         if not _bool_value(_effective_value(config, "YOUTUBE_DIRECT_GEMINI_ENABLED")):
             errors.append("YOUTUBE_DIRECT_GEMINI_ENABLED effective value must be true")

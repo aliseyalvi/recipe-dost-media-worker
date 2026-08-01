@@ -32,6 +32,7 @@ def settings(**overrides: object) -> Settings:
         "external_media_resolver_audience": "disabled",
         "instagram_resolver_chain": [],
         "tiktok_resolver_chain": [],
+        "cookie_media_fallback_enabled": False,
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)

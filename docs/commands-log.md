@@ -2,6 +2,23 @@
 
 Keep only commands that future turns may need.
 
+## M23.W10F Instagram Unified v1 provider routing
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" make check-dev
+APP_ENV=production PATH="$PWD/.venv/bin:$PATH" make check-prod
+.venv/bin/python -m unittest discover -s tests -p "test_*.py"
+.venv/bin/python -m pip check
+git diff --check
+# passed: development checks; 279 tests; no broken requirements; diff check
+# production config/resolver checks passed; the exact check-prod command stopped
+# only at the expected develop-vs-main deploy guard. The same offline check
+# passed with ALLOW_NON_MAIN_PROD_DEPLOY=1; nothing was deployed.
+```
+
+No RapidAPI, media CDN, Supabase, Gemini, Render, Sentry, deployment, commit,
+push, schema, dependency, queue, quota, or frontend command was run.
+
 ## M23.W10C explicit source/recipe duration semantics
 
 ```bash

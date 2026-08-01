@@ -20,6 +20,7 @@ from app.media_resolvers.instagram_reels13 import (
     InstagramReels13Resolver,
     normalize_instagram_candidates,
 )
+from app.media_resolvers.instagram_unified_v1 import InstagramUnifiedV1Resolver
 from app.media_resolvers.media_fetch import DownloadedMedia, cleanup_job_directory
 from app.media_resolvers.media_processing import (
     mux_video_audio,
@@ -39,6 +40,13 @@ FIXTURES = (
     / "fixtures"
     / "media_resolvers"
     / "rapidapi_instagram_reels13"
+)
+UNIFIED_FIXTURES = (
+    Path(__file__).parent
+    / "fixtures"
+    / "media_resolvers"
+    / "rapidapi_instagram_unified_v1"
+    / "contracts.json"
 )
 
 
@@ -73,6 +81,18 @@ def resolver(name: str, *, secret: str = "fixture-secret") -> InstagramReels13Re
         rapidapi_host="provider.invalid",
         rapidapi_key=secret,
     )
+
+
+def current_unified_resolution():
+    fixtures = json.loads(UNIFIED_FIXTURES.read_text(encoding="utf-8"))
+    payload = fixtures["current_nested_split_av_has_audio_false"]
+    return InstagramUnifiedV1Resolver(
+        client=FixtureClient(payload),  # type: ignore[arg-type]
+        base_url="https://provider.invalid",
+        rapidapi_host="provider.invalid",
+        rapidapi_key="fixture-secret",
+        allowed_media_host_suffixes=("fbcdn.net", "cdninstagram.com"),
+    ).resolve(request())
 
 
 class InstagramNormalizationTests(unittest.TestCase):
@@ -307,6 +327,155 @@ class InstagramLocalMediaProofTests(unittest.TestCase):
 
 
 class InstagramPipelineTests(unittest.TestCase):
+    def _run_current_unified_pipeline(
+        self,
+        directory: str,
+        *,
+        embedded_audio: bool,
+    ) -> tuple[dict[str, object], list[str], MagicMock]:
+        resolution = current_unified_resolution()
+        settings = SimpleNamespace(
+            instagram_resolver_chain=["rapidapi_instagram_unified_v1"],
+            tiktok_resolver_chain=[],
+            max_video_size_bytes=50 * 1024 * 1024,
+            preferred_video_size_bytes=36 * 1024 * 1024,
+            external_provider_timeout_seconds=15,
+            max_video_height=720,
+            instagram_media_host_suffixes=["fbcdn.net", "cdninstagram.com"],
+            tiktok_media_host_suffixes=[],
+            temp_media_dir=directory,
+            external_media_download_connect_timeout_seconds=1,
+            external_media_download_read_timeout_seconds=1,
+            external_media_download_total_timeout_seconds=10,
+            external_media_max_redirects=1,
+            ytdlp_extract_timeout_seconds=5,
+            max_job_runtime_seconds=30,
+            max_source_video_duration_seconds=180,
+        )
+        repository = MagicMock()
+        repository.has_external_resolver_attempt.return_value = False
+        built = MagicMock()
+        built.resolve.return_value = resolution
+        downloaded_roles: list[str] = []
+
+        class FakeDownloader:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+            def create_job_directory(self, _correlation_id: str) -> Path:
+                path = Path(directory) / "external-instagram-unified-fixture"
+                path.mkdir()
+                return path
+
+            def download_candidate(
+                self,
+                candidate: MediaCandidate,
+                *,
+                job_directory: Path,
+                filename: str,
+                **_kwargs: object,
+            ) -> DownloadedMedia:
+                downloaded_roles.append(candidate.media_type)
+                path = job_directory / filename
+                path.write_bytes(b"\x00\x00\x00\x18ftypmp42fixture")
+                return DownloadedMedia(path, path.stat().st_size, "video/mp4")
+
+        video_probe = SimpleNamespace(
+            video_present=True,
+            audio_present=embedded_audio,
+            duration_seconds=30,
+            width=720,
+            height=1280,
+            video_codec="h264",
+            audio_codec="aac" if embedded_audio else None,
+            container="mov,mp4,m4a,3gp,3g2,mj2",
+        )
+        audio_probe = SimpleNamespace(
+            video_present=False,
+            audio_present=True,
+            duration_seconds=30,
+            width=None,
+            height=None,
+            video_codec=None,
+            audio_codec="aac",
+            container="mov,mp4,m4a,3gp,3g2,mj2",
+        )
+        final_probe = SimpleNamespace(
+            video_present=True,
+            audio_present=True,
+            duration_seconds=30,
+            width=720,
+            height=1280,
+            video_codec="h264",
+            audio_codec="aac",
+            container="mov,mp4,m4a,3gp,3g2,mj2",
+        )
+        probe_results = [video_probe] if embedded_audio else [video_probe, audio_probe]
+
+        def fake_mux(
+            _video_path: Path,
+            _audio_path: Path,
+            *,
+            output_path: Path,
+            **_kwargs: object,
+        ) -> Path:
+            output_path.write_bytes(b"\x00\x00\x00\x18ftypmp42merged")
+            return output_path
+
+        with patch(
+            "app.media_resolvers.pipeline.build_resolver", return_value=built
+        ), patch(
+            "app.media_resolvers.pipeline.SecureMediaDownloader", FakeDownloader
+        ), patch(
+            "app.media_resolvers.pipeline.provider_circuit_breaker.allows",
+            return_value=True,
+        ), patch(
+            "app.media_resolvers.pipeline.provider_circuit_breaker.record_success"
+        ), patch(
+            "app.media_resolvers.pipeline.probe_media",
+            side_effect=probe_results,
+        ), patch(
+            "app.media_resolvers.pipeline.validate_final_media",
+            return_value=final_probe,
+        ), patch(
+            "app.media_resolvers.pipeline.mux_video_audio",
+            side_effect=fake_mux,
+        ) as mux:
+            result = resolve_external_media(
+                repository=repository,
+                settings=settings,  # type: ignore[arg-type]
+                media_job_id=UUID("00000000-0000-0000-0000-000000000778"),
+                source_url="https://instagram.example/reel/fixture",
+                platform="instagram",
+                audience_route="authorized",
+            )
+        return result, downloaded_roles, mux
+
+    def test_current_has_audio_false_payload_trusts_embedded_audio_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result, downloaded_roles, mux = self._run_current_unified_pipeline(
+                directory,
+                embedded_audio=True,
+            )
+            self.assertEqual(downloaded_roles, ["video"])
+            mux.assert_not_called()
+            self.assertFalse(result["diagnostic_media"]["separate_audio_required"])
+            cleanup_job_directory(Path(str(result["temp_file_path"])).parent)
+
+    def test_current_audio_url_is_downloaded_and_muxed_when_probe_needs_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result, downloaded_roles, mux = self._run_current_unified_pipeline(
+                directory,
+                embedded_audio=False,
+            )
+            self.assertEqual(downloaded_roles, ["video", "audio"])
+            mux.assert_called_once()
+            diagnostic = result["diagnostic_media"]
+            self.assertTrue(diagnostic["separate_audio_required"])
+            self.assertTrue(diagnostic["audio_download_verified"])
+            self.assertTrue(diagnostic["mux_succeeded"])
+            cleanup_job_directory(Path(str(result["temp_file_path"])).parent)
+
     def test_progressive_embedded_audio_skips_mux_and_cleans_on_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             resolution = resolver("incident_two_candidates.json").resolve(request())

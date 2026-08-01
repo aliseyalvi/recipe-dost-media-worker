@@ -331,6 +331,12 @@ def _provider_error(
         code,
         message,
         retryable=retryable,
+        fallback_allowed=code
+        in {
+            "provider_processing_failed",
+            "provider_contract_invalid",
+            "provider_server_error",
+        },
         http_status_class=str(diagnostic["provider_status_class"]),
         technical=technical,
         contract_diagnostic=diagnostic,
@@ -382,6 +388,7 @@ def _map_http_error(exc: ResolverError) -> ResolverError:
         code,
         message,
         retryable=retryable,
+        fallback_allowed=True,
         http_status_class=status_class,
         technical=code
         in {
@@ -406,6 +413,7 @@ def _contract_error(
     return ResolverError(
         "provider_contract_invalid",
         "The Instagram resolver returned an invalid response.",
+        fallback_allowed=True,
         http_status_class=str(diagnostic.get("provider_status_class") or "unknown"),
         technical=True,
         contract_diagnostic=safe_diagnostic,

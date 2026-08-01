@@ -32,9 +32,9 @@ The worker may extract safe metadata, create temporary server-side media files f
   streaming/temp-file hard limit is 50 MiB and the source-video duration limit
   defaults to 180 seconds through `MAX_SOURCE_VIDEO_DURATION_SECONDS`; `*_MB`
   names use binary MiB.
-- Production is still external-disabled. Its legacy extractor is retained only
-  as rollback code, while cookie use requires the separate fallback flag and is
-  false by default.
+- Instagram Unified v1 is preferred in development and production. Its legacy
+  yt-dlp extractor is retained only as a controlled hybrid fallback; signed
+  provider/CDN URLs are resolved and downloaded immediately and never persisted.
 - Mock fixture mode: `AI_ANALYSIS_MODE=mock_fixture` skips Gemini and saves `app/fixtures/mock_recipe_card.json` through the same recipe-card save path.
 
 ## Production Defaults
@@ -45,10 +45,10 @@ The worker may extract safe metadata, create temporary server-side media files f
 - `GEMINI_PRIMARY_MODEL=gemini-3.1-flash-lite`
 - `YOUTUBE_AI_INPUT_MODE=gemini_url`
 - `YOUTUBE_DIRECT_GEMINI_ENABLED=true`
-- `MEDIA_RESOLVER_MODE=legacy`
-- `EXTERNAL_MEDIA_RESOLVER_AUDIENCE=disabled`
-- `INSTAGRAM_RESOLVER_CHAIN=[]`, `TIKTOK_RESOLVER_CHAIN=[]`
-- `COOKIE_MEDIA_FALLBACK_ENABLED=false`
+- `MEDIA_RESOLVER_MODE=hybrid`
+- `EXTERNAL_MEDIA_RESOLVER_AUDIENCE=all_authorized_ai`
+- `INSTAGRAM_RESOLVER_CHAIN=[rapidapi_instagram_unified_v1]`, `TIKTOK_RESOLVER_CHAIN=[]`
+- `COOKIE_MEDIA_FALLBACK_ENABLED=true`
 - `ENABLE_UNIFIED_YTDLP_STREAM_EXTRACTOR=true`
 - `MEDIA_EXTRACT_OUTPUT_MODE=temp_file`
 - `PREFERRED_VIDEO_SIZE_MB=36`
@@ -58,11 +58,10 @@ The worker may extract safe metadata, create temporary server-side media files f
 - `LOCAL_BRIEF_PARSER_ENABLED=false`
 - `STORE_RAW_MEDIA=false`
 
-Development uses `MEDIA_RESOLVER_MODE=external`, audience
-`all_authorized_ai`, Instagram adapter `rapidapi_instagram_reels13`, and TikTok
-adapter `akng_tiktok`. Provider credentials stay only in Render secrets. A
-production canary must first switch to a selected-test-user audience; do not
-copy development credentials to production.
+Development uses `MEDIA_RESOLVER_MODE=hybrid`, audience
+`all_authorized_ai`, Instagram adapter `rapidapi_instagram_unified_v1`, and
+TikTok adapter `akng_tiktok`. Provider credentials stay only in Render secrets
+through `INSTAGRAM_RAPIDAPI_KEY`.
 
 Runtime config selection uses Render's existing branch metadata when `APP_ENV`
 is absent: `develop` loads `config/worker.development.json`, and `main` loads
