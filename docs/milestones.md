@@ -67,9 +67,10 @@
 | 63 | M23.W10A-CFG Queue-liveness configuration alignment | Done locally | Canonical JSON defaults, sparse overlay inheritance, optional env overrides, Pydantic bounds, and safe health reporting for W10A settings |
 | 64 | M23.W10C Explicit source/recipe duration semantics | Done locally | 180-second JSON source limit, bounded duration errors, explicit recipe durations, legacy mapping repair, and authoritative duration retry |
 | 65 | M23.W10F Restore Instagram Unified v1 Provider Routing | Done locally | Unified v1 preferred in development and production, probe-driven split audio, and controlled Instagram-only yt-dlp fallback |
-| 66 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
-| 67 | M15 Auth + Account Linking | Later | Email/Google auth |
-| 68 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
+| 66 | M23.W10G Repair Gemini fallback local validation | Done locally | Convert the canonical nullable JSON Schema for Gemini 2.5 response_schema while preserving Gemini 3 thinking and existing fallback/quota behavior |
+| 67 | M14G-4R2 Social End-to-End Test | Blocked | Full TikTok/Instagram/Facebook job tests |
+| 68 | M15 Auth + Account Linking | Later | Email/Google auth |
+| 69 | M16 RevenueCat Paywall | Later | Paid AI features after free credits |
 
 ## Current Next Action
 

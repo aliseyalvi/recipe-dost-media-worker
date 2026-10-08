@@ -1610,3 +1610,17 @@ git diff --check
 # passed: compile; 188 tests; pip check; 11-case replay; 7-case mixed batch;
 # diff check. Live mode also refused without owner credentials as designed.
 ```
+
+## M23.W10G Gemini fallback validation repair
+
+```bash
+PATH="$PWD/.venv/bin:$PATH" python -m unittest \
+  tests.test_gemini_reliability tests.test_queue_gemini_invocation -v
+# passed: 18 tests; primary/fallback configuration and pinned SDK request
+# transformation covered with offline provider mocks
+
+PATH="$PWD/.venv/bin:$PATH" python -m compileall app
+# passed
+```
+
+No live Gemini, Supabase, resolver, queue, deployment, or provider call was made.
