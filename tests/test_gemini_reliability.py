@@ -100,6 +100,47 @@ class GeminiCapabilityTests(unittest.TestCase):
         self.assertIn("response_schema", fallback)
         self.assertNotIn("thinking_config", fallback)
 
+    def test_fallback_schema_survives_pinned_sdk_request_transformation(self) -> None:
+        from google import genai
+        from google.genai import models, types
+        from app.queue_worker import CANONICAL_RECIPE_SCHEMA
+
+        primary = build_model_generation_config(
+            model="gemini-3.1-flash-lite",
+            response_schema=CANONICAL_RECIPE_SCHEMA,
+            structured_output_enabled=True,
+            thinking_level="high",
+            max_output_tokens=12_000,
+            temperature=0.1,
+        )
+        fallback = build_model_generation_config(
+            model="gemini-2.5-flash",
+            response_schema=CANONICAL_RECIPE_SCHEMA,
+            structured_output_enabled=True,
+            thinking_level="high",
+            max_output_tokens=12_000,
+            temperature=0.1,
+        )
+        client = genai.Client(api_key="offline-request-shape-validation")
+        try:
+            for model, config in (
+                ("gemini-3.1-flash-lite", primary),
+                ("gemini-2.5-flash", fallback),
+            ):
+                parameters = types._GenerateContentParameters(
+                    model=model,
+                    contents=["offline fixture"],
+                    config=config,
+                )
+                models._GenerateContentParameters_to_mldev(
+                    client._api_client,
+                    parameters,
+                    None,
+                    parameters,
+                )
+        finally:
+            client.close()
+
     def test_unknown_model_rejected_before_request(self) -> None:
         with self.assertRaises(GeminiRequestConfigurationError):
             build_model_generation_config(

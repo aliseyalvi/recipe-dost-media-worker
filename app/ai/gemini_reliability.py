@@ -177,7 +177,11 @@ def build_model_generation_config(
                 raise GeminiRequestConfigurationError(
                     "Configured model does not support JSON schema."
                 )
-            config[capabilities.schema_field] = response_schema
+            config[capabilities.schema_field] = (
+                response_schema
+                if capabilities.schema_field == "response_json_schema"
+                else google_response_schema(response_schema)
+            )
     if capabilities.thinking_mode == "level" and thinking_level:
         normalized_level = str(thinking_level).strip().lower()
         if normalized_level not in {"minimal", "low", "medium", "high"}:
@@ -186,6 +190,46 @@ def build_model_generation_config(
     # Gemini 2.5 uses a model-specific thinking budget rather than the Gemini 3
     # thinking-level contract. Omit it here and retain the model default.
     return config
+
+
+def google_response_schema(schema: dict[str, object]) -> dict[str, object]:
+    """Convert JSON Schema nullable unions to the Gemini 2.5 Schema dialect."""
+
+    def convert(value: object) -> object:
+        if isinstance(value, list):
+            return [convert(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        converted: dict[str, object] = {}
+        for key, item in value.items():
+            if key == "type" and isinstance(item, list):
+                non_null = [
+                    str(candidate)
+                    for candidate in item
+                    if str(candidate).lower() != "null"
+                ]
+                if not non_null:
+                    raise GeminiRequestConfigurationError(
+                        "Gemini response schema has an unsupported type union."
+                    )
+                if len(non_null) == 1:
+                    converted[key] = non_null[0]
+                else:
+                    converted["anyOf"] = [
+                        {"type": candidate} for candidate in non_null
+                    ]
+                if len(non_null) != len(item):
+                    converted["nullable"] = True
+                continue
+            converted[key] = convert(item)
+        return converted
+
+    converted = convert(schema)
+    if not isinstance(converted, dict):
+        raise GeminiRequestConfigurationError(
+            "Gemini response schema must be an object."
+        )
+    return converted
 
 
 def validate_generation_config(config: dict[str, object]) -> None:

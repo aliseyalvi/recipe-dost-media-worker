@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 from google.genai import types
+from google.genai.errors import ServerError
 
 from app import main
 from app.config import Settings
@@ -190,6 +191,45 @@ class QueueGeminiInvocationTests(unittest.TestCase):
         self.assertEqual(client.models.generate_content.call_count, 2)
         repository.count_job_gemini_calls.assert_not_called()
         repository.count_daily_gemini_calls.assert_not_called()
+
+    def test_retryable_primary_503_uses_model_compatible_fallback_config(self) -> None:
+        repository = OfflineRepository()
+        client = MagicMock()
+        client.models.generate_content.side_effect = [
+            ServerError(503, {"error": {"status": "UNAVAILABLE"}}),
+            fixture_response(json.dumps(canonical_recipe(), ensure_ascii=False)),
+        ]
+
+        result, model, _repair_used = self.run_queue_extraction(
+            repository=repository,
+            client=client,
+        )
+
+        self.assertEqual(result.recipe_title_en, "Fixture Curry")
+        self.assertEqual(model, "gemini-2.5-flash")
+        self.assertEqual(client.models.generate_content.call_count, 2)
+        primary_config = client.models.generate_content.call_args_list[0].kwargs[
+            "config"
+        ]
+        fallback_config = client.models.generate_content.call_args_list[1].kwargs[
+            "config"
+        ]
+        self.assertEqual(
+            primary_config["thinking_config"],
+            {"thinking_level": "high"},
+        )
+        self.assertEqual(
+            fallback_config["response_schema"]["properties"]["time"]["properties"][
+                "prep_minutes"
+            ]["type"],
+            "integer",
+        )
+        self.assertTrue(
+            fallback_config["response_schema"]["properties"]["time"]["properties"][
+                "prep_minutes"
+            ]["nullable"]
+        )
+        self.assertNotIn("thinking_config", fallback_config)
 
     def test_failed_primary_and_fallback_report_two_actual_attempts(self) -> None:
         repository = OfflineRepository()
